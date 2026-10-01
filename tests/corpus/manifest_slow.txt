@@ -1,0 +1,2 @@
+# Slow corpus programs (label slow); same format as manifest.txt
+beer99 ../programs/beer99.mal - - halt 13802606 11459 a759597138f098c09a80d0474e83a0b99ea57f3b22821375361c7e913fb1968a

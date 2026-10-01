@@ -11,10 +11,13 @@ FetchContent_MakeAvailable(doctest)
 list(APPEND CMAKE_MODULE_PATH "${doctest_SOURCE_DIR}/scripts/cmake")
 include(doctest)
 
-# malm_add_test(NAME <name> LABEL <fast|slow> SOURCES <files...> [LIBS <targets...>])
-# Builds one executable (with the shared doctest main TU) and registers its test cases.
+# malm_add_test(NAME <name> LABEL <fast|slow> SOURCES <files...> [LIBS <targets...>] [PREFIX <text>]
+#                  [TIMEOUT <seconds>])
+# Builds one executable (with the shared doctest main TU) and registers its test cases. PREFIX is
+# prepended to the ctest names; needed when two executables share test case names (one source built
+# twice with different sizes and labels). TIMEOUT sets the ctest timeout of every test case.
 function(malm_add_test)
-    cmake_parse_arguments(ARG "" "NAME;LABEL" "SOURCES;LIBS" ${ARGN})
+    cmake_parse_arguments(ARG "" "NAME;LABEL;PREFIX;TIMEOUT" "SOURCES;LIBS" ${ARGN})
     if(NOT ARG_NAME OR NOT ARG_SOURCES)
         message(FATAL_ERROR "malm_add_test: NAME and SOURCES are required")
     endif()
@@ -23,5 +26,9 @@ function(malm_add_test)
     endif()
     add_executable(${ARG_NAME} "${PROJECT_SOURCE_DIR}/tests/doctest_main.cpp" ${ARG_SOURCES})
     target_link_libraries(${ARG_NAME} PRIVATE malm_warnings doctest::doctest ${ARG_LIBS})
-    doctest_discover_tests(${ARG_NAME} PROPERTIES LABELS ${ARG_LABEL})
+    set(props LABELS ${ARG_LABEL})
+    if(ARG_TIMEOUT)
+        list(APPEND props TIMEOUT ${ARG_TIMEOUT})
+    endif()
+    doctest_discover_tests(${ARG_NAME} TEST_PREFIX "${ARG_PREFIX}" PROPERTIES ${props})
 endfunction()

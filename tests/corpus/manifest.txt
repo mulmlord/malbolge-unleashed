@@ -1,0 +1,14 @@
+# name program stdin step_cap outcome steps out_len out_sha256
+hello_esolangs ../programs/hello.mal - - halt 45 13 f8c3bf62a9aa3e6fc1619c250e48abe7519373d3edf41be62eb5dc45199af2ef
+hello_stringout stringout_hello.mal - - halt 144 13 03ba204e50d126e4674c005e04d82e84c21366780af1f43bd54a37816b6ab340
+text_stringout stringout_malbolge.mal - - halt 355 26 2a4817faed117d37866eda4696e1ec911788ee9b7dc468de579240a34f4f4044
+nop nop.mal - - halt 2 0 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+cat_input ../programs/cat_nostop.mal cat.in 3000 limit - 66 945a845b3be994206d4a7eb3e917484795576022070008520020d2a2958cefd5
+cat_empty ../programs/cat_nostop.mal - 1000 limit - 22 f89bf71be5119b019b0ea531ef2d225bf053febc10896d42cc2d413470432326
+truth_0 truth_machine.mal truth_0.in - halt 136 1 5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9
+truth_1 truth_machine.mal truth_1.in 20000 limit - 3311 d5714244955fdf35d9c65d96e72a1613885ebd44182a7ac6c11145e147be8432
+encrypt_fault encrypt_fault.mal echo_x.in - E_ENCRYPT@3 - 1 2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881
+exec_fault exec_fault.mal echo_x.in - E_EXEC@4 - 1 2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881
+cat_typo cat_typo.mal - - E_LOAD@65 - 0 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+loader_bug loader_bug.mal - - E_LOAD@10 - 0 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+malbolge20_hello20 malbolge20_hello20.mb - - E_LOAD@59049 - 0 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
