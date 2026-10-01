@@ -1,4 +1,5 @@
-Test programs for `malm run` (unleashed mode, plain text loader format).
+Test programs for `malm run` (plain text loader format; unleashed mode, and classic mode with
+`--classic`).
 
 halt2.mal
     Hand-written 2-cell program "jv" (MovD, Hlt); loader text "(P". Public domain / own work.
@@ -14,15 +15,24 @@ cat_nostop.mal
     The classic Malbolge cat that does not stop on EOF (in unleashed mode it copies stdin and then
     writes byte 0xA8 forever: A = ...222 and Out writes A mod 256 = 168).
     Source: https://esolangs.org/wiki/Malbolge ("Cat" section). Esolangs wiki content is CC0.
+    In classic mode (--classic) EOF is 59048, so it writes byte 0xA8 (168) forever as well.
 
 hello.mal
-    "Hello, world." in classic Malbolge; it halts in unleashed mode after 45 steps with n = 10.
+    "Hello, world." in classic Malbolge; it halts in unleashed mode after 45 steps with n = 10,
+    and prints the same text in classic mode (--classic).
     Source: https://esolangs.org/wiki/Hello_world_program_in_esoteric_languages_(H-M)
     (Malbolge section). Esolangs wiki content is CC0.
 
-beer99_width.mal
+beer99.mal
     Hisashi Iizawa et al.'s 99 bottles of beer in classic Malbolge, byte-identical to the
     <pre> block of the Malbolge section on https://esolangs.org/wiki/99_bottles_of_beer
     (esolangs wiki content is CC0). In unleashed mode it ratchets n up and fails with E_WIDTH at
     step 4258 with n = 39 and no output (spec 2.2, non-normative note); used as the natural
-    E_WIDTH test program.
+    E_WIDTH test program. In classic mode (--classic) it prints the whole song (11459 bytes) and
+    halts after 13802606 steps.
+
+beer99.expected
+    The 11459-byte output of beer99.mal in classic mode (output of the CC0 program
+    beer99.mal; lyrics traditional).
+    Generated with Ben Olmstead's reference interpreter malbolge.c (public domain) and
+    cross-checked byte-for-byte against the executable model of docs/spec.md section 8.

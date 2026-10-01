@@ -26,7 +26,7 @@ inline constexpr std::size_t kUnleashedMaxCells = static_cast<std::size_t>(
 using LoadResult = Result<std::vector<std::uint8_t>, LoadError>;
 
 // Returns the cells 0..L-1 (each in 33..126) or E_LOAD. `max_cells` is the largest accepted L;
-// classic mode (#7) passes 59049.
+// classic mode passes kClassicCells (59049).
 LoadResult load_text(std::span<const std::uint8_t> bytes,
                      std::size_t max_cells = kUnleashedMaxCells);
 

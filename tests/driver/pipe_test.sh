@@ -15,10 +15,11 @@ halting_cat)
     test "$(cat "$tmp/status")" = 0 || exit 1
     ;;
 loop_cat)
-    # General (non-halting) cat loop: the input comes first, then 0xA8 forever; head closes the
-    # pipe after 5 bytes.
+    # General (non-halting) cat loop: the input comes first, then 0xA8 (0250) forever; head closes
+    # the pipe after 7 bytes.
     "$malm" run "$dir/cat_nostop.mal" < "$dir/cat5_input.bin" 2> /dev/null \
-        | head -c 5 | cmp - "$dir/cat5_expected.bin" || exit 1
+        | head -c 7 > "$tmp/out"
+    { cat "$dir/cat5_expected.bin"; printf '\250\250'; } | cmp - "$tmp/out" || exit 1
     ;;
 epipe)
     # Endless output into a closed pipe: E_IO (exit 1), never death by signal. SIGPIPE is reset
@@ -32,6 +33,18 @@ epipe)
 hello)
     out=$("$malm" run "$dir/hello.mal") || exit 1
     test "$out" = "Hello, world." || exit 1
+    ;;
+classic_beer99)
+    # 99 bottles in classic mode: the full song, byte-exact, exit status 0.
+    ( "$malm" run --classic "$dir/beer99.mal" < /dev/null; echo $? > "$tmp/status" ) \
+        | cmp - "$dir/beer99.expected" || exit 1
+    test "$(cat "$tmp/status")" = 0 || exit 1
+    ;;
+classic_loop_cat)
+    # The non-halting cat in classic mode: input, then byte 168 (0250; EOF 59048 mod 256) forever.
+    "$malm" run --classic "$dir/cat_nostop.mal" < "$dir/cat5_input.bin" 2> /dev/null \
+        | head -c 7 > "$tmp/out"
+    { cat "$dir/cat5_expected.bin"; printf '\250\250'; } | cmp - "$tmp/out" || exit 1
     ;;
 *)
     echo "unknown case $case_" >&2

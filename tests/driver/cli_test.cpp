@@ -5,11 +5,13 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <sstream>
 #include <string>
 #include <string_view>
 #include <vector>
 
+#include "core/tables.hpp"
 #include "driver/cli.hpp"
 
 namespace {
@@ -101,14 +103,14 @@ TEST_CASE("run: usage errors exit 2") {
          std::vector<std::vector<std::string_view>>{{"run"},
                                                     {"run", "--exit-a"},
                                                     {"run", "--bogus", "f"},
-                                                    {"run", "--classic", "f"},
+                                                    {"run", "--classic"},
                                                     {"run", "--trace", "f"},
                                                     {"run", "--stats", "f"},
                                                     {"run", "a", "b"}}) {
         const Result r = run(args);
         CHECK(r.code == 2);
         CHECK(r.out.empty());
-        CHECK(r.err.find("usage: malm run <file> [--exit-a]") != std::string::npos);
+        CHECK(r.err.find("usage: malm run [--classic] [--exit-a] <file>") != std::string::npos);
     }
 }
 
@@ -220,10 +222,62 @@ TEST_CASE("run: E_ENCRYPT diagnostic and exit 1") {
 }
 
 TEST_CASE("run: E_WIDTH from a real program (n ratchets to 39), diagnostic and exit 1") {
-    const Result r = run({"run", std::string(MALM_PROGRAMS_DIR) + "/beer99_width.mal"});
+    const Result r = run({"run", std::string(MALM_PROGRAMS_DIR) + "/beer99.mal"});
     CHECK(r.code == 1);
     CHECK(r.out.empty());
     CHECK(r.err.starts_with("malm: E_WIDTH at step 4258: C="));
     CHECK(r.err.find(" n=39") != std::string::npos);
     CHECK(r.err.find("(overflow)") == std::string::npos);
+}
+
+TEST_CASE("run --classic: hello world, option order, --exit-a") {
+    const std::string dir = MALM_PROGRAMS_DIR;
+    Result r = run({"run", "--classic", dir + "/hello.mal"});
+    CHECK(r.code == 0);
+    CHECK(r.out == "Hello, world.");
+    CHECK(r.err.empty());
+
+    r = run({"run", dir + "/hello.mal", "--classic"});
+    CHECK(r.code == 0);
+    CHECK(r.out == "Hello, world.");
+
+    const TempFile f("u'<$_?\"J"); // classic trace program: outputs byte 222, A = 39390 at halt
+    r = run({"run", "--classic", "--exit-a", f.str()}, "Q");
+    CHECK(r.code == 39390 % 256);
+    CHECK(r.out == "\xde");
+    r = run({"run", "--classic", f.str()}, "Q");
+    CHECK(r.code == 0);
+}
+
+TEST_CASE("run --classic: beer99 prints the whole song and halts") {
+    const std::string dir = MALM_PROGRAMS_DIR;
+    std::ifstream exp(dir + "/beer99.expected", std::ios::binary);
+    const std::string expected((std::istreambuf_iterator<char>(exp)), {});
+    REQUIRE(expected.size() == 11459);
+    const Result r = run({"run", "--classic", dir + "/beer99.mal"});
+    CHECK(r.code == 0);
+    CHECK(r.out == expected);
+    CHECK(r.err.empty());
+}
+
+TEST_CASE("run --classic: E_LOAD for more than 59049 cells, E_EXEC diagnostic") {
+    std::string text;
+    for (std::size_t p = 0; p < 59050; ++p) {
+        for (int code = 33; code <= 126; ++code) {
+            if (malm::core::kXlat1[(static_cast<std::size_t>(code - 33) + p) % 94] == 'o') {
+                text.push_back(static_cast<char>(code));
+                break;
+            }
+        }
+    }
+    const TempFile big(text);
+    Result r = run({"run", "--classic", big.str()});
+    CHECK(r.code == 1);
+    CHECK(r.out.empty());
+    CHECK(r.err.starts_with("malm: E_LOAD at byte 59049:"));
+
+    const TempFile f("DCB");
+    r = run({"run", "--classic", f.str()});
+    CHECK(r.code == 1);
+    CHECK(r.err == "malm: E_EXEC at step 4: C=0t10 D=0t10 A=0t0 n=10\n");
 }

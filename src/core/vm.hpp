@@ -1,4 +1,6 @@
-// The unleashed-mode virtual machine: step loop, I/O interface and errors (spec 5-7).
+// The virtual machine: step loop, I/O interface and errors (spec 5-7). One step loop serves both
+// modes: BasicVm<M> is parameterised by a machine policy M (word type, memory, operations; see
+// machine.hpp for unleashed mode and classic.hpp for classic mode, spec 8).
 #pragma once
 
 #include <cstdint>
@@ -7,7 +9,8 @@
 #include <string>
 #include <string_view>
 
-#include "core/memory.hpp"
+#include "core/classic.hpp"
+#include "core/machine.hpp"
 #include "core/value.hpp"
 
 namespace malm::core {
@@ -60,32 +63,37 @@ struct RunResult {
     std::optional<Fault> fault; // set iff kind == Fault
 };
 
-// Register file; used by Vm::set_registers.
-struct Registers {
-    Value a;
-    Value c;
-    Value d;
+// Register file; used by BasicVm::set_registers.
+template <class W> struct BasicRegisters {
+    W a;
+    W c;
+    W d;
 };
+using Registers = BasicRegisters<Value>;
+using ClassicRegisters = BasicRegisters<ClassicWord>;
 
-class Vm {
+template <class M> class BasicVm {
   public:
-    // Preconditions: those of Memory (cells from load_text).
-    explicit Vm(std::span<const std::uint8_t> cells) : mem_(cells) {}
+    using Word = typename M::Word;
 
-    Value a() const noexcept { return a_; }
-    Value c() const noexcept { return c_; }
-    Value d() const noexcept { return d_; }
-    unsigned n() const noexcept { return mem_.n(); }
+    // Preconditions: those of the machine's memory (cells from load_text).
+    explicit BasicVm(std::span<const std::uint8_t> cells) : m_(cells) {}
+
+    Word a() const noexcept { return a_; }
+    Word c() const noexcept { return c_; }
+    Word d() const noexcept { return d_; }
+    unsigned n() const noexcept { return m_.n(); }
     std::uint64_t steps() const noexcept { return steps_; }
     bool halted() const noexcept { return halted_; }
-    const Memory& memory() const noexcept { return mem_; }
+    const auto& memory() const noexcept { return m_.memory(); }
 
-    // For tests and tools only: overwrites A, C and D. It does not re-establish the invariants
-    // of spec 2.2 (width of C and D below n), so the caller owns the consequences.
-    void set_registers(const Registers& r) noexcept {
-        a_ = r.a;
-        c_ = r.c;
-        d_ = r.d;
+    // For tests and tools only: overwrites A, C and D. Classic words are reduced mod 59049. It does
+    // not re-establish the invariants of spec 2.2 (width of C and D below n), so the caller owns
+    // the consequences.
+    void set_registers(const BasicRegisters<Word>& r) noexcept {
+        a_ = M::normalize(r.a);
+        c_ = M::normalize(r.c);
+        d_ = M::normalize(r.d);
     }
 
     // One step (spec 5). On Halted or Faulted the VM flushes `io`; a flush failure on halt turns
@@ -99,22 +107,34 @@ class Vm {
   private:
     // The inner loop: no flush, no result objects. Faults are recorded in fault_.
     Status step_inner(Io& io);
-    Status fail(Error e, Value a, Value c, Value d, bool overflow = false) noexcept;
+    Status fail(Error e, Word a, Word c, Word d, bool overflow = false) noexcept;
     // Flushes after the loop stopped with `s`; returns the final status.
     Status finish(Io& io, Status s);
 
-    Memory mem_;
-    Value a_;
-    Value c_;
-    Value d_;
+    M m_;
+    Word a_{};
+    Word c_{};
+    Word d_{};
     std::uint64_t steps_ = 0;
     bool halted_ = false;
     bool eof_ = false;
     std::optional<Fault> fault_;
 };
 
+// The step loop is defined once in vm.cpp and instantiated for both machines.
+extern template class BasicVm<UnleashedMachine>;
+extern template class BasicVm<ClassicMachine>;
+
+using Vm = BasicVm<UnleashedMachine>;
+using ClassicVm = BasicVm<ClassicMachine>;
+
 // Process exit status: a halt exits 0, or A mod 256 when `exit_a` is set; a fault exits 1. A
 // step-limit stop has no spec status; it reports 1.
-int exit_status(const RunResult& r, const Vm& vm, bool exit_a) noexcept;
+template <class M> int exit_status(const RunResult& r, const BasicVm<M>& vm, bool exit_a) noexcept {
+    if (r.kind == RunResult::Kind::Halted) {
+        return exit_a ? static_cast<int>(M::mod256(vm.a())) : 0;
+    }
+    return 1;
+}
 
 } // namespace malm::core

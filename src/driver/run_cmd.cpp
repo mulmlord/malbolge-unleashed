@@ -18,7 +18,19 @@
 namespace malm {
 namespace {
 
-constexpr std::string_view kUsage = "usage: malm run <file> [--exit-a]\n";
+constexpr std::string_view kUsage = "usage: malm run [--classic] [--exit-a] <file>\n";
+
+template <class VmT>
+int run_vm(std::span<const std::uint8_t> cells, std::istream& in, std::ostream& out,
+           std::ostream& err, bool exit_a) {
+    VmT vm(cells);
+    StreamIo io(in, out);
+    const core::RunResult r = vm.run(io);
+    if (r.kind == core::RunResult::Kind::Fault) {
+        err << "malm: " << core::format_fault(*r.fault) << '\n';
+    }
+    return core::exit_status(r, vm, exit_a);
+}
 
 } // namespace
 
@@ -26,12 +38,15 @@ int run_command(std::span<const std::string_view> args, std::istream& in, std::o
                 std::ostream& err) {
     std::string_view path;
     bool exit_a = false;
+    bool classic = false;
     bool options_done = false;
     for (const std::string_view arg : args) {
         if (!options_done && arg == "--") {
             options_done = true;
         } else if (!options_done && arg == "--exit-a") {
             exit_a = true;
+        } else if (!options_done && arg == "--classic") {
+            classic = true;
         } else if ((!options_done && arg.starts_with('-')) || !path.empty()) {
             err << "malm run: unexpected argument '" << arg << "'\n" << kUsage;
             return 2;
@@ -73,20 +88,16 @@ int run_command(std::span<const std::string_view> args, std::istream& in, std::o
         }
     }
 
-    const auto cells = core::load_text(bytes);
+    const auto cells =
+        core::load_text(bytes, classic ? core::kClassicCells : core::kUnleashedMaxCells);
     if (!cells) {
         err << "malm: E_LOAD at byte " << cells.error().offset << ": " << cells.error().reason
             << '\n';
         return 1;
     }
 
-    core::Vm vm(*cells);
-    StreamIo io(in, out);
-    const core::RunResult r = vm.run(io);
-    if (r.kind == core::RunResult::Kind::Fault) {
-        err << "malm: " << core::format_fault(*r.fault) << '\n';
-    }
-    return core::exit_status(r, vm, exit_a);
+    return classic ? run_vm<core::ClassicVm>(*cells, in, out, err, exit_a)
+                   : run_vm<core::Vm>(*cells, in, out, err, exit_a);
 }
 
 } // namespace malm
