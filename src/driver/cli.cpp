@@ -2,14 +2,16 @@
 
 #include <algorithm>
 #include <array>
+#include <istream>
 #include <ostream>
 
+#include "driver/run_cmd.hpp"
 #include "version.hpp"
 
 namespace malm {
 namespace {
 
-using Handler = int (*)(std::span<const std::string_view> args, std::ostream& out,
+using Handler = int (*)(std::span<const std::string_view> args, std::istream& in, std::ostream& out,
                         std::ostream& err);
 
 struct Command {
@@ -20,7 +22,7 @@ struct Command {
 
 // Single table of subcommands; later tickets plug in handlers here.
 constexpr auto kCommands = std::to_array<Command>({
-    {"run", "Run a .malm program", nullptr},
+    {"run", "Run a .malm program", run_command},
     {"asm", "Assemble a low-level .mua file to .malm", nullptr},
     {"hla", "Compile a high-level .mhl file to .malm", nullptr},
     {"disasm", "Disassemble a .malm or Malbolge text file", nullptr},
@@ -48,7 +50,8 @@ void print_usage(std::ostream& os) {
 
 } // namespace
 
-int run_cli(std::span<const std::string_view> args, std::ostream& out, std::ostream& err) {
+int run_cli(std::span<const std::string_view> args, std::istream& in, std::ostream& out,
+            std::ostream& err) {
     if (args.empty()) {
         print_usage(err);
         return 2;
@@ -68,7 +71,7 @@ int run_cli(std::span<const std::string_view> args, std::ostream& out, std::ostr
                 err << "malm " << cmd << ": not implemented\n";
                 return 2;
             }
-            return c.handler(args.subspan(1), out, err);
+            return c.handler(args.subspan(1), in, out, err);
         }
     }
     err << "malm: unknown command '" << cmd << "'\n"
