@@ -14,7 +14,7 @@ jobs:
         include:
           - { name: gcc-14, cc: gcc-14, cxx: g++-14 }
           - { name: clang-18, cc: clang-18, cxx: clang++-18 }
-    name: debug (${{ matrix.name }})
+    name: debug + release (${{ matrix.name }})
     env:
       CC: ${{ matrix.cc }}
       CXX: ${{ matrix.cxx }}
@@ -28,3 +28,9 @@ jobs:
         run: cmake --build --preset debug
       - name: Test
         run: ctest --preset debug -L fast --no-tests=error
+      - name: Configure (release)
+        run: cmake --preset release
+      - name: Build (release)
+        run: cmake --build --preset release
+      - name: Test (release)
+        run: ctest --preset release -L fast --no-tests=error
