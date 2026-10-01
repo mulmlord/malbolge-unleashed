@@ -1,0 +1,3 @@
+#pragma once
+
+#define MALM_VERSION "@PROJECT_VERSION@"
