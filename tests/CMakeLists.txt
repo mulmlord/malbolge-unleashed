@@ -14,10 +14,17 @@ malm_add_test(NAME loader_test LABEL fast SOURCES core/loader_test.cpp LIBS malm
 malm_add_test(NAME classic_test LABEL fast SOURCES core/classic_test.cpp LIBS malm_core)
 malm_add_test(NAME vm_test LABEL fast SOURCES core/vm_test.cpp LIBS malm_core)
 
+malm_add_test(NAME container_test LABEL fast SOURCES container/container_test.cpp
+              LIBS malm_container libzstd_static TIMEOUT 120)
+target_compile_definitions(container_test PRIVATE
+    MALM_PROGRAMS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/programs"
+    MALM_CORPUS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/corpus")
+
 # CLI tests against the committed programs (see tests/programs/SOURCES.txt).
 target_compile_definitions(cli_test PRIVATE MALM_PROGRAMS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/programs")
 
-foreach(case halting_cat loop_cat epipe hello classic_beer99 classic_loop_cat)
+foreach(case halting_cat loop_cat epipe hello classic_beer99 classic_loop_cat
+             malm_hello malm_beer99 malm_loop_cat malm_epipe malm_text_pipe)
     add_test(NAME pipe_${case}
         COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/driver/pipe_test.sh
                 $<TARGET_FILE:malm> ${CMAKE_CURRENT_SOURCE_DIR}/programs ${case})

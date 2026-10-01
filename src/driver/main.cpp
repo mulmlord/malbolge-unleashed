@@ -1,5 +1,6 @@
 #include <csignal>
 #include <iostream>
+#include <new>
 #include <string_view>
 #include <vector>
 
@@ -14,5 +15,10 @@ int main(int argc, char** argv) {
     std::signal(SIGPIPE, SIG_IGN);
 #endif
     std::vector<std::string_view> args(argc > 0 ? argv + 1 : argv, argv + argc);
-    return malm::run_cli(args, std::cin, std::cout, std::cerr);
+    try {
+        return malm::run_cli(args, std::cin, std::cout, std::cerr);
+    } catch (const std::bad_alloc&) {
+        std::cerr << "malm: out of memory\n";
+        return 1;
+    }
 }
