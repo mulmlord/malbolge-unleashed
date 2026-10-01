@@ -7,3 +7,5 @@ malm_add_test(NAME cli_test LABEL fast
 malm_add_test(NAME value_test LABEL fast
     SOURCES core/value_test.cpp
     LIBS malm_core)
+malm_add_test(NAME tables_test LABEL fast SOURCES core/tables_test.cpp LIBS malm_core)
+malm_add_test(NAME ops_test LABEL fast SOURCES core/ops_test.cpp LIBS malm_core)
