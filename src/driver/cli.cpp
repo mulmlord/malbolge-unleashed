@@ -5,6 +5,7 @@
 #include <istream>
 #include <ostream>
 
+#include "driver/export_cmd.hpp"
 #include "driver/run_cmd.hpp"
 #include "version.hpp"
 
@@ -22,13 +23,13 @@ struct Command {
 
 // Single table of subcommands; later tickets plug in handlers here.
 constexpr auto kCommands = std::to_array<Command>({
-    {"run", "Run a .malm program", run_command},
+    {"run", "Run a .malm or Malbolge text program", run_command},
     {"asm", "Assemble a low-level .mua file to .malm", nullptr},
     {"hla", "Compile a high-level .mhl file to .malm", nullptr},
     {"disasm", "Disassemble a .malm or Malbolge text file", nullptr},
     {"build", "Build a C/C++/Rust/Zig source to .malm or an executable", nullptr},
     {"pack", "Pack a .malm into a native executable", nullptr},
-    {"export", "Export a .malm as plain Malbolge text", nullptr},
+    {"export", "Convert between .malm and plain Malbolge text (--text | --malm)", export_command},
 });
 
 void print_usage(std::ostream& os) {

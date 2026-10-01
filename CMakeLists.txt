@@ -32,6 +32,7 @@ if(MALM_SANITIZE)
 endif()
 
 add_subdirectory(src/core)
+add_subdirectory(src/container)
 add_subdirectory(src/driver)
 
 if(MALM_BUILD_TESTS)

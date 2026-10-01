@@ -21,6 +21,8 @@ template <class T, class E> class Result {
     T& operator*() & { return value(); }
     const T& operator*() const& { return value(); }
     T&& operator*() && { return std::move(*this).value(); }
+    T* operator->() { return &value(); }
+    const T* operator->() const { return &value(); }
 
     E& error() & { return std::get<1>(v_); }
     const E& error() const& { return std::get<1>(v_); }

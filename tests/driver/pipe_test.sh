@@ -46,6 +46,39 @@ classic_loop_cat)
         | head -c 7 > "$tmp/out"
     { cat "$dir/cat5_expected.bin"; printf '\250\250'; } | cmp - "$tmp/out" || exit 1
     ;;
+malm_hello)
+    # A .malm run through a real pipe and the same program as text give identical output.
+    "$malm" export --malm "$dir/hello.mal" -o "$tmp/hello.malm" || exit 1
+    out=$("$malm" run "$tmp/hello.malm") || exit 1
+    test "$out" = "Hello, world." || exit 1
+    ;;
+malm_beer99)
+    # Classic .malm: the header's mode applies without --classic; exit status 0.
+    "$malm" export --malm --classic "$dir/beer99.mal" -o "$tmp/beer99.malm" || exit 1
+    ( "$malm" run "$tmp/beer99.malm" < /dev/null; echo $? > "$tmp/status" ) \
+        | cmp - "$dir/beer99.expected" || exit 1
+    test "$(cat "$tmp/status")" = 0 || exit 1
+    ;;
+malm_loop_cat)
+    # Non-halting cat from a .malm, closed by head; also the export -o - pipe into a file.
+    "$malm" export --malm "$dir/cat_nostop.mal" -o - > "$tmp/cat.malm" || exit 1
+    "$malm" run "$tmp/cat.malm" < "$dir/cat5_input.bin" 2> /dev/null | head -c 7 > "$tmp/out"
+    { cat "$dir/cat5_expected.bin"; printf '\250\250'; } | cmp - "$tmp/out" || exit 1
+    ;;
+malm_epipe)
+    # E_IO (exit 1, no signal death) also when the program comes from a .malm.
+    "$malm" export --malm "$dir/cat_nostop.mal" -o "$tmp/cat.malm" || exit 1
+    ( env --default-signal=PIPE "$malm" run "$tmp/cat.malm" < /dev/null 2> "$tmp/err"
+      echo $? > "$tmp/status" ) | head -c 1 > /dev/null
+    test "$(cat "$tmp/status")" = 1 || exit 1
+    grep -q 'E_IO' "$tmp/err" || exit 1
+    ;;
+malm_text_pipe)
+    # export --text to a pipe and back: byte-identical to the original (whitespace stripped).
+    "$malm" export --malm "$dir/beer99.mal" -o "$tmp/b.malm" || exit 1
+    "$malm" export --text "$tmp/b.malm" -o - | tr -d ' \t\n\r' > "$tmp/b.txt" || exit 1
+    tr -d ' \t\n\r' < "$dir/beer99.mal" | cmp - "$tmp/b.txt" || exit 1
+    ;;
 *)
     echo "unknown case $case_" >&2
     exit 2

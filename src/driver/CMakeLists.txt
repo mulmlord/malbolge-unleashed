@@ -1,10 +1,10 @@
 configure_file(version.hpp.in "${CMAKE_CURRENT_BINARY_DIR}/generated/version.hpp" @ONLY)
 
-add_library(malm_driver cli.cpp run_cmd.cpp)
+add_library(malm_driver cli.cpp run_cmd.cpp export_cmd.cpp program_io.cpp)
 target_include_directories(malm_driver
     PUBLIC "${PROJECT_SOURCE_DIR}/src"
     PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
-target_link_libraries(malm_driver PUBLIC malm_core PRIVATE malm_warnings)
+target_link_libraries(malm_driver PUBLIC malm_core malm_container PRIVATE malm_warnings)
 
 add_executable(malm main.cpp)
 target_link_libraries(malm PRIVATE malm_driver malm_warnings)

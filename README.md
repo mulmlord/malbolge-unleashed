@@ -35,7 +35,7 @@ Binaries land in `build/<preset>/src/driver/malm`. CMake options: `MALM_WERROR`,
 | Path | Contents |
 |---|---|
 | `src/core` | values, tables, sparse memory, loader, run loop |
-| `src/container` | `.malm` format |
+| `src/container` | `.malm` format ([docs/malm-format.md](docs/malm-format.md)) |
 | `src/asm` | assembler and disassembler |
 | `src/hla` | high-level assembler |
 | `src/aot` | RV32IM ELF to HLA ahead-of-time translator |

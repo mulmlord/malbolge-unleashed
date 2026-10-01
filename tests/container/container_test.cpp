@@ -1,0 +1,637 @@
+#include <doctest/doctest.h>
+#include <sys/resource.h>
+#include <zstd.h>
+
+#include <algorithm>
+#include <cstdint>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <iterator>
+#include <random>
+#include <sstream>
+#include <string>
+#include <vector>
+
+#include "container/container.hpp"
+#include "core/loader.hpp"
+#include "core/tables.hpp"
+
+namespace {
+
+using namespace malm::container;
+namespace core = malm::core;
+using Bytes = std::vector<std::uint8_t>;
+
+Bytes read_file(const std::filesystem::path& p) {
+    std::ifstream f(p, std::ios::binary);
+    REQUIRE_MESSAGE(f.good(), "cannot open " << p);
+    return {std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>()};
+}
+
+// Random loadable program of `n` cells.
+Program random_program(std::mt19937_64& rng, std::size_t n, Mode mode = Mode::Unleashed) {
+    Program p;
+    p.mode = mode;
+    p.cells.reserve(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        p.cells.push_back(denormalize(i, static_cast<std::uint8_t>(rng() % 8)));
+    }
+    return p;
+}
+
+void put_u32(Bytes& b, std::size_t off, std::uint32_t v) {
+    for (std::size_t i = 0; i < 4; ++i) {
+        b[off + i] = static_cast<std::uint8_t>(v >> (8 * i));
+    }
+}
+void put_u64(Bytes& b, std::size_t off, std::uint64_t v) {
+    for (std::size_t i = 0; i < 8; ++i) {
+        b[off + i] = static_cast<std::uint8_t>(v >> (8 * i));
+    }
+}
+
+// Recomputes the CRC field from a codec-0 file's payload.
+void fix_crc(Bytes& b) {
+    put_u32(b, 12, crc32(std::span<const std::uint8_t>(b).subspan(kHeaderSize)));
+}
+
+std::string error_of(const Bytes& b) {
+    const auto r = read_malm(b);
+    REQUIRE_FALSE(r.has_value());
+    return r.error();
+}
+
+bool contains(const std::string& s, std::string_view sub) {
+    return s.find(sub) != std::string::npos;
+}
+
+Program small_program() {
+    std::mt19937_64 rng(1);
+    return random_program(rng, 11); // 33 bits: 5 bytes, 7 padding bits
+}
+
+} // namespace
+
+TEST_CASE("crc32 matches the IEEE check value") {
+    const std::string s = "123456789";
+    CHECK(crc32({reinterpret_cast<const std::uint8_t*>(s.data()), s.size()}) == 0xCBF43926u);
+    CHECK(crc32({}) == 0u);
+}
+
+TEST_CASE("normalization is a bijection at every position") {
+    for (std::size_t pos = 0; pos < 94; ++pos) {
+        std::array<bool, 8> seen{};
+        int loadable = 0;
+        for (std::uint32_t x = 33; x <= 126; ++x) {
+            const std::uint8_t s = normalize(pos, static_cast<std::uint8_t>(x));
+            CHECK(core::is_loadable(static_cast<std::uint32_t>(pos), x) == (s != kNoSymbol));
+            if (s == kNoSymbol) {
+                continue;
+            }
+            ++loadable;
+            REQUIRE(s < 8);
+            CHECK_FALSE(seen[s]);
+            seen[s] = true;
+            // The symbol is the instruction letter xlat1[(x - 33 + pos) % 94].
+            CHECK(kSymbolLetters[s] == core::kXlat1[(x - 33 + pos) % 94]);
+            CHECK(denormalize(pos, s) == x);
+        }
+        CHECK(loadable == 8);
+        CHECK(std::ranges::all_of(seen, [](bool b) { return b; }));
+        // And the other direction: every symbol denormalizes to a loadable cell that maps back.
+        for (std::uint8_t s = 0; s < 8; ++s) {
+            const std::uint8_t c = denormalize(pos, s);
+            CHECK(core::is_loadable(static_cast<std::uint32_t>(pos), c));
+            CHECK(normalize(pos, c) == s);
+        }
+    }
+    // Positions beyond 94 wrap.
+    CHECK(normalize(94 * 1000 + 5, 'x') == normalize(5, 'x'));
+    CHECK(denormalize(94 * 1000 + 5, 3) == denormalize(5, 3));
+}
+
+TEST_CASE("MALM is never a valid text program") {
+    CHECK_FALSE(core::is_loadable(0, 'M'));
+    const std::string m = "MALM";
+    CHECK_FALSE(is_malm(Bytes{}));
+    CHECK(is_malm({reinterpret_cast<const std::uint8_t*>(m.data()), m.size()}));
+}
+
+TEST_CASE("write_malm header layout") {
+    const Program p = small_program();
+    const Bytes b = write_malm(p, Codec::Packed);
+    REQUIRE(b.size() == kHeaderSize + 5);
+    CHECK(std::string(b.begin(), b.begin() + 4) == "MALM");
+    CHECK(b[4] == 1);
+    CHECK(b[5] == 0);
+    CHECK(b[6] == 0); // unleashed
+    CHECK(b[7] == 0);
+    CHECK(b[8] == 0); // packed
+    CHECK((b[9] | b[10] | b[11]) == 0);
+    CHECK(b[16] == 11);
+    CHECK(b[24] == 5);
+    CHECK(b[12] == (crc32(std::span<const std::uint8_t>(b).subspan(kHeaderSize)) & 0xff));
+
+    Program c = p;
+    c.mode = Mode::Classic;
+    c.exit_a = true;
+    const Bytes bc = write_malm(c, Codec::Zstd);
+    CHECK(bc[6] == 1);
+    CHECK(bc[7] == 1);
+    CHECK(bc[8] == 1);
+}
+
+TEST_CASE("packing is 3 bits per cell, LSB first") {
+    // Symbols 0..7 at cells 0..7: bits 000 001 010 011 100 101 110 111 from bit 0 upward.
+    Program p;
+    for (std::size_t i = 0; i < 8; ++i) {
+        p.cells.push_back(denormalize(i, static_cast<std::uint8_t>(i)));
+    }
+    const Bytes b = write_malm(p, Codec::Packed);
+    REQUIRE(b.size() == kHeaderSize + 3);
+    const std::uint32_t v =
+        0u | (1u << 3) | (2u << 6) | (3u << 9) | (4u << 12) | (5u << 15) | (6u << 18) | (7u << 21);
+    CHECK(b[kHeaderSize] == (v & 0xff));
+    CHECK(b[kHeaderSize + 1] == ((v >> 8) & 0xff));
+    CHECK(b[kHeaderSize + 2] == ((v >> 16) & 0xff));
+}
+
+TEST_CASE("round trip: random programs of many lengths, both codecs, both modes") {
+    std::mt19937_64 rng(42);
+    std::vector<std::size_t> lengths = {2, 3, 4, 5, 7, 8, 9, 10, 11, 94, 95, 1000, 4097};
+    for (int i = 0; i < 20; ++i) {
+        lengths.push_back(2 + rng() % 5000);
+    }
+    lengths.push_back(59049);
+    for (const std::size_t n : lengths) {
+        for (const Mode mode : {Mode::Unleashed, Mode::Classic}) {
+            for (const Codec codec : {Codec::Packed, Codec::Zstd}) {
+                Program p = random_program(rng, n, mode);
+                p.exit_a = (rng() & 1) != 0;
+                const Bytes b = write_malm(p, codec);
+                const auto r = read_malm(b);
+                REQUIRE_MESSAGE(r.has_value(), "n=" << n << ": " << r.error());
+                CHECK(r->cells == p.cells);
+                CHECK(r->mode == p.mode);
+                CHECK(r->exit_a == p.exit_a);
+            }
+        }
+    }
+}
+
+TEST_CASE("round trip: 59050 cells is valid unleashed, rejected for classic") {
+    std::mt19937_64 rng(7);
+    const Program p = random_program(rng, 59050);
+    Bytes b = write_malm(p, Codec::Packed);
+    const auto r = read_malm(b);
+    REQUIRE(r.has_value());
+    CHECK(r->cells == p.cells);
+    b[6] = 1; // claim classic
+    const std::string e = error_of(b);
+    CHECK(contains(e, "cell count 59050"));
+    CHECK(contains(e, "classic"));
+}
+
+TEST_CASE("round trip: every loadable committed program") {
+    int unleashed = 0;
+    int classic = 0;
+    int files = 0;
+    for (const char* dir : {MALM_PROGRAMS_DIR, MALM_CORPUS_DIR}) {
+        for (const auto& e : std::filesystem::directory_iterator(dir)) {
+            const auto ext = e.path().extension();
+            if (ext != ".mal" && ext != ".mb") {
+                continue;
+            }
+            ++files;
+            const Bytes text = read_file(e.path());
+            CHECK_MESSAGE(!is_malm(text), e.path());
+            Bytes stripped;
+            std::ranges::copy_if(text, std::back_inserter(stripped), [](std::uint8_t c) {
+                return !(c == ' ' || (c >= '\t' && c <= '\r'));
+            });
+            for (const Mode mode : {Mode::Unleashed, Mode::Classic}) {
+                const auto cells = core::load_text(text, max_cells(mode));
+                if (!cells) {
+                    continue;
+                }
+                (mode == Mode::Classic ? classic : unleashed)++;
+                for (const Codec codec : {Codec::Packed, Codec::Zstd}) {
+                    const Bytes b = write_malm({*cells, mode, false}, codec);
+                    CHECK_MESSAGE(is_malm(b), e.path());
+                    const auto r = read_malm(b);
+                    REQUIRE_MESSAGE(r.has_value(), e.path() << ": " << r.error());
+                    CHECK_MESSAGE(r->cells == *cells, e.path());
+                    CHECK_MESSAGE(r->cells == stripped, e.path()); // identical text, no whitespace
+                }
+            }
+        }
+    }
+    CHECK(files >= 8);
+    CHECK(unleashed >= 8);
+    CHECK(classic >= 8);
+}
+
+TEST_CASE("validation: every error has its own message") {
+    const Program p = small_program();
+    const Bytes good = write_malm(p, Codec::Packed);
+    REQUIRE(read_malm(good).has_value());
+
+    SUBCASE("bad magic") {
+        Bytes b = good;
+        b[0] = 'X';
+        CHECK(contains(error_of(b), "bad magic"));
+        CHECK(contains(error_of(Bytes{}), "bad magic"));
+        CHECK(contains(error_of(Bytes{'(', 'P'}), "bad magic"));
+    }
+    SUBCASE("truncated header") {
+        for (const std::size_t n : {4u, 5u, 12u, 31u}) {
+            const Bytes b(good.begin(), good.begin() + static_cast<std::ptrdiff_t>(n));
+            CHECK_MESSAGE(contains(error_of(b), "truncated header"), n);
+        }
+    }
+    SUBCASE("unsupported version") {
+        for (const int v : {0, 2, 255}) {
+            Bytes b = good;
+            b[4] = static_cast<std::uint8_t>(v);
+            CHECK(contains(error_of(b), "unsupported format version"));
+        }
+        Bytes b = good;
+        b[5] = 1; // version 257
+        CHECK(contains(error_of(b), "unsupported format version 257"));
+    }
+    SUBCASE("unknown mode") {
+        Bytes b = good;
+        b[6] = 2;
+        CHECK(contains(error_of(b), "unknown mode 2"));
+    }
+    SUBCASE("unknown codec") {
+        Bytes b = good;
+        b[8] = 2;
+        CHECK(contains(error_of(b), "unknown codec 2"));
+    }
+    SUBCASE("unknown flag bits") {
+        for (const int f : {2, 0x80, 0xfe}) {
+            Bytes b = good;
+            b[7] = static_cast<std::uint8_t>(f);
+            CHECK(contains(error_of(b), "unknown flag bits"));
+        }
+        Bytes b = good;
+        b[7] = 1; // EXIT_A is fine
+        CHECK(read_malm(b).has_value());
+    }
+    SUBCASE("nonzero reserved bytes") {
+        for (const std::size_t off : {9u, 10u, 11u}) {
+            Bytes b = good;
+            b[off] = 1;
+            CHECK(contains(error_of(b), "reserved"));
+        }
+    }
+    SUBCASE("cell count out of range") {
+        Bytes b = good;
+        put_u64(b, 16, 1);
+        CHECK(contains(error_of(b), "cell count 1"));
+        put_u64(b, 16, 0);
+        CHECK(contains(error_of(b), "cell count 0"));
+        put_u64(b, 16, core::kUnleashedMaxCells + 1);
+        CHECK(contains(error_of(b), "exceeds"));
+        put_u64(b, 16, ~std::uint64_t{0});
+        CHECK(contains(error_of(b), "exceeds"));
+        put_u64(b, 16, 59050);
+        b[6] = 1;
+        CHECK(contains(error_of(b), "exceeds the classic limit 59049"));
+    }
+    SUBCASE("payload length does not match the file") {
+        Bytes t(good.begin(), good.end() - 1);
+        CHECK(contains(error_of(t), "payload length"));
+        CHECK(contains(error_of(t), "truncated"));
+        for (const std::size_t n : {kHeaderSize, kHeaderSize + 1, kHeaderSize + 4}) {
+            const Bytes u(good.begin(), good.begin() + static_cast<std::ptrdiff_t>(n));
+            CHECK(contains(error_of(u), "truncated"));
+        }
+        Bytes a = good;
+        a.push_back(0);
+        CHECK(contains(error_of(a), "trailing"));
+        Bytes huge = good;
+        put_u64(huge, 24, ~std::uint64_t{0});
+        CHECK(contains(error_of(huge), "truncated"));
+    }
+    SUBCASE("packed payload length must match the cell count") {
+        Bytes b = good;
+        put_u64(b, 16, 100); // needs 38 bytes, payload has 5
+        CHECK(contains(error_of(b), "packed payload"));
+    }
+    SUBCASE("CRC mismatch") {
+        for (std::size_t bit = 0; bit < 32; ++bit) {
+            Bytes b = good;
+            b[12 + bit / 8] ^= static_cast<std::uint8_t>(1u << (bit % 8));
+            CHECK(contains(error_of(b), "CRC mismatch"));
+        }
+        Bytes b = good;
+        b[kHeaderSize] ^= 1; // payload bit flip
+        CHECK(contains(error_of(b), "CRC mismatch"));
+    }
+    SUBCASE("nonzero padding bits") {
+        Bytes b = good;
+        b[b.size() - 1] |= 0x80; // 11 cells = 33 bits; bits 33..39 are padding
+        fix_crc(b);
+        CHECK(contains(error_of(b), "padding"));
+        b = good;
+        b[b.size() - 1] |= 0x02;
+        fix_crc(b);
+        CHECK(contains(error_of(b), "padding"));
+        // Without the CRC fix it is a CRC error first.
+        b = good;
+        b[b.size() - 1] |= 0x80;
+        CHECK(contains(error_of(b), "CRC mismatch"));
+    }
+}
+
+TEST_CASE("validation: zstd codec") {
+    std::mt19937_64 rng(3);
+    const Program p = random_program(rng, 5000);
+    const Bytes good = write_malm(p, Codec::Zstd);
+    REQUIRE(read_malm(good).has_value());
+    const std::size_t packed = (3 * 5000 + 7) / 8;
+
+    SUBCASE("corrupted frame fails to decompress or fails the CRC") {
+        Bytes b = good;
+        b[b.size() / 2] ^= 0x55;
+        const std::string e = error_of(b);
+        CHECK((contains(e, "zstd") || contains(e, "CRC mismatch")));
+        // Smash the frame magic: not a zstd frame at all.
+        b = good;
+        b[kHeaderSize] ^= 0xff;
+        CHECK(contains(error_of(b), "zstd"));
+    }
+    SUBCASE("truncated frame") {
+        Bytes b(good.begin(), good.end() - 3);
+        CHECK(contains(error_of(b), "truncated"));
+        // Consistent header, cut frame.
+        put_u64(b, 24, b.size() - kHeaderSize);
+        CHECK(contains(error_of(b), "zstd"));
+    }
+    SUBCASE("frame content size differs from the cell count") {
+        // Header claims 5001 cells but the frame holds the packed bytes of 5000.
+        Bytes b = good;
+        put_u64(b, 16, 5001);
+        const std::string e = error_of(b);
+        CHECK(contains(e, "content size"));
+        CHECK(contains(e, std::to_string(packed)));
+    }
+    SUBCASE("frame without a content size") {
+        Bytes pk = write_malm(p, Codec::Packed);
+        const std::span<const std::uint8_t> raw =
+            std::span<const std::uint8_t>(pk).subspan(kHeaderSize);
+        ZSTD_CCtx* cctx = ZSTD_createCCtx();
+        ZSTD_CCtx_setParameter(cctx, ZSTD_c_contentSizeFlag, 0);
+        Bytes frame(ZSTD_compressBound(raw.size()));
+        const std::size_t n =
+            ZSTD_compress2(cctx, frame.data(), frame.size(), raw.data(), raw.size());
+        ZSTD_freeCCtx(cctx);
+        REQUIRE_FALSE(ZSTD_isError(n));
+        frame.resize(n);
+        Bytes b(pk.begin(), pk.begin() + kHeaderSize);
+        b[8] = 1;
+        put_u64(b, 24, frame.size());
+        b.insert(b.end(), frame.begin(), frame.end());
+        CHECK(contains(error_of(b), "content size"));
+        CHECK(contains(error_of(b), "does not declare"));
+    }
+    SUBCASE("a claim beyond the reader cap is rejected before decompressing") {
+        Bytes b = good;
+        put_u64(b, 16, core::kUnleashedMaxCells);
+        const std::string e = error_of(b);
+        CHECK(contains(e, "above the limit"));
+        CHECK(contains(e, "--max-cells"));
+    }
+    SUBCASE("data after the frame: empty frame, skippable frame") {
+        const Bytes empty_frame = {0x28, 0xb5, 0x2f, 0xfd, 0x20, 0x00, 0x01, 0x00, 0x00};
+        const Bytes skippable = {0x50, 0x2a, 0x4d, 0x18, 4, 0, 0, 0, 'h', 'i', 'd', 'e'};
+        for (const Bytes& extra : {empty_frame, skippable, Bytes{0}}) {
+            Bytes b = good;
+            b.insert(b.end(), extra.begin(), extra.end());
+            put_u64(b, 24, b.size() - kHeaderSize);
+            const std::string e = error_of(b);
+            CHECK_MESSAGE(contains(e, "after the first frame"), e);
+        }
+    }
+    SUBCASE("a skippable frame in front is rejected") {
+        const Bytes skippable = {0x50, 0x2a, 0x4d, 0x18, 4, 0, 0, 0, 'h', 'i', 'd', 'e'};
+        Bytes b(good.begin(), good.begin() + kHeaderSize);
+        b.insert(b.end(), skippable.begin(), skippable.end());
+        b.insert(b.end(), good.begin() + kHeaderSize, good.end());
+        put_u64(b, 24, b.size() - kHeaderSize);
+        CHECK(contains(error_of(b), "zstd"));
+    }
+    SUBCASE("CRC mismatch after a valid decompression") {
+        Bytes b = good;
+        b[12] ^= 1;
+        CHECK(contains(error_of(b), "CRC mismatch"));
+    }
+    SUBCASE("nonzero padding bits inside a valid frame") {
+        const Program q = small_program(); // 33 bits
+        Bytes pk = write_malm(q, Codec::Packed);
+        pk[pk.size() - 1] |= 0x80;
+        const std::span<const std::uint8_t> raw =
+            std::span<const std::uint8_t>(pk).subspan(kHeaderSize);
+        Bytes frame(ZSTD_compressBound(raw.size()));
+        const std::size_t n = ZSTD_compress(frame.data(), frame.size(), raw.data(), raw.size(), 3);
+        REQUIRE_FALSE(ZSTD_isError(n));
+        frame.resize(n);
+        Bytes b(pk.begin(), pk.begin() + kHeaderSize);
+        b[8] = 1;
+        put_u32(b, 12, crc32(raw));
+        put_u64(b, 24, frame.size());
+        b.insert(b.end(), frame.begin(), frame.end());
+        CHECK(contains(error_of(b), "padding"));
+    }
+}
+
+namespace {
+
+// Symbol distribution of generated code: mostly Nop/Opr. Indices follow kSymbolLetters
+// "ji*p</vo": j=MovD i=Jmp *=Rot p=Opr <=Out /=In v=Hlt o=Nop.
+Program skewed_program(std::size_t n) {
+    std::mt19937_64 rng(2024);
+    const std::array<double, 8> weights = {8, 3, 4, 20, 2, 2, 1, 60};
+    std::discrete_distribution<int> dist(weights.begin(), weights.end());
+    Program p;
+    p.cells.reserve(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        p.cells.push_back(denormalize(i, static_cast<std::uint8_t>(dist(rng))));
+    }
+    return p;
+}
+
+void report_ratio(const char* name, const Program& p) {
+    const Bytes packed = write_malm(p, Codec::Packed);
+    const Bytes z = write_malm(p, Codec::Zstd);
+    const double raw = static_cast<double>(p.cells.size());
+    const double pk = static_cast<double>(packed.size() - kHeaderSize);
+    const double zz = static_cast<double>(z.size() - kHeaderSize);
+    std::ostringstream os;
+    os << std::fixed << std::setprecision(3) << "compression [" << name
+       << "] cells=" << p.cells.size() << " raw_text=" << raw << " packed=" << pk << " zstd=" << zz
+       << " ratio_vs_packed=" << (pk / zz) << " ratio_vs_text=" << (raw / zz);
+    MESSAGE(os.str());
+    std::cout << os.str() << std::endl;
+    const auto r = read_malm(z);
+    REQUIRE(r.has_value());
+    CHECK(r->cells == p.cells);
+}
+
+} // namespace
+
+TEST_CASE("compression ratio of a 1M-cell normalized program") {
+    const Program skew = skewed_program(1'000'000);
+    report_ratio("skewed", skew);
+    const Bytes packed = write_malm(skew, Codec::Packed);
+    const Bytes z = write_malm(skew, Codec::Zstd);
+    CHECK(z.size() < packed.size()); // the skewed distribution must actually compress
+
+    std::mt19937_64 rng(5);
+    report_ratio("uniform", random_program(rng, 1'000'000));
+}
+
+namespace {
+
+// A zstd frame header declaring `content` bytes, single segment (window = content).
+Bytes zstd_single_segment_header(std::uint64_t content) {
+    Bytes f = {0x28, 0xb5, 0x2f, 0xfd, 0xE0};
+    for (int i = 0; i < 8; ++i) {
+        f.push_back(static_cast<std::uint8_t>(content >> (8 * i)));
+    }
+    return f;
+}
+
+// A valid codec-1 file of `cells` Nop cells, built by hand as RLE blocks (every packed byte is
+// 0xFF except the padded last one), so the file stays tiny whatever the cell count. With
+// `real_crc` the CRC is computed (needs the packed bytes in memory); otherwise it is left 0.
+Bytes nop_malm(std::uint64_t cells, bool real_crc) {
+    const std::uint64_t total = (cells * 3 + 7) / 8;
+    const unsigned used = static_cast<unsigned>((cells * 3) % 8);
+    const std::uint8_t last = static_cast<std::uint8_t>(used == 0 ? 0xFFu : (1u << used) - 1);
+    Bytes frame = zstd_single_segment_header(total);
+    const auto block = [&](std::uint64_t size, std::uint8_t value, bool is_last) {
+        const std::uint32_t h =
+            static_cast<std::uint32_t>(size << 3) | (1u << 1) | (is_last ? 1u : 0u);
+        frame.push_back(static_cast<std::uint8_t>(h));
+        frame.push_back(static_cast<std::uint8_t>(h >> 8));
+        frame.push_back(static_cast<std::uint8_t>(h >> 16));
+        frame.push_back(value);
+    };
+    for (std::uint64_t left = total - 1; left > 0;) {
+        const std::uint64_t n = std::min<std::uint64_t>(left, 131072);
+        block(n, 0xFF, false);
+        left -= n;
+    }
+    block(1, last, true);
+
+    Bytes b(kHeaderSize, 0);
+    std::copy(kMagic.begin(), kMagic.end(), b.begin());
+    b[4] = 1;
+    b[8] = 1;
+    if (real_crc) {
+        Bytes packed(total, 0xFF);
+        packed.back() = last;
+        put_u32(b, 12, crc32(packed));
+    }
+    put_u64(b, 16, cells);
+    put_u64(b, 24, frame.size());
+    b.insert(b.end(), frame.begin(), frame.end());
+    return b;
+}
+
+} // namespace
+
+TEST_CASE("reader cap: a tiny valid file claiming 1.6e9 cells is rejected before decompressing") {
+    const Bytes b = nop_malm(1'600'000'000ull, false);
+    CHECK(b.size() < 20000);
+    const std::string e = error_of(b);
+    CHECK(contains(e, "program has 1600000000 cells, above the limit 1073741824"));
+    CHECK(contains(e, "(use --max-cells)"));
+}
+
+TEST_CASE("reader cap: Limits raises and lowers it; classic keeps its format limit") {
+    const Bytes b = nop_malm(5'000'000, true);
+    auto r = read_malm(b, Limits{4'999'999});
+    REQUIRE_FALSE(r.has_value());
+    CHECK(contains(r.error(), "program has 5000000 cells, above the limit 4999999"));
+    r = read_malm(b, Limits{5'000'000});
+    REQUIRE_MESSAGE(r.has_value(), r.error());
+    REQUIRE(r->cells.size() == 5'000'000);
+    for (std::size_t i = 0; i < r->cells.size(); i += 997) {
+        CHECK(normalize(i, r->cells[i]) == 7); // Nop
+    }
+    // The default cap accepts it too (it is far below 2^30).
+    CHECK(read_malm(b).has_value());
+    // A raised cap does not lift the classic format limit.
+    Bytes c = b;
+    c[6] = 1;
+    CHECK(contains(read_malm(c, Limits{~std::size_t{0}}).error(), "exceeds the classic limit"));
+}
+
+TEST_CASE("garbage frames claiming huge sizes fail cleanly and cheaply") {
+    // Header claims ~6e9 cells (so a 2 GB frame); the cap is raised so the claim reaches zstd.
+    // The frame has a window descriptor (so it passes the header checks) and then only zeros.
+    const std::uint64_t content = 2'000'000'001ull / 3 * 3;
+    const std::uint64_t cells = content / 3 * 8;
+    Bytes frame = {0x28, 0xb5, 0x2f, 0xfd, 0xC0, 0x40};
+    for (int i = 0; i < 8; ++i) {
+        frame.push_back(static_cast<std::uint8_t>(content >> (8 * i)));
+    }
+    for (const bool bad_block : {false, true}) {
+        Bytes f = frame;
+        if (bad_block) {
+            // One last "compressed" block (type 2) of 100 garbage bytes: the frame is well formed
+            // as far as zstd can tell without decoding, but decoding fails in the first block.
+            const std::uint32_t h = (100u << 3) | (2u << 1) | 1u;
+            f.insert(f.end(), {static_cast<std::uint8_t>(h), static_cast<std::uint8_t>(h >> 8),
+                               static_cast<std::uint8_t>(h >> 16)});
+            f.resize(f.size() + 100, 0xA5);
+        } else {
+            f.resize(64 * 1024);
+        }
+        Bytes b(kHeaderSize, 0);
+        std::copy(kMagic.begin(), kMagic.end(), b.begin());
+        b[4] = 1;
+        b[8] = 1;
+        put_u64(b, 16, cells);
+        put_u64(b, 24, f.size());
+        b.insert(b.end(), f.begin(), f.end());
+
+        struct rusage before{};
+        getrusage(RUSAGE_SELF, &before);
+        const auto r = read_malm(b, Limits{~std::size_t{0}});
+        struct rusage after{};
+        getrusage(RUSAGE_SELF, &after);
+        REQUIRE_FALSE(r.has_value());
+        CHECK_MESSAGE(contains(r.error(), "zstd"), r.error());
+        // Peak RSS grows by far less than the claimed 2 GB (ru_maxrss is in KiB).
+        CHECK(after.ru_maxrss - before.ru_maxrss < 64 * 1024);
+        // And with the default cap it is rejected without touching zstd at all.
+        CHECK(contains(error_of(b), "above the limit"));
+    }
+}
+
+TEST_CASE("streaming: round trips at chunk boundaries (packed size around 1 MiB multiples)") {
+    std::mt19937_64 rng(11);
+    const std::uint64_t mib = 1u << 20;
+    for (const std::uint64_t target : {mib - 1, mib, mib + 1, 2 * mib}) {
+        for (const std::uint64_t dl : {std::uint64_t{0}, std::uint64_t{2}}) {
+            if (target == 2 * mib && dl != 0) {
+                continue;
+            }
+            const std::size_t n = static_cast<std::size_t>(target * 8 / 3 + dl);
+            const Program p = random_program(rng, n);
+            for (const Codec codec : {Codec::Packed, Codec::Zstd}) {
+                const Bytes b = write_malm(p, codec);
+                const auto r = read_malm(b);
+                REQUIRE_MESSAGE(r.has_value(), "n=" << n << ": " << r.error());
+                CHECK_MESSAGE(r->cells == p.cells, "n=" << n);
+            }
+        }
+    }
+}
