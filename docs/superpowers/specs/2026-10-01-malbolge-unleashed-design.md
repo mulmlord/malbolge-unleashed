@@ -2,6 +2,7 @@
 
 Date: 2026-10-01
 Status: approved in brainstorming; awaiting written-spec review
+Normative language reference: [`docs/spec.md`](../../spec.md). It is normative for the language from now on; where it differs from §2 below, it wins.
 Research basis: [`docs/research/malbolge-research.md`](../../research/malbolge-research.md) (cited below as `[R §x]`)
 
 ## 1. Goal
@@ -20,19 +21,19 @@ Non-goals: Malbolge Unshackled compatibility (random rotation width), preloading
 ## 2. Language definition
 
 Everything not listed here is the same as classic Malbolge as implemented by Olmstead's reference interpreter `[R §1]`. This includes:
-- the 8 instructions decoded via `xlat1[((C + [C]) mod 94)]`
+- the 8 instructions decoded via `xlat1[(((C + [C]) mod 94) − 33) mod 94]`, i.e. the code `k = (C + [C]) mod 94` of the table in spec §3.5
 - the crz trit table
 - the xlat2 encryption after each instruction
 - the reference I/O mapping (`<` = output, `/` = input) `[R §1.7]`
 
 ### 2.1 Values (3-adic, as in Unshackled)
 - A value is an infinite trit string whose **head trit** repeats forever to the left `[R §3.1]`. `width(v)` = the number of trits below the repeating head (`...0001` has width 1, `...000` has width 0).
-- Head 0 = non-negative integers. Head 2 = negative integers (`...222` = −1). Head 1 = other 3-adic values; they are valid as data and addresses, but not as I/O.
+- Head 0 = non-negative integers. Head 2 = negative integers (`...222` = −1). Head 1 = other 3-adic values; they are valid as data and addresses. `Out` accepts every head (§2.4).
 - crz and rotation are trit-wise and head-consistent, so widening never changes a value's meaning.
 - `x mod 94` and `x mod 6` for any head follow the Unshackled remainder rule `[R §3.1]`.
 
 ### 2.2 Memory: 3^n cells, n only grows
-- The machine has a size parameter **n**, which starts at **10**.
+- The machine has a size parameter **n**, which starts at **max(10, width(L−1)+1)** for a program of L cells (so 10 for programs of up to 3^9 cells).
 - Addressable cells are all values with `width ≤ n−1`. That is 3 head-regions × 3^(n−1) = **3^n cells**.
 - **Growth rule (deterministic):** after every step, `n := max(n, width(C)+1, width(D)+1)`. There is no wrap-around. C and D increment by 3-adic +1. For example, `...222 + 1 = ...000`: region 2 flows into region 0, as in Unshackled.
 - Cells that were never written have the Malbolge fill value. The fill pattern repeats every 6 cells, is computed from the last two program cells, and is extended to all heads via the remainder rule `[R §1.2, §3.1]`. The VM materializes cells lazily (sparse pages).
@@ -45,7 +46,7 @@ Everything not listed here is the same as classic Malbolge as implemented by Olm
 
 ### 2.4 I/O (raw bytes)
 - **In:** A = the byte value 0..255. EOF → `...222` (−1).
-- **Out:** head 0 → write `A mod 256`. Head 2 → write the (negative) integer mod 256. Head 1 → runtime error `E_OUTPUT`.
+- **Out:** write `A mod 256` per the remainder rule (§2.1), for every head. EOF `...222` echoed back gives 168, as in classic Malbolge. There is no `E_OUTPUT`.
 - No newline translation. stdin and stdout are binary.
 - stdout is flushed before every `In` and on halt or error.
 
@@ -56,9 +57,10 @@ Everything not listed here is the same as classic Malbolge as implemented by Olm
   - `E_EXEC`: executing a cell outside 33..126
   - `E_ENCRYPT`: encrypting such a cell
   - `E_WIDTH`
-  - `E_OUTPUT`
+  - `E_IO`: stdin read error or stdout write error (including EPIPE)
 
   Each error exits the VM with status 1 and a diagnostic: C, D, A, n, step count.
+- `E_LOAD` is separate: the loader rejected the program. It reports a byte offset and a reason, not registers, and exits with status 1.
 - Halt (`v`) → exit 0. With the container flag `EXIT_A`, halt exits with `A mod 256` instead (§5.4).
 
 ### 2.6 `--classic` mode
