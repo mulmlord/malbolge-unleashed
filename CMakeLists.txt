@@ -31,6 +31,7 @@ if(MALM_SANITIZE)
         -fsanitize=address,undefined -fno-sanitize-recover=all)
 endif()
 
+add_subdirectory(src/core)
 add_subdirectory(src/driver)
 
 if(MALM_BUILD_TESTS)

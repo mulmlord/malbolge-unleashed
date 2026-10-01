@@ -2,7 +2,7 @@ configure_file(version.hpp.in "${CMAKE_CURRENT_BINARY_DIR}/generated/version.hpp
 
 add_library(malm_driver cli.cpp)
 target_include_directories(malm_driver
-    PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}"
+    PUBLIC "${PROJECT_SOURCE_DIR}/src"
     PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
 target_link_libraries(malm_driver PRIVATE malm_warnings)
 
