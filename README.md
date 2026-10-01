@@ -5,6 +5,7 @@ assembler, high-level assembler, disassembler, a RISC-V front end (so C/C++/Rust
 target Malbolge) and a packer that turns programs into native executables. Everything ships as one
 CLI binary, `malm`. See the [design spec](docs/superpowers/specs/2026-10-01-malbolge-unleashed-design.md)
 and the [Malbolge research notes](docs/research/malbolge-research.md).
+The normative language reference is [docs/spec.md](docs/spec.md).
 
 ## Prerequisites
 
