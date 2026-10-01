@@ -223,7 +223,7 @@ Classic mode runs classic Malbolge as the reference interpreter does, minus its 
 Reference-interpreter behaviours that classic mode deliberately does NOT reproduce `[R §2]`:
 - **Loader bug:** the reference stores non-whitespace bytes outside 33..126 without any check, so programs can load 0..31 and 127..255. Classic mode rejects them with `E_LOAD`. Programs that rely on this (Scheffer's `copy.mal`) do not run.
 - **Hang:** executing a cell outside 33..126 loops forever in the reference. Classic mode fails with `E_EXEC`.
-- **Undefined behaviour on encrypt:** encrypting a cell outside 33..126 indexes `xlat2` out of bounds in the reference. Classic mode fails with `E_ENCRYPT`. Programs that depend on it (`answer.mal`) produce no output.
+- **Encrypting a cell outside 33..126:** in the reference this indexes `xlat2` out of bounds (undefined behaviour), except for `[C] = 127`, where it reads the string's terminating NUL and stores 0. Classic mode fails with `E_ENCRYPT` in every such case. Programs that depend on it (`answer.mal`) produce no output.
 - **The `'\n' != 10` branch:** the reference's newline mapping (which tests the wrong variable on output) is not reproduced. I/O is binary.
 - Also not reproduced: text-mode file I/O, reading `mem[-1]` for programs shorter than 2 cells (`E_LOAD` instead), and the 16-bit `short` assumption.
 
