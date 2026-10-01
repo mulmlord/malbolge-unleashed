@@ -1,7 +1,7 @@
 // 3-adic value type (spec section 1) and trit primitives.
 //
-// Classic mode decision: `--classic` will use a separate plain type, `ClassicWord` (a 10-trit
-// unsigned integer 0..59048, issue #7), not this Value type. Value is only for unleashed mode.
+// Classic mode decision: `--classic` uses a separate plain type, `ClassicWord` (a 10-trit
+// unsigned integer 0..59048, classic.hpp), not this Value type. Value is only for unleashed mode.
 #pragma once
 
 #include <array>

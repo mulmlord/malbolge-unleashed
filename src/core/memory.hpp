@@ -1,5 +1,6 @@
 // Sparse unleashed-mode memory (spec 2.1-2.4): pages of 3^8 cells filled lazily from the fill
-// pattern P[0..5], plus the memory-size rule n (spec 2.2). The classic flat memory is #7.
+// pattern P[0..5], plus the memory-size rule n (spec 2.2). The classic flat memory is in
+// classic.hpp.
 #pragma once
 
 #include <algorithm>
