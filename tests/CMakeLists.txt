@@ -9,3 +9,4 @@ malm_add_test(NAME value_test LABEL fast
     LIBS malm_core)
 malm_add_test(NAME tables_test LABEL fast SOURCES core/tables_test.cpp LIBS malm_core)
 malm_add_test(NAME ops_test LABEL fast SOURCES core/ops_test.cpp LIBS malm_core)
+malm_add_test(NAME memory_test LABEL fast SOURCES core/memory_test.cpp LIBS malm_core)
