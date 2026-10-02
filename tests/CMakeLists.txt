@@ -22,17 +22,10 @@ target_compile_definitions(container_test PRIVATE
     MALM_PROGRAMS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/programs"
     MALM_CORPUS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/corpus")
 
-malm_add_test(NAME debug_test LABEL fast SOURCES driver/debug_test.cpp LIBS malm_driver TIMEOUT 300)
+malm_add_test(NAME debug_test LABEL fast SOURCES driver/debug_test.cpp LIBS malm_driver TIMEOUT 600)
 target_compile_definitions(debug_test PRIVATE
     MALM_PROGRAMS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/programs"
     MALM_CORPUS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/corpus")
-# The same source again with only the 13.8M-step classic beer99 stats case (slow under ASan).
-malm_add_test(NAME debug_slow_test LABEL slow SOURCES driver/debug_test.cpp LIBS malm_driver
-              PREFIX "slow:" TIMEOUT 600)
-target_compile_definitions(debug_slow_test PRIVATE MALM_SLOW_CASES
-    MALM_PROGRAMS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/programs"
-    MALM_CORPUS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/corpus")
-
 # CLI tests against the committed programs (see tests/programs/SOURCES.txt).
 target_compile_definitions(cli_test PRIVATE MALM_PROGRAMS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/programs")
 
@@ -43,7 +36,12 @@ foreach(case halting_cat loop_cat epipe debug_halting_cat debug_hello debug_epip
     add_test(NAME pipe_${case}
         COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/driver/pipe_test.sh
                 $<TARGET_FILE:malm> ${CMAKE_CURRENT_SOURCE_DIR}/programs ${case})
-    set_tests_properties(pipe_${case} PROPERTIES LABELS fast TIMEOUT 60)
+    if(case MATCHES "^(malm_beer99|pack_beer99)$")
+        set(pipe_label slow) # the same song as pipe_classic_beer99, through other front ends
+    else()
+        set(pipe_label fast)
+    endif()
+    set_tests_properties(pipe_${case} PROPERTIES LABELS ${pipe_label} TIMEOUT 60)
 endforeach()
 add_subdirectory(corpus)
 add_subdirectory(reference)

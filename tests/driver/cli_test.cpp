@@ -273,7 +273,7 @@ TEST_CASE("run --classic: hello world, option order, --exit-a") {
     CHECK(r.code == 0);
 }
 
-TEST_CASE("run --classic: beer99 prints the whole song and halts") {
+TEST_CASE("run --classic: beer99 prints the whole song and halts" * doctest::test_suite("slow")) {
     const std::string dir = MALM_PROGRAMS_DIR;
     std::ifstream exp(dir + "/beer99.expected", std::ios::binary);
     const std::string expected((std::istreambuf_iterator<char>(exp)), {});
@@ -382,38 +382,43 @@ TEST_CASE("export: bad input exits 1") {
     CHECK(r.err.starts_with("malm: cannot write '/nonexistent-dir/x'"));
 }
 
-TEST_CASE("export --malm then run matches running the text") {
+// One case of the export -> run comparison; `file` is relative to the committed programs.
+static void check_export_then_run(const std::string& file, bool classic) {
     const std::string dir = MALM_PROGRAMS_DIR;
-    struct Case {
-        std::string file;
-        bool classic;
-    };
-    for (const Case& c : {Case{"hello.mal", false}, Case{"hello.mal", true},
-                          Case{"beer99.mal", true}, Case{"halt2.mal", false}}) {
-        for (const std::string_view codec : {"packed", "zstd"}) {
-            std::vector<std::string_view> extra{"--codec", codec};
-            if (c.classic) {
-                extra.push_back("--classic");
-            }
-            const Exported e = export_malm(dir + "/" + c.file, extra);
-            REQUIRE_MESSAGE(e.r.code == 0, e.r.err);
-            CHECK(e.r.out.empty());
-            CHECK(slurp(e.file.str()).starts_with("MALM"));
-
-            std::vector<std::string_view> text_args{"run"};
-            if (c.classic) {
-                text_args.push_back("--classic");
-            }
-            const std::string text_path = dir + "/" + c.file;
-            text_args.push_back(text_path);
-            const Result want = run(text_args);
-            // The header's mode decides: no --classic needed for the .malm.
-            const Result got = run({"run", e.file.str()});
-            CHECK_MESSAGE(got.code == want.code, c.file << " " << codec);
-            CHECK(got.out == want.out);
-            CHECK(got.err == want.err);
+    for (const std::string_view codec : {"packed", "zstd"}) {
+        std::vector<std::string_view> extra{"--codec", codec};
+        if (classic) {
+            extra.push_back("--classic");
         }
+        const Exported e = export_malm(dir + "/" + file, extra);
+        REQUIRE_MESSAGE(e.r.code == 0, e.r.err);
+        CHECK(e.r.out.empty());
+        CHECK(slurp(e.file.str()).starts_with("MALM"));
+
+        std::vector<std::string_view> text_args{"run"};
+        if (classic) {
+            text_args.push_back("--classic");
+        }
+        const std::string text_path = dir + "/" + file;
+        text_args.push_back(text_path);
+        const Result want = run(text_args);
+        // The header's mode decides: no --classic needed for the .malm.
+        const Result got = run({"run", e.file.str()});
+        CHECK_MESSAGE(got.code == want.code, file << " " << codec);
+        CHECK(got.out == want.out);
+        CHECK(got.err == want.err);
     }
+}
+
+TEST_CASE("export --malm then run matches running the text") {
+    check_export_then_run("hello.mal", false);
+    check_export_then_run("hello.mal", true);
+    check_export_then_run("halt2.mal", false);
+}
+
+TEST_CASE("export --malm then run matches running the text (classic beer99)" *
+          doctest::test_suite("slow")) {
+    check_export_then_run("beer99.mal", true);
 }
 
 TEST_CASE("run: .malm mode handling") {
@@ -718,8 +723,13 @@ TEST_CASE("--max-cells: resource cap on .malm and text, validation") {
 namespace {
 
 std::string slurp_bin(const std::filesystem::path& p) {
-    std::ifstream f(p, std::ios::binary);
-    return {std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>()};
+    // Bulk read: the packed executables are as large as the test binary (tens of MB under ASan),
+    // and an istreambuf_iterator copy of that takes seconds.
+    std::ifstream f(p, std::ios::binary | std::ios::ate);
+    std::string s(static_cast<std::size_t>(f.tellg()), '\0');
+    f.seekg(0);
+    f.read(s.data(), static_cast<std::streamsize>(s.size()));
+    return s;
 }
 
 std::filesystem::path unique_path(const char* tag) {

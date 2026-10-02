@@ -616,22 +616,32 @@ TEST_CASE("garbage frames claiming huge sizes fail cleanly and cheaply") {
     }
 }
 
-TEST_CASE("streaming: round trips at chunk boundaries (packed size around 1 MiB multiples)") {
-    std::mt19937_64 rng(11);
+// Round trips with the packed size around multiples of the 1 MiB streaming chunk.
+static void check_chunk_boundary(const std::uint64_t target, const std::uint64_t dl) {
+    std::mt19937_64 rng(11 + target + dl);
+    const std::size_t n = static_cast<std::size_t>(target * 8 / 3 + dl);
+    const Program p = random_program(rng, n);
+    for (const Codec codec : {Codec::Packed, Codec::Zstd}) {
+        const Bytes b = write_malm(p, codec);
+        const auto r = read_malm(b);
+        REQUIRE_MESSAGE(r.has_value(), "n=" << n << ": " << r.error());
+        CHECK_MESSAGE(r->cells == p.cells, "n=" << n);
+    }
+}
+
+TEST_CASE("streaming: round trip just past a chunk boundary (packed size 1 MiB + 1)") {
+    check_chunk_boundary(std::uint64_t{1} << 20 | 1, 2);
+}
+
+TEST_CASE("streaming: round trips at chunk boundaries (packed size around 1 MiB multiples)" *
+          doctest::test_suite("slow")) {
     const std::uint64_t mib = 1u << 20;
     for (const std::uint64_t target : {mib - 1, mib, mib + 1, 2 * mib}) {
         for (const std::uint64_t dl : {std::uint64_t{0}, std::uint64_t{2}}) {
             if (target == 2 * mib && dl != 0) {
                 continue;
             }
-            const std::size_t n = static_cast<std::size_t>(target * 8 / 3 + dl);
-            const Program p = random_program(rng, n);
-            for (const Codec codec : {Codec::Packed, Codec::Zstd}) {
-                const Bytes b = write_malm(p, codec);
-                const auto r = read_malm(b);
-                REQUIRE_MESSAGE(r.has_value(), "n=" << n << ": " << r.error());
-                CHECK_MESSAGE(r->cells == p.cells, "n=" << n);
-            }
+            check_chunk_boundary(target, dl);
         }
     }
 }
