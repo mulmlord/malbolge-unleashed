@@ -50,4 +50,13 @@ Binaries land in `build/<preset>/src/driver/malm`. CMake options: `MALM_WERROR`,
 
 ## Status
 
-Early development: only the CLI skeleton exists. See the GitHub issues and milestones.
+Milestone M0 (Foundations) is complete: `malm run` executes malbolge-unleashed and classic Malbolge
+(`--classic`, checked step by step against Olmstead's reference interpreter), with `--trace`/`--stats`,
+the compressed `.malm` format (`malm export`) and standalone native executables (`malm pack`).
+M1 (the assembler) is in progress; see [docs/asm.md](docs/asm.md) and the GitHub milestones.
+
+## License
+
+MIT, see [LICENSE](LICENSE). Third-party components and their licences are listed in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md); note the Zstandard notice requirement when
+distributing `malm` binaries or packed executables.

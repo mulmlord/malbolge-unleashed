@@ -99,8 +99,9 @@ std::string block(std::string_view steps, std::string_view halted, std::string_v
 
 } // namespace
 
-#ifdef MALM_SLOW_CASES
-TEST_CASE("stats: classic beer99 (op counts from the spec model, sum to the step count)") {
+// 13.8M steps: slow under ASan, so it runs in the slow suite.
+TEST_CASE("stats: classic beer99 (op counts from the spec model, sum to the step count)" *
+          doctest::test_suite("slow")) {
     const Result r = run({"run", "--classic", "--stats", kProg + "/beer99.mal"});
     CHECK(r.code == 0);
     CHECK(r.out.size() == 11459);
@@ -112,7 +113,6 @@ TEST_CASE("stats: classic beer99 (op counts from the spec model, sum to the step
     CHECK(sum == 13802606);
     CHECK(stats_block(r.err) == block("13802606", "yes", "10", "-", ops));
 }
-#else
 
 TEST_CASE("trace: classic hello matches the golden trace from the spec model") {
     const std::string golden = read_all(kProg + "/hello.classic.trace");
@@ -313,4 +313,3 @@ TEST_CASE("trace: a halting-cat reads input and shows A") {
     CHECK(l[1].find(" op=Out ") != std::string::npos);
     CHECK(l[1].find(" A=0t10121 ") != std::string::npos); // 'a' = 97
 }
-#endif // MALM_SLOW_CASES

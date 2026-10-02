@@ -242,7 +242,9 @@ struct RecIo : malm::core::Io {
 
 } // namespace
 
-TEST_CASE("tables agree with a real VM") {
+// Checks the positions p with p % stride == 0 (a stride of 1 checks all 94); every op, both
+// addresses and every cycle step are still checked at each of them.
+static void check_tables_against_vm(std::size_t stride) {
     using malm::core::ClassicVm;
     using malm::core::ClassicWord;
     using malm::core::Status;
@@ -252,6 +254,9 @@ TEST_CASE("tables agree with a real VM") {
         100; // cell value at kD0; below both test addresses' resume points
 
     for (std::size_t p = 0; p < 94; ++p) {
+        if (p % stride != 0) {
+            continue;
+        }
         for (const std::size_t addr : {p, p + 188}) {
             for (const Op want :
                  {Op::Jmp, Op::Out, Op::In, Op::Rot, Op::MovD, Op::Opr, Op::Nop, Op::Hlt}) {
@@ -297,4 +302,11 @@ TEST_CASE("tables agree with a real VM") {
             }
         }
     }
+}
+
+// Fast: a fixed sample of positions. The full sweep runs in the slow suite.
+TEST_CASE("tables agree with a real VM (sampled positions)") { check_tables_against_vm(13); }
+
+TEST_CASE("tables agree with a real VM (all positions)" * doctest::test_suite("slow")) {
+    check_tables_against_vm(1);
 }

@@ -91,6 +91,10 @@ The format allows up to `3^38` cells, and a tiny zstd payload can legitimately d
   `--max-cells N` on `malm run` and `malm export` changes the cap (N positive and at most the
   format limit of the mode: `3^38`, or `59049` with `--classic`). It applies to plain text input
   too. For a classic `.malm` the format limit of 59049 applies in any case.
+  *Why 2^30:* it is about 3× the largest known Malbolge program (MalbolgeLISP, ~340 M cells) while
+  keeping a default run's worst case near 8 GB of VM memory (8 bytes per touched cell). Packed
+  executables are exempt: their payload was accepted when it was packed (`malm pack` honours
+  `--max-cells`), so they load with the format limit.
 * zstd payloads are decompressed as a stream in 1 MiB chunks, unpacked and CRC-checked on the fly,
   and the cell array grows only as real data arrives; memory is bounded by the data actually
   present, never by what the header claims. A corrupt or hostile payload fails after at most one
