@@ -20,7 +20,7 @@ jobs:
       CXX: ${{ matrix.cxx }}
       CMAKE_C_COMPILER_LAUNCHER: ccache
       CMAKE_CXX_COMPILER_LAUNCHER: ccache
-      CCACHE_DIR: ${{ github.workspace }}/../.ccache
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
       CCACHE_BASEDIR: ${{ github.workspace }}
       CCACHE_COMPRESS: "true"
       CCACHE_MAXSIZE: 500M
@@ -31,7 +31,7 @@ jobs:
       # One compiler cache per job; every run saves its own entry and restores the newest one.
       - uses: actions/cache@v6
         with:
-          path: ${{ github.workspace }}/../.ccache
+          path: ${{ github.workspace }}/.ccache
           key: ccache-${{ matrix.name }}-${{ github.sha }}
           restore-keys: ccache-${{ matrix.name }}-
       - name: Reset ccache statistics
@@ -61,7 +61,7 @@ jobs:
       CXX: g++-14
       CMAKE_C_COMPILER_LAUNCHER: ccache
       CMAKE_CXX_COMPILER_LAUNCHER: ccache
-      CCACHE_DIR: ${{ github.workspace }}/../.ccache
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
       CCACHE_BASEDIR: ${{ github.workspace }}
       CCACHE_COMPRESS: "true"
       CCACHE_MAXSIZE: 500M
@@ -72,7 +72,7 @@ jobs:
       # One compiler cache per job; every run saves its own entry and restores the newest one.
       - uses: actions/cache@v6
         with:
-          path: ${{ github.workspace }}/../.ccache
+          path: ${{ github.workspace }}/.ccache
           key: ccache-static-pack-${{ github.sha }}
           restore-keys: ccache-static-pack-
       - name: Reset ccache statistics
