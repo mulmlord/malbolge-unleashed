@@ -54,6 +54,22 @@ std::optional<std::size_t> parse_max_cells(std::string_view text) {
     return v;
 }
 
+std::string max_cells_limit_error(bool classic, std::size_t max_cells) {
+    const std::size_t format_max = classic ? core::kClassicCells : core::kUnleashedMaxCells;
+    if (max_cells > format_max) {
+        return "--max-cells " + std::to_string(max_cells) + " exceeds the format limit " +
+               std::to_string(format_max);
+    }
+    return {};
+}
+
+std::vector<std::uint8_t> encode_malm(LoadedProgram&& prog, bool exit_a, container::Codec codec) {
+    container::Program p{std::move(prog.cells),
+                         prog.classic ? container::Mode::Classic : container::Mode::Unleashed,
+                         prog.exit_a || exit_a};
+    return container::write_malm(p, codec);
+}
+
 namespace {
 
 int load_program_impl(std::string_view path, bool classic_flag, std::ostream& err,

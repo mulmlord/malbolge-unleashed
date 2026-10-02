@@ -109,12 +109,56 @@ Plain text cannot represent the mode or `EXIT_A`. When the input `.malm` is clas
 `export --text` says so on stderr (`malm: warning: plain text cannot represent classic mode or
 EXIT_A; not exported`) and still writes the text.
 
+## Packed executables
+
+`malm pack` turns a program into a standalone native executable (Linux only; it copies
+`/proc/self/exe`). The file is
+
+    [malm binary][payload = a complete .malm file][24-byte trailer]
+
+The trailer is `MALMEXE1` (8 bytes), the payload offset (u64 little-endian) and the payload length
+(u64 little-endian). It is valid when `offset > 0` and `offset + length + 24 == file size`
+(checked without overflow). The payload is always re-encoded with the zstd codec, so it is
+canonical, and nothing else varies (no timestamps): packing the same program twice gives
+byte-identical files.
+
+At startup `malm` reads the last 24 bytes of `/proc/self/exe` (one open, one read). Without the
+magic it is the normal CLI. With a valid trailer it runs the payload on the process's stdin and
+stdout and ignores the command line; mode and `EXIT_A` come from the payload header and the exit
+status is that of `malm run` (halt: 0, or `A mod 256` with `EXIT_A`; fault: 1). The packer has
+already accepted the program, so only the format limit of its mode applies when the payload is
+loaded. A trailer with the magic but inconsistent fields, or an invalid payload, prints
+`malm: corrupt packed executable: <reason>` and exits 1.
+
+The startup check opens `/proc/self/exe` and closes it again before the program starts, so a
+packed executable run with stdin, stdout or stderr closed behaves like `malm run` (E_IO on use).
+A packed executable must be readable by whoever runs it: if the file cannot be read (for example
+mode 0111) `malm` cannot see its payload, prints `malm: note: cannot read own executable (...); if
+this is a packed program, it must be readable` and continues as the normal CLI.
+
+`pack` writes to a temporary file in the output's directory, fsyncs it and renames it over `-o`
+(mode `0777 & ~umask`), so a failure never leaves a half-written executable. The directory is
+fsynced after the rename, and SIGXFSZ is ignored while writing, so a file-size limit gives a
+write error and the temporary file is removed. A hard kill (SIGKILL, Ctrl-C) between creating the
+temporary file and the rename can leave a `.malm-pack-*` file behind. `-o` naming a symlink
+replaces the link, not its target. `pack` refuses to overwrite the running binary or the input
+file (same device and inode; `stat` follows links, so hard links and symlinks to them are refused
+too), refuses to run through the dynamic loader (`ld.so ./malm pack ...` would pack the loader),
+and does not accept `-o -`. A packed
+executable needs whatever shared libraries `malm` needs, so pack with the static build
+(`cmake --preset release-static`); a dynamically linked `malm` prints
+`malm: warning: this malm is dynamically linked; the packed executable needs the same shared
+libraries at run time` and still succeeds.
+
 ## CLI
 
     malm run [--classic] [--exit-a] [--max-cells N] [--] <file>
     malm export (--text|--malm) [--classic] [--exit-a] [--codec packed|zstd]
                 [--max-cells N] -o <out> [--] <in>
+    malm pack [--classic] [--exit-a] [--max-cells N] -o <out> [--] <in>
 
 Options come before `--`; after it every word is an input name. `-o -` writes to stdout. `run`
 detects `.malm` by the magic; the header's mode decides, `--classic` with an unleashed `.malm` is a
 usage error (exit 2), and `--exit-a` is OR-ed with the header's `EXIT_A`.
+`pack` takes the same input (text or `.malm`) and options as `export --malm` and writes the
+executable to `<out>`.

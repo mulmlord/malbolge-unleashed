@@ -34,3 +34,58 @@ jobs:
         run: cmake --build --preset release
       - name: Test (release)
         run: ctest --preset release -L fast --no-tests=error
+
+  static-pack:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    name: static pack (clean containers)
+    env:
+      CC: gcc-14
+      CXX: g++-14
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install tools
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - name: Build static malm
+        run: |
+          cmake --preset release-static
+          cmake --build --preset release-static
+      - name: Test (static)
+        run: ctest --preset release-static -L fast --no-tests=error
+      - name: Pack
+        shell: bash
+        run: |
+          malm=build/release-static/src/driver/malm
+          file "$malm" | grep -q 'statically linked'
+          mkdir out
+          "$malm" pack -o out/packed_hello tests/programs/hello.mal
+          "$malm" pack --classic -o out/packed_beer99 tests/programs/beer99.mal
+          "$malm" pack -o out/packed_cat tests/programs/cat5.mal
+          # reads one byte, writes it, halts with it in A: exit status A mod 256 (25 for 'A')
+          printf "u'a%%@\"K" > out/one.mal
+          "$malm" pack --exit-a -o out/packed_one out/one.mal
+      - name: Run in clean containers
+        shell: bash # -eo pipefail
+        run: |
+          # --init: the program is not PID 1, so `timeout` really stops it
+          for image in busybox:stable ubuntu:24.04; do
+            echo "== $image"
+            run="timeout 60 docker run --init --rm -i -v $PWD/out:/w:ro $image"
+            status=0
+            $run /w/packed_hello < /dev/null > got.out || status=$?
+            test "$status" = 0
+            test "$(cat got.out)" = "Hello, world."
+            status=0
+            $run /w/packed_beer99 < /dev/null > got.out || status=$?
+            test "$status" = 0
+            cmp got.out tests/programs/beer99.expected
+            status=0
+            printf 'A' | $run /w/packed_one > got.out || status=$?
+            test "$status" = 25
+            test "$(cat got.out)" = A
+            # cat5 copies exactly 5 bytes of stdin (binary-safe) and halts
+            status=0
+            $run /w/packed_cat < tests/programs/cat5_input.bin > got.out || status=$?
+            test "$status" = 0
+            cmp got.out tests/programs/cat5_expected.bin
+          done

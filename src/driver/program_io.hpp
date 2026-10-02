@@ -5,9 +5,11 @@
 #include <cstdint>
 #include <iosfwd>
 #include <optional>
+#include <string>
 #include <string_view>
 #include <vector>
 
+#include "container/container.hpp"
 #include "core/loader.hpp"
 
 namespace malm {
@@ -24,6 +26,13 @@ bool read_file(std::string_view path, std::vector<std::uint8_t>& bytes, std::ost
 
 // Parses a --max-cells value: a positive decimal integer. Returns nullopt otherwise.
 std::optional<std::size_t> parse_max_cells(std::string_view text);
+
+// Checks a --max-cells value against the mode's format limit. Returns the message
+// ("--max-cells N exceeds the format limit M") or an empty string if it is acceptable.
+std::string max_cells_limit_error(bool classic, std::size_t max_cells);
+
+// Encodes a loaded program as a .malm (the mode and EXIT_A of the program, OR-ed with `exit_a`).
+std::vector<std::uint8_t> encode_malm(LoadedProgram&& prog, bool exit_a, container::Codec codec);
 
 // Loads `path`, autodetecting .malm by its magic. For a .malm the header's mode decides;
 // `classic_flag` (--classic) must agree with it. For text, `classic_flag` selects the mode and the

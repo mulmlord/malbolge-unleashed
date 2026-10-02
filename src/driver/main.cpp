@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "driver/cli.hpp"
+#include "driver/packed_run.hpp"
 
 int main(int argc, char** argv) {
     // Binary-safe, unsynchronised I/O; a closed stdout pipe must surface as a stream error
@@ -14,6 +15,10 @@ int main(int argc, char** argv) {
 #ifdef SIGPIPE
     std::signal(SIGPIPE, SIG_IGN);
 #endif
+    // A packed executable runs its embedded program and ignores the command line.
+    if (const auto rc = malm::run_packed(malm::kSelfExe, std::cin, std::cout, std::cerr)) {
+        return *rc;
+    }
     std::vector<std::string_view> args(argc > 0 ? argv + 1 : argv, argv + argc);
     try {
         return malm::run_cli(args, std::cin, std::cout, std::cerr);

@@ -1,4 +1,5 @@
 #include <doctest/doctest.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -11,12 +12,16 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "container/container.hpp"
 #include "core/classic.hpp"
 #include "core/tables.hpp"
 #include "driver/cli.hpp"
+#include "driver/pack_cmd.hpp"
+#include "driver/packed_run.hpp"
+#include "pack/trailer.hpp"
 
 namespace {
 
@@ -74,7 +79,7 @@ TEST_CASE("unknown command") {
 
 TEST_CASE("known subcommands are not implemented yet") {
     for (std::string_view sub : kSubcommands) {
-        if (sub == "run" || sub == "export") {
+        if (sub == "run" || sub == "export" || sub == "pack") {
             continue;
         }
         const Result r = run({sub, "x"});
@@ -706,4 +711,301 @@ TEST_CASE("--max-cells: resource cap on .malm and text, validation") {
     const TempFile halt("(P");
     r = run({"run", "--classic", "--max-cells", "59049", halt.str()});
     CHECK(r.code == 0);
+}
+
+// ---- pack ----
+
+namespace {
+
+std::string slurp_bin(const std::filesystem::path& p) {
+    std::ifstream f(p, std::ios::binary);
+    return {std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>()};
+}
+
+std::filesystem::path unique_path(const char* tag) {
+    static int counter = 0;
+    return std::filesystem::temp_directory_path() /
+           (std::string("malm_pack_test_") + tag + "_" +
+            std::to_string(static_cast<long>(getpid())) + "_" + std::to_string(counter++));
+}
+
+// A packed executable produced by `malm pack`; removed on destruction.
+struct Packed {
+    std::filesystem::path path = unique_path("exe");
+    Result r;
+    explicit Packed(const std::string& input, std::vector<std::string_view> opts = {}) {
+        const std::string out = path.string();
+        std::vector<std::string_view> args{"pack"};
+        args.insert(args.end(), opts.begin(), opts.end());
+        args.insert(args.end(), {"-o", out, input});
+        r = run(args);
+    }
+    ~Packed() { std::filesystem::remove(path); }
+    // Runs the embedded program the way the startup check of the packed binary does.
+    Result exec(const std::string& input = "") const {
+        std::istringstream in(input);
+        std::ostringstream out;
+        std::ostringstream err;
+        const auto rc = malm::run_packed(path.c_str(), in, out, err);
+        return {rc.value_or(-1), out.str(), err.str()};
+    }
+};
+
+} // namespace
+
+TEST_CASE("pack: usage errors exit 2") {
+    const TempFile f("(P");
+    const std::string in = f.str();
+    for (const std::vector<std::string_view>& args : std::vector<std::vector<std::string_view>>{
+             {"pack"},
+             {"pack", in},                       // no -o
+             {"pack", "-o", "x"},                // no input
+             {"pack", in, "-o"},                 // -o without a value
+             {"pack", in, "-o", "x", "-o", "y"}, // -o twice
+             {"pack", in, "extra", "-o", "x"},   // two inputs
+             {"pack", "--bogus", in, "-o", "x"}, // unknown option
+             {"pack", "--codec", "zstd", in, "-o", "x"},
+             {"pack", "--text", in, "-o", "x"},
+             {"pack", "--max-cells", "0", in, "-o", "x"},
+             {"pack", "--max-cells", in, "-o", "x"},
+             {"pack", "--classic", "--max-cells", "59050", in, "-o", "x"},
+             {"pack", in, "-o", "-"}}) { // binary to a terminal makes no sense
+        const Result r = run(args);
+        CHECK_MESSAGE(r.code == 2, args.back());
+        CHECK(r.out.empty());
+        CHECK(r.err.find("usage: malm pack") != std::string::npos);
+    }
+    CHECK(run({"pack", in, "-o", "-"}).err.find("-o - is not supported") != std::string::npos);
+}
+
+TEST_CASE("pack: bad input exits 1 and writes nothing") {
+    const TempFile bad("(A");
+    const std::filesystem::path out = unique_path("bad");
+    Result r = run({"pack", bad.str(), "-o", out.string()});
+    CHECK(r.code == 1);
+    CHECK(r.err.find("E_LOAD") != std::string::npos);
+    CHECK_FALSE(std::filesystem::exists(out));
+
+    r = run({"pack", "/nonexistent/in.mal", "-o", out.string()});
+    CHECK(r.code == 1);
+    CHECK_FALSE(std::filesystem::exists(out));
+
+    // unwritable output directory: failure, no stray temp file
+    const TempFile ok("(P");
+    r = run({"pack", ok.str(), "-o", "/nonexistent-dir/out"});
+    CHECK(r.code == 1);
+    CHECK(r.err.find("cannot write '/nonexistent-dir/out'") != std::string::npos);
+}
+
+TEST_CASE("pack: refuses to overwrite the running binary (and its links)") {
+    // Works on a temp copy standing in for the running binary, never on the real test binary.
+    const TempFile f("(P");
+    const std::filesystem::path fake = unique_path("self");
+    std::filesystem::copy_file("/proc/self/exe", fake);
+    const std::string self = fake.string();
+    const std::string before = slurp_bin(fake);
+    auto pack_over = [&](const std::string& target) {
+        std::ostringstream err;
+        const std::string in = f.str();
+        const std::vector<std::string_view> args{"-o", target, in};
+        const int code = malm::pack_command_with(args, err, self.c_str());
+        return std::pair{code, err.str()};
+    };
+    auto check_refused = [&](const std::string& target, const char* what) {
+        const auto [code, err] = pack_over(target);
+        CHECK_MESSAGE(code == 1, what);
+        CHECK_MESSAGE(err.find("refusing to overwrite the running binary") != std::string::npos,
+                      what);
+    };
+    check_refused(self, "the binary itself");
+    // a hard link (same directory, so same filesystem) and a symlink are the same file too
+    const std::filesystem::path hard = unique_path("hard");
+    const std::filesystem::path sym = unique_path("sym");
+    std::filesystem::create_hard_link(fake, hard);
+    std::filesystem::create_symlink(fake, sym);
+    check_refused(hard.string(), "hard link");
+    check_refused(sym.string(), "symlink");
+    CHECK(slurp_bin(fake) == before);
+    CHECK(std::filesystem::is_symlink(sym));
+    // an unrelated target is fine
+    const std::filesystem::path other = unique_path("other");
+    CHECK(pack_over(other.string()).first == 0);
+    // ... and -o to a symlink replaces the link, not its target
+    const std::filesystem::path target = unique_path("target");
+    std::ofstream(target, std::ios::binary) << "keep";
+    std::filesystem::remove(sym);
+    std::filesystem::create_symlink(target, sym);
+    CHECK(pack_over(sym.string()).first == 0);
+    CHECK_FALSE(std::filesystem::is_symlink(sym));
+    CHECK(slurp_bin(target) == "keep");
+    for (const auto& path : {fake, hard, sym, other, target}) {
+        std::filesystem::remove(path);
+    }
+}
+
+TEST_CASE("pack: refuses the dynamic loader and an input that is also the output") {
+    const TempFile f("(P");
+    {
+        const std::filesystem::path dir = unique_path("ld");
+        std::filesystem::create_directory(dir);
+        const std::filesystem::path loader = dir / "ld-linux-test.so.2";
+        std::filesystem::copy_file("/proc/self/exe", loader);
+        std::ostringstream err;
+        const std::string out = (dir / "out").string();
+        const std::string in = f.str();
+        const std::vector<std::string_view> args{"-o", out, in};
+        CHECK(malm::pack_command_with(args, err, loader.c_str()) == 1);
+        CHECK(err.str().find("dynamic loader") != std::string::npos);
+        CHECK_FALSE(std::filesystem::exists(out));
+        std::filesystem::remove_all(dir);
+    }
+    const TempFile in("(P");
+    const Result r = run({"pack", in.str(), "-o", in.str()});
+    CHECK(r.code == 1);
+    CHECK(r.err.find("refusing to overwrite the input file") != std::string::npos);
+    CHECK(slurp_bin(in.path) == "(P");
+}
+
+TEST_CASE("pack: warns when malm is dynamically linked") {
+    const TempFile f("(P");
+    const Packed p(f.str());
+    CHECK(p.r.code == 0);
+    CHECK(p.r.out.empty());
+#ifdef MALM_STATIC
+    CHECK(p.r.err.empty());
+#else
+    CHECK(p.r.err == "malm: warning: this malm is dynamically linked; the packed executable "
+                     "needs the same shared libraries at run time\n");
+#endif
+}
+
+TEST_CASE("pack: layout, mode and reproducibility") {
+    const TempFile f("u'a%@\"K");
+    const Packed a(f.str());
+    const Packed b(f.str());
+    REQUIRE(a.r.code == 0);
+    REQUIRE(b.r.code == 0);
+    const std::string bytes = slurp_bin(a.path);
+    CHECK(bytes == slurp_bin(b.path));
+
+    // [binary][payload = canonical zstd .malm][trailer]
+    const std::string self = slurp_bin("/proc/self/exe");
+    REQUIRE(bytes.size() > self.size() + malm::pack::kTrailerSize);
+    CHECK(bytes.compare(0, self.size(), self) == 0);
+    const Exported e = export_malm(f.str());
+    const std::string payload = slurp_bin(e.file.path);
+    CHECK(bytes.substr(self.size(), payload.size()) == payload);
+    CHECK(bytes.size() == self.size() + payload.size() + malm::pack::kTrailerSize);
+    CHECK(bytes.compare(bytes.size() - malm::pack::kTrailerSize, 8, "MALMEXE1") == 0);
+
+    // executable, honouring the umask (read without changing it)
+    struct stat st{};
+    REQUIRE(::stat(a.path.c_str(), &st) == 0);
+    const mode_t mask = ::umask(0);
+    ::umask(mask);
+    CHECK((st.st_mode & 0777) == (0777 & ~mask));
+
+    // packing a .malm gives the same bytes as packing its text (the payload is canonical)
+    const Packed c(e.file.str());
+    REQUIRE(c.r.code == 0);
+    CHECK(slurp_bin(c.path) == bytes);
+    // packing over an existing file replaces it
+    const Result again = run({"pack", f.str(), "-o", a.path.string()});
+    CHECK(again.code == 0);
+    CHECK(slurp_bin(a.path) == bytes);
+}
+
+TEST_CASE("packed executable: runs the embedded program, exit status as malm run") {
+    const TempFile f("u'a%@\"K");
+    {
+        const Packed p(f.str());
+        REQUIRE(p.r.code == 0);
+        const Result r = p.exec("A");
+        CHECK(r.code == 0);
+        CHECK(r.out == "A");
+        CHECK(r.err.empty());
+    }
+    {
+        const Packed p(f.str(), {"--exit-a"});
+        REQUIRE(p.r.code == 0);
+        const Result r = p.exec("A");
+        CHECK(r.code == 25);
+        CHECK(r.out == "A");
+    }
+    {
+        // classic mode comes from the header
+        const std::string hello = std::string(MALM_PROGRAMS_DIR) + "/hello.mal";
+        const Packed p(hello, {"--classic"});
+        REQUIRE(p.r.code == 0);
+        const Result r = p.exec();
+        CHECK(r.code == 0);
+        CHECK(r.out == "Hello, world.");
+    }
+    {
+        const TempFile fault("DCB");
+        const Packed p(fault.str());
+        REQUIRE(p.r.code == 0);
+        const Result r = p.exec();
+        CHECK(r.code == 1);
+        CHECK(r.err.starts_with("malm: E_EXEC at step 4: C="));
+    }
+    // an ordinary file (here: the test binary itself) is not a packed executable
+    std::istringstream in;
+    std::ostringstream out;
+    std::ostringstream err;
+    CHECK_FALSE(malm::run_packed("/proc/self/exe", in, out, err).has_value());
+    CHECK_FALSE(malm::run_packed("/nonexistent", in, out, err).has_value());
+}
+
+TEST_CASE("packed executable: an unreadable one falls back to the CLI with a hint") {
+    const TempFile f("(P");
+    const Packed p(f.str());
+    REQUIRE(p.r.code == 0);
+    REQUIRE(::chmod(p.path.c_str(), 0111) == 0);
+    if (::access(p.path.c_str(), R_OK) == 0) {
+        MESSAGE("skipped: running with privileges that ignore file modes");
+        return;
+    }
+    const Result r = p.exec();
+    CHECK(r.code == -1); // not recognised as packed: the normal CLI would run
+    CHECK(r.err.starts_with("malm: note: cannot read own executable ("));
+    CHECK(r.err.find("must be readable") != std::string::npos);
+}
+
+TEST_CASE("packed executable: corrupt trailer or payload exits 1") {
+    const TempFile f("u'a%@\"K");
+    const Packed p(f.str());
+    REQUIRE(p.r.code == 0);
+    const std::string good = slurp_bin(p.path);
+    const std::size_t trailer_at = good.size() - malm::pack::kTrailerSize;
+
+    auto check_corrupt = [&](const std::string& bytes, const char* what) {
+        const std::filesystem::path path = unique_path("corrupt");
+        std::ofstream(path, std::ios::binary) << bytes;
+        std::istringstream in;
+        std::ostringstream out;
+        std::ostringstream err;
+        const auto rc = malm::run_packed(path.c_str(), in, out, err);
+        std::filesystem::remove(path);
+        CHECK_MESSAGE(rc == 1, what);
+        CHECK_MESSAGE(err.str().starts_with("malm: corrupt packed executable: "), what);
+        CHECK(out.str().empty());
+    };
+    std::string t = good;
+    t[trailer_at + 8] = static_cast<char>(t[trailer_at + 8] + 1); // offset field
+    check_corrupt(t, "offset edited");
+    t = good;
+    t[trailer_at + 16] = static_cast<char>(t[trailer_at + 16] + 1); // length field
+    check_corrupt(t, "length edited");
+    t = good;
+    for (std::size_t i = 8; i < 16; ++i) {
+        t[trailer_at + i] = 0; // offset 0
+    }
+    check_corrupt(t, "offset 0");
+    // a byte lost from the payload: the sizes no longer add up
+    check_corrupt(good.substr(0, trailer_at - 5) + good.substr(trailer_at - 4), "byte removed");
+    // a damaged payload (consistent trailer): read_malm rejects it
+    t = good;
+    t[trailer_at - 3] = static_cast<char>(t[trailer_at - 3] ^ 0x55);
+    check_corrupt(t, "payload flipped");
 }
