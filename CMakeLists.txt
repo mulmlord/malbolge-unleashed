@@ -32,6 +32,7 @@ if(MALM_SANITIZE)
 endif()
 
 add_subdirectory(src/core)
+add_subdirectory(src/asm)
 add_subdirectory(src/container)
 add_subdirectory(src/pack)
 add_subdirectory(src/driver)

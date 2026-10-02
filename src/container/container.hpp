@@ -12,6 +12,7 @@
 
 #include "core/classic.hpp"
 #include "core/loader.hpp"
+#include "core/placement.hpp"
 #include "core/result.hpp"
 #include "core/tables.hpp"
 
@@ -25,55 +26,12 @@ inline constexpr std::string_view kMagic = "MALM";
 inline constexpr std::uint16_t kVersion = 1;
 inline constexpr std::uint8_t kFlagExitA = 1;
 
-// The 8 instruction letters in symbol order: symbol s is kSymbolLetters[s].
-inline constexpr std::string_view kSymbolLetters = "ji*p</vo";
-inline constexpr std::uint8_t kNoSymbol = 0xFF;
-
-namespace detail {
-
-struct SymbolTables {
-    std::array<std::uint8_t, 94> sym_of_code{}; // by k = (pos + cell) mod 94; kNoSymbol if none
-    std::array<std::uint8_t, 8> code_of_sym{};  // inverse
-};
-
-constexpr SymbolTables make_symbol_tables() {
-    SymbolTables t;
-    t.sym_of_code.fill(kNoSymbol);
-    for (std::size_t k = 0; k < 94; ++k) {
-        // Letter of code k is xlat1[(k - 33) mod 94] (spec 3.5).
-        const char letter = core::kXlat1[(k + 61) % 94];
-        for (std::size_t s = 0; s < 8; ++s) {
-            if (kSymbolLetters[s] == letter) {
-                t.sym_of_code[k] = static_cast<std::uint8_t>(s);
-                t.code_of_sym[s] = static_cast<std::uint8_t>(k);
-            }
-        }
-    }
-    return t;
-}
-
-inline constexpr SymbolTables kTables = make_symbol_tables();
-
-} // namespace detail
-
-// Cell code 33..126 at position `pos` -> symbol 0..7 (its instruction letter), or kNoSymbol if the
-// cell is not loadable there.
-constexpr std::uint8_t normalize(std::size_t pos, std::uint8_t cell) noexcept {
-    if (cell < 33 || cell > 126) {
-        return kNoSymbol;
-    }
-    return detail::kTables.sym_of_code[(pos % 94 + cell) % 94];
-}
-
-// Inverse of normalize (research 1.2). Precondition: sym < 8.
-constexpr std::uint8_t denormalize(std::size_t pos, std::uint8_t sym) noexcept {
-    const std::size_t k = detail::kTables.code_of_sym[sym & 7u];
-    std::size_t ch = (k + 94 - pos % 94) % 94;
-    if (ch < 33) {
-        ch += 94;
-    }
-    return static_cast<std::uint8_t>(ch);
-}
+// The char <-> instruction-symbol mapping lives in core (placement.hpp) so the assembler can use it
+// without the container library.
+using core::denormalize;
+using core::kNoSymbol;
+using core::kSymbolLetters;
+using core::normalize;
 
 // Largest accepted cell count for the mode (same as the text loader).
 constexpr std::size_t max_cells(Mode m) noexcept {
