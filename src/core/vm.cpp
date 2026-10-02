@@ -3,6 +3,29 @@
 namespace malm::core {
 
 Io::~Io() = default;
+StepObserver::~StepObserver() = default;
+
+std::string_view op_name(Op op) noexcept {
+    switch (op) {
+    case Op::Jmp:
+        return "Jmp";
+    case Op::Out:
+        return "Out";
+    case Op::In:
+        return "In";
+    case Op::Rot:
+        return "Rot";
+    case Op::MovD:
+        return "MovD";
+    case Op::Opr:
+        return "Opr";
+    case Op::Nop:
+        return "Nop";
+    case Op::Hlt:
+        return "Hlt";
+    }
+    return "?";
+}
 
 std::string_view error_name(Error e) noexcept {
     switch (e) {
@@ -34,17 +57,27 @@ Status BasicVm<M>::fail(Error e, Word a, Word c, Word d, bool overflow) noexcept
     return Status::Faulted;
 }
 
-template <class M> Status BasicVm<M>::step_inner(Io& io) {
+template <class M> template <class... Obs> Status BasicVm<M>::step_inner(Io& io, Obs&... obs) {
     ++steps_;
 
     // 1. Fetch check.
     const Word cell = m_.read(c_);
     if (!M::is_cell(cell)) {
+        if constexpr (sizeof...(Obs) > 0) {
+            (obs.before({steps_, M::to_value(c_), M::to_value(cell), false, Op::Nop,
+                         M::to_value(d_), M::to_value(m_.read(d_)), M::to_value(a_), m_.n()}),
+             ...);
+        }
         return fail(Error::Exec, a_, c_, d_);
     }
 
     // 2. Decode.
     const Op op = decode(M::mod94(c_), M::cell_code(cell));
+    if constexpr (sizeof...(Obs) > 0) {
+        (obs.before({steps_, M::to_value(c_), M::to_value(cell), true, op, M::to_value(d_),
+                     M::to_value(m_.read(d_)), M::to_value(a_), m_.n()}),
+         ...);
+    }
 
     // 3. Execute.
     switch (op) {
@@ -140,7 +173,9 @@ template <class M> StepResult BasicVm<M>::step(Io& io) {
     return {s, s == Status::Faulted ? fault_ : std::nullopt};
 }
 
-template <class M> RunResult BasicVm<M>::run(Io& io, std::optional<std::uint64_t> max_steps) {
+template <class M>
+template <class... Obs>
+RunResult BasicVm<M>::run_impl(Io& io, std::optional<std::uint64_t> max_steps, Obs&... obs) {
     Status s = Status::Continue;
     if (halted_) {
         s = Status::Halted;
@@ -149,7 +184,7 @@ template <class M> RunResult BasicVm<M>::run(Io& io, std::optional<std::uint64_t
     } else {
         const std::uint64_t limit = max_steps.value_or(~std::uint64_t{0});
         while (steps_ < limit) {
-            s = step_inner(io);
+            s = step_inner(io, obs...);
             if (s != Status::Continue) {
                 break;
             }
@@ -169,6 +204,15 @@ template <class M> RunResult BasicVm<M>::run(Io& io, std::optional<std::uint64_t
         return {RunResult::Kind::Halted, std::nullopt};
     }
     return {RunResult::Kind::Fault, fault_};
+}
+
+template <class M> RunResult BasicVm<M>::run(Io& io, std::optional<std::uint64_t> max_steps) {
+    return run_impl(io, max_steps);
+}
+
+template <class M>
+RunResult BasicVm<M>::run(Io& io, StepObserver& obs, std::optional<std::uint64_t> max_steps) {
+    return run_impl(io, max_steps, obs);
 }
 
 template class BasicVm<UnleashedMachine>;

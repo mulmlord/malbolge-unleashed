@@ -7,6 +7,7 @@ CLI binary, `malm`. See the [design spec](docs/superpowers/specs/2026-10-01-malb
 and the [Malbolge research notes](docs/research/malbolge-research.md).
 The normative language reference is [docs/spec.md](docs/spec.md).
 The assembly language (`.mua`) is specified in [docs/asm.md](docs/asm.md).
+The command line (`run`, `export`, `pack`, `--trace`, `--stats`) is documented in [docs/cli.md](docs/cli.md).
 
 ## Prerequisites
 
@@ -45,7 +46,7 @@ Binaries land in `build/<preset>/src/driver/malm`. CMake options: `MALM_WERROR`,
 | `rv/emu` | RV32IM emulator written in HLA |
 | `rv/runtime` | RISC-V runtime (crt0, syscalls, libc) |
 | `tests/` | doctest suites (labels `fast`, `slow`) |
-| `docs/` | spec and research |
+| `docs/` | spec, CLI reference and research |
 
 ## Status
 
