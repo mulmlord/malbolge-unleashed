@@ -32,6 +32,13 @@ int run_vm(std::span<const std::uint8_t> cells, std::istream& in, std::ostream& 
 
 } // namespace
 
+int run_loaded(const LoadedProgram& prog, bool exit_a, std::istream& in, std::ostream& out,
+               std::ostream& err) {
+    exit_a = exit_a || prog.exit_a;
+    return prog.classic ? run_vm<core::ClassicVm>(prog.cells, in, out, err, exit_a)
+                        : run_vm<core::Vm>(prog.cells, in, out, err, exit_a);
+}
+
 int run_command(std::span<const std::string_view> args, std::istream& in, std::ostream& out,
                 std::ostream& err) {
     std::string_view path;
@@ -69,22 +76,17 @@ int run_command(std::span<const std::string_view> args, std::istream& in, std::o
         return 2;
     }
 
-    const std::size_t format_max = classic ? core::kClassicCells : core::kUnleashedMaxCells;
-    if (max_cells_given && max_cells > format_max) {
-        err << "malm run: --max-cells " << max_cells << " exceeds the format limit " << format_max
-            << '\n'
-            << kUsage;
-        return 2;
+    if (max_cells_given) {
+        if (const std::string msg = max_cells_limit_error(classic, max_cells); !msg.empty()) {
+            err << "malm run: " << msg << '\n' << kUsage;
+            return 2;
+        }
     }
     LoadedProgram prog;
     if (const int rc = load_program(path, classic, err, prog, max_cells); rc != 0) {
         return rc;
     }
-    classic = prog.classic;
-    exit_a = exit_a || prog.exit_a;
-
-    return classic ? run_vm<core::ClassicVm>(prog.cells, in, out, err, exit_a)
-                   : run_vm<core::Vm>(prog.cells, in, out, err, exit_a);
+    return run_loaded(prog, exit_a, in, out, err);
 }
 
 } // namespace malm

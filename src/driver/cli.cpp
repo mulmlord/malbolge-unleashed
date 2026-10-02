@@ -6,6 +6,7 @@
 #include <ostream>
 
 #include "driver/export_cmd.hpp"
+#include "driver/pack_cmd.hpp"
 #include "driver/run_cmd.hpp"
 #include "version.hpp"
 
@@ -28,7 +29,7 @@ constexpr auto kCommands = std::to_array<Command>({
     {"hla", "Compile a high-level .mhl file to .malm", nullptr},
     {"disasm", "Disassemble a .malm or Malbolge text file", nullptr},
     {"build", "Build a C/C++/Rust/Zig source to .malm or an executable", nullptr},
-    {"pack", "Pack a .malm into a native executable", nullptr},
+    {"pack", "Pack a .malm into a native executable", pack_command},
     {"export", "Convert between .malm and plain Malbolge text (--text | --malm)", export_command},
 });
 

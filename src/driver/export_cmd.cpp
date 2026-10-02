@@ -107,10 +107,10 @@ int export_command(std::span<const std::string_view> args, std::istream&, std::o
         return usage_error(err, "--exit-a and --codec apply to --malm only");
     }
 
-    const std::size_t format_max = classic ? core::kClassicCells : core::kUnleashedMaxCells;
-    if (max_cells_given && max_cells > format_max) {
-        return usage_error(err, "--max-cells " + std::to_string(max_cells) +
-                                    " exceeds the format limit " + std::to_string(format_max));
+    if (max_cells_given) {
+        if (const std::string msg = max_cells_limit_error(classic, max_cells); !msg.empty()) {
+            return usage_error(err, msg);
+        }
     }
     LoadedProgram prog;
     if (const int rc = load_program(input, classic, err, prog, max_cells); rc != 0) {
@@ -128,10 +128,7 @@ int export_command(std::span<const std::string_view> args, std::istream&, std::o
         bytes = std::move(prog.cells);
         bytes.push_back('\n');
     } else {
-        container::Program p{std::move(prog.cells),
-                             prog.classic ? container::Mode::Classic : container::Mode::Unleashed,
-                             prog.exit_a || exit_a};
-        bytes = container::write_malm(p, codec);
+        bytes = encode_malm(std::move(prog), exit_a, codec);
     }
 
     if (output == "-") {
