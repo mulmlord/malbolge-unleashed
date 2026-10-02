@@ -36,3 +36,5 @@ foreach(case halting_cat loop_cat epipe hello classic_beer99 classic_loop_cat
 endforeach()
 add_subdirectory(corpus)
 add_subdirectory(reference)
+
+malm_add_test(NAME cycles_test LABEL fast SOURCES asm/cycles_test.cpp LIBS malm_asm)

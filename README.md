@@ -6,6 +6,7 @@ target Malbolge) and a packer that turns programs into native executables. Every
 CLI binary, `malm`. See the [design spec](docs/superpowers/specs/2026-10-01-malbolge-unleashed-design.md)
 and the [Malbolge research notes](docs/research/malbolge-research.md).
 The normative language reference is [docs/spec.md](docs/spec.md).
+The assembly language (`.mua`) is specified in [docs/asm.md](docs/asm.md).
 
 ## Prerequisites
 
