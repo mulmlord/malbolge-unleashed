@@ -34,6 +34,70 @@ hello)
     out=$("$malm" run "$dir/hello.mal") || exit 1
     test "$out" = "Hello, world." || exit 1
     ;;
+debug_halting_cat)
+    # --trace and --stats leave stdout byte-identical (binary-safe cat, status 0); stderr carries
+    # the trace and then the stats block.
+    ( "$malm" run --trace --stats "$dir/cat5.mal" < "$dir/cat5_input.bin" 2> "$tmp/err"
+      echo $? > "$tmp/status" ) | cmp - "$dir/cat5_expected.bin" || exit 1
+    test "$(cat "$tmp/status")" = 0 || exit 1
+    test "$(grep -c '^step=' "$tmp/err")" = 11 || { echo "expected 11 trace lines" >&2; exit 1; }
+    grep -q '^malm stats:$' "$tmp/err" || exit 1
+    ;;
+debug_hello)
+    # Both modes: stdout of the traced run equals the plain run.
+    for mode in "" --classic; do
+        out=$("$malm" run $mode --trace --stats "$dir/hello.mal" 2> /dev/null) || exit 1
+        test "$out" = "Hello, world." || exit 1
+    done
+    ;;
+debug_epipe)
+    # E_IO with tracing: the trace lines come before the diagnostic, then the stats block.
+    ( env --default-signal=PIPE "$malm" run --trace --trace-to 3 --stats "$dir/cat_nostop.mal" \
+          < /dev/null 2> "$tmp/err"
+      echo $? > "$tmp/status" ) | head -c 1 > /dev/null
+    test "$(cat "$tmp/status")" = 1 || { echo "unexpected exit status" >&2; exit 1; }
+    test "$(grep -n '^step=3 ' "$tmp/err" | cut -d: -f1)" = 3 || exit 1
+    test "$(sed -n 4p "$tmp/err" | cut -c1-9)" = "malm: E_I" || { echo "diagnostic not after trace" >&2; exit 1; }
+    sed -n 5p "$tmp/err" | grep -q '^malm stats:$' || exit 1
+    grep -q 'halted       no (E_IO)' "$tmp/err" || exit 1
+    ;;
+debug_trace_flush)
+    # The trace of the In step is written before the read blocks: with stdin held open and empty,
+    # step 1 must already be on stderr while the process is still waiting.
+    mkfifo "$tmp/in" || exit 1
+    "$malm" run --trace "$dir/cat5.mal" < "$tmp/in" > "$tmp/out" 2> "$tmp/err" &
+    pid=$!
+    exec 3> "$tmp/in"
+    i=0
+    until grep -q '^step=1 ' "$tmp/err" 2> /dev/null; do
+        i=$((i + 1))
+        if [ "$i" -gt 100 ]; then
+            kill "$pid" 2> /dev/null
+            echo "trace line not flushed while waiting for input" >&2
+            exit 1
+        fi
+        sleep 0.05
+    done
+    kill -0 "$pid" 2> /dev/null || { echo "process ended early" >&2; exit 1; }
+    printf 'abcde' >&3
+    exec 3>&-
+    wait "$pid" || exit 1
+    test "$(cat "$tmp/out")" = abcde || exit 1
+    test "$(grep -c '^step=' "$tmp/err")" = 11 || exit 1
+    ;;
+debug_stderr_dead)
+    # A dead stderr never changes stdout or the exit status; tracing just stops.
+    for redir in full closed; do
+        if [ "$redir" = full ]; then
+            out=$("$malm" run --classic --trace --stats "$dir/hello.mal" 2> /dev/full)
+        else
+            out=$("$malm" run --classic --trace --stats "$dir/hello.mal" 2>&-)
+        fi
+        status=$?
+        test "$status" = 0 || { echo "$redir: exit status $status" >&2; exit 1; }
+        test "$out" = "Hello, world." || { echo "$redir: wrong stdout" >&2; exit 1; }
+    done
+    ;;
 classic_beer99)
     # 99 bottles in classic mode: the full song, byte-exact, exit status 0.
     ( "$malm" run --classic "$dir/beer99.mal" < /dev/null; echo $? > "$tmp/status" ) \

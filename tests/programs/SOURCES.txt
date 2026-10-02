@@ -36,3 +36,15 @@ beer99.expected
     beer99.mal; lyrics traditional).
     Generated with Ben Olmstead's reference interpreter malbolge.c (public domain) and
     cross-checked byte-for-byte against the executable model of docs/spec.md section 8.
+
+hello.classic.trace
+hello.unleashed.trace
+beer99.unleashed.trace
+    Golden `malm run --trace` output (docs/cli.md) for hello.mal, classic and unleashed mode (45
+    steps each), and for beer99.mal in unleashed mode (4258 lines, the last being the step that
+    fails with E_WIDTH; the diagnostic itself is not part of the file). NOT produced by malm: generated from the executable Python model of docs/spec.md
+    (the independent model used for the spec cross-checks) by a small script that steps the model's
+    unleashed VM (and its classic loop) and prints each step in the trace format, before the step
+    executes. A second, independently written trace emitter (written from docs/spec.md alone during
+    review) reproduces all three files byte for byte; the script also reproduced the traces of
+    tests/corpus/exec_fault.mal and encrypt_fault.mal.

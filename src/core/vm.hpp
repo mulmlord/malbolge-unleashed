@@ -52,6 +52,32 @@ std::string format_fault(const Fault& f);
 
 enum class Status : std::uint8_t { Continue, Halted, Faulted };
 
+// "Jmp", "Out", "In", "Rot", "MovD", "Opr", "Nop", "Hlt".
+std::string_view op_name(Op op) noexcept;
+
+// What an observer sees of a step before it executes: the registers and n as they are at fetch
+// time, [C] and [D] being the cells they point to. A step that fails the fetch check (E_EXEC) has
+// no decoded op: `decoded` is false, `op` is meaningless and `cell` is the offending value. For a
+// decoded step, `cell` is the cell code 33..126.
+struct StepInfo {
+    std::uint64_t step; // 1-based, as in Fault::steps
+    Value c;
+    Value cell; // [C]
+    bool decoded;
+    Op op;
+    Value d;
+    Value dval; // [D]
+    Value a;
+    unsigned n;
+};
+
+// Observer interface for run(io, obs, ...). One virtual call per hook and step.
+struct StepObserver {
+    virtual ~StepObserver();
+    // Before the step executes (also for a step that then faults, including E_EXEC).
+    virtual void before(const StepInfo& s) = 0;
+};
+
 struct StepResult {
     Status status;
     std::optional<Fault> fault; // set iff status == Faulted
@@ -103,10 +129,17 @@ template <class M> class BasicVm {
     // Steps until halt or fault, or until `max_steps` steps have been executed in total (the
     // counter `steps()` is compared, not a per-call budget). Flushes `io` when it returns.
     RunResult run(Io& io, std::optional<std::uint64_t> max_steps = {});
+    // The same loop (one shared implementation), reporting every step to `obs`.
+    RunResult run(Io& io, StepObserver& obs, std::optional<std::uint64_t> max_steps = {});
 
   private:
-    // The inner loop: no flush, no result objects. Faults are recorded in fault_.
-    Status step_inner(Io& io);
+    // The inner loop: no flush, no result objects. Faults are recorded in fault_. The only
+    // definition of the step order (spec 5).
+    // With no observer (the plain path) the hooks are compiled out and the signature is the
+    // original one; with one, every hook runs before the step executes.
+    template <class... Obs> Status step_inner(Io& io, Obs&... obs);
+    template <class... Obs>
+    RunResult run_impl(Io& io, std::optional<std::uint64_t> max_steps, Obs&... obs);
     Status fail(Error e, Word a, Word c, Word d, bool overflow = false) noexcept;
     // Flushes after the loop stopped with `s`; returns the final status.
     Status finish(Io& io, Status s);

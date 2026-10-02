@@ -1,8 +1,10 @@
 #include <doctest/doctest.h>
 
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 #include "core/loader.hpp"
@@ -372,4 +374,91 @@ TEST_CASE("format_fault") {
     CHECK(format_fault(f).ends_with(" n=39"));
     CHECK(error_name(Error::Encrypt) == "E_ENCRYPT");
     CHECK(error_name(Error::Io) == "E_IO");
+}
+
+namespace {
+
+struct CountObs : StepObserver {
+    std::uint64_t count = 0;
+    std::uint64_t last_step = 0;
+    void before(const StepInfo& s) override {
+        ++count;
+        last_step = s.step;
+    }
+};
+
+template <class W> W word_at(unsigned i) {
+    if constexpr (std::is_same_v<W, Value>) {
+        return *Value::natural(i);
+    } else {
+        return static_cast<W>(i);
+    }
+}
+
+// run(io, max) and run(io, obs, max) must end in the same state with the same output.
+template <class VmT>
+void check_same_run(const std::string& text, const std::string& input,
+                    std::optional<std::uint64_t> max) {
+    StrIo io1;
+    StrIo io2;
+    io1.in = io2.in = input;
+    VmT plain(cells(text));
+    VmT observed(cells(text));
+    CountObs obs;
+    const RunResult r1 = plain.run(io1, max);
+    const RunResult r2 = observed.run(io2, obs, max);
+    CHECK(r1.kind == r2.kind);
+    CHECK(plain.a() == observed.a());
+    CHECK(plain.c() == observed.c());
+    CHECK(plain.d() == observed.d());
+    CHECK(plain.n() == observed.n());
+    CHECK(plain.steps() == observed.steps());
+    CHECK(plain.halted() == observed.halted());
+    CHECK(io1.out == io2.out);
+    for (const unsigned i : {0u, 1u, 2u, 5u, 40u, 100u}) {
+        CHECK(plain.memory().read(word_at<typename VmT::Word>(i)) ==
+              observed.memory().read(word_at<typename VmT::Word>(i)));
+    }
+    CHECK(obs.count == observed.steps());
+    CHECK(obs.last_step == observed.steps());
+    if (max) {
+        CHECK(observed.steps() <= *max);
+    }
+}
+
+} // namespace
+
+TEST_CASE("run with an observer reaches the same state as run without, both modes") {
+    const std::string hello =
+        R"x((=<`#9]~6ZY32Vw/.R,+Op(L,+k#Gh&}Cdz@aw=;zyKw%ut4Uqp0/mlejihtfrHcbaC2^W\>Z,XW)UTSL53\HGFjW)x";
+    const std::string cat5 = "ubs`q^o\\mZG";
+    for (const std::optional<std::uint64_t> max :
+         {std::optional<std::uint64_t>{}, std::optional<std::uint64_t>{0},
+          std::optional<std::uint64_t>{10}, std::optional<std::uint64_t>{44},
+          std::optional<std::uint64_t>{45}, std::optional<std::uint64_t>{1000}}) {
+        check_same_run<Vm>(hello, "", max);
+        check_same_run<ClassicVm>(hello, "", max);
+        check_same_run<Vm>(cat5, "ab", max);
+        check_same_run<ClassicVm>(cat5, "ab", max);
+        check_same_run<Vm>("DCB", "", max); // E_EXEC at step 4
+    }
+}
+
+TEST_CASE("observer sees E_EXEC steps undecoded and honours the step limit") {
+    struct Rec : StepObserver {
+        std::vector<StepInfo> v;
+        void before(const StepInfo& s) override { v.push_back(s); }
+    };
+    StrIo io;
+    Vm vm(cells("DCB"));
+    Rec rec;
+    CHECK(vm.run(io, rec).kind == RunResult::Kind::Fault);
+    REQUIRE(rec.v.size() == 4);
+    CHECK_FALSE(rec.v[3].decoded);
+    CHECK(rec.v[3].step == 4);
+    CHECK(rec.v[0].decoded);
+    Vm lim(cells("DCB"));
+    Rec rec2;
+    CHECK(lim.run(io, rec2, 2).kind == RunResult::Kind::StepLimit);
+    CHECK(rec2.v.size() == 2);
 }

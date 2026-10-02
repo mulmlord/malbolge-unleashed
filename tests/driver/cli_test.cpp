@@ -131,13 +131,13 @@ TEST_CASE("run: usage errors exit 2") {
                                                     {"run", "--exit-a"},
                                                     {"run", "--bogus", "f"},
                                                     {"run", "--classic"},
-                                                    {"run", "--trace", "f"},
-                                                    {"run", "--stats", "f"},
+                                                    {"run", "--nosuch", "f"},
+                                                    {"run", "--trace-from"},
                                                     {"run", "a", "b"}}) {
         const Result r = run(args);
         CHECK(r.code == 2);
         CHECK(r.out.empty());
-        CHECK(r.err.find("usage: malm run [--classic] [--exit-a] [--max-cells N] [--] <file>") !=
+        CHECK(r.err.find("usage: malm run [--classic] [--exit-a] [--max-cells N] [--stats]") !=
               std::string::npos);
     }
 }
