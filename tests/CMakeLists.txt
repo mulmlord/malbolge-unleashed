@@ -54,5 +54,5 @@ malm_add_test(NAME asm_front_test LABEL fast
 target_compile_definitions(asm_front_test PRIVATE MALM_ASM_DOC="${PROJECT_SOURCE_DIR}/docs/asm.md")
 
 malm_add_test(NAME asm_layout_test LABEL fast
-    SOURCES asm/layout_test.cpp asm/units_test.cpp
+    SOURCES asm/layout_test.cpp asm/units_test.cpp asm/startup_test.cpp
     LIBS malm_asm)

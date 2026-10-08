@@ -12,6 +12,7 @@
 #include <string_view>
 #include <vector>
 
+#include "asm/assemble.hpp"
 #include "asm/layout.hpp"
 #include "asm_test_util.hpp"
 #include "core/vm.hpp"
@@ -73,36 +74,15 @@ inline std::uint8_t char_at(const Layout& l, Value addr) {
 
 inline Value plus(Value v, std::int64_t k) { return *add(v, *Value::from_int(k)); }
 
-// The VM as the startup code leaves it (docs/asm.md 5.3): every image cell written, n equal to the
-// program width, D at ENTRY and C at a Jmp (cell 0, `b`). Image cells that are characters go into
-// the program text, the rest is written with poke. The text is long enough to make the initial n
-// the program width: its last address has width n - 1.
-inline malm::core::Vm load_image(const Layout& l) {
-    using malm::core::pow3;
-    std::uint64_t len = pow3[l.width - 2] + 1;
-    for (const ImageCell& c : l.cells) {
-        if (c.addr.head() == 0) {
-            len = std::max(len, c.addr.raw() + 1);
-        }
-    }
-    std::vector<std::uint8_t> text(len, '!');
-    text[0] = 'b';
-    std::vector<const ImageCell*> rest;
-    for (const ImageCell& c : l.cells) {
-        const bool is_char = c.value.raw() >= 33 && c.value.raw() <= 126;
-        if (c.addr.head() == 0 && is_char) {
-            text[c.addr.raw()] = static_cast<std::uint8_t>(c.value.raw());
-        } else {
-            rest.push_back(&c);
-        }
-    }
-    malm::core::Vm vm(text);
-    for (const ImageCell* c : rest) {
-        vm.poke(c->addr, c->value);
-    }
-    vm.set_registers({Value(), Value(), addr_of(l, "ENTRY")});
-    REQUIRE(vm.n() == l.width);
-    return vm;
+// A whole assembly (layout and startup code) that must succeed.
+inline Assembly assembled(std::string_view src) {
+    Parsed p = analyze_src(src);
+    INFO(p.text());
+    REQUIRE(!p.diags.has_errors());
+    auto a = assemble(p.program, p.diags);
+    INFO(p.text());
+    REQUIRE(a.has_value());
+    return std::move(*a);
 }
 
 // Scripted input, recorded output.
@@ -119,5 +99,30 @@ struct TestIo final : malm::core::Io {
     }
     bool flush() override { return true; }
 };
+
+// The VM after the startup code has run (docs/asm.md 5.3): C at its final Jmp, D at ENTRY, n equal
+// to the program width, every image cell written and no I/O done.
+inline malm::core::Vm start(const Assembly& a) {
+    malm::core::Vm vm(a.startup.text);
+    TestIo io;
+    const auto r = vm.run(io, a.startup.steps);
+    if (r.fault) {
+        INFO(malm::core::format_fault(*r.fault));
+        REQUIRE(false);
+    }
+    REQUIRE(r.kind == malm::core::RunResult::Kind::StepLimit);
+    CHECK(io.out.empty());
+    CHECK(io.pos == 0);
+    REQUIRE(vm.d() == addr_of(a.layout, "ENTRY"));
+    REQUIRE(vm.n() == a.layout.width);
+    REQUIRE(malm::core::decode(static_cast<std::uint32_t>(vm.c().mod94()),
+                               static_cast<std::uint32_t>(vm.memory().read(vm.c()).raw())) ==
+            malm::core::Op::Jmp);
+    for (const ImageCell& c : a.layout.cells) {
+        INFO(c.addr.to_string());
+        REQUIRE(vm.memory().read(c.addr) == c.value);
+    }
+    return vm;
+}
 
 } // namespace asmtest

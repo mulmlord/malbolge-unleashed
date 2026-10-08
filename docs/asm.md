@@ -116,6 +116,8 @@ All values are 3-adic, exactly as in spec §1. The assembler computes with the l
 | `C20` | `...20` = −3 | |
 | `EOF` | `...2` | what `In` returns at end of input (spec §6) |
 
+`C2`, `C21`, `C20` and `EOF` have head 2: they are fine inside expressions, but not as the value of a data word (§4.3, §6).
+
 ### 4.3 Expressions
 
 Expressions are evaluated at assembly time, **after layout**.
@@ -140,6 +142,7 @@ Expressions are evaluated at assembly time, **after layout**.
 
 **Results:** results are exact 3-adic values. There is no silent wrap-around (cf. LMAO's `% 59048` quirk `[H §5.2]`).
 - A data word whose value has width > `n` is an error, because the spec §2.2 invariant forbids such cells.
+- A data word whose value has head 2 is an error: the startup code cannot build it (§6).
 - The stored value of a label may have width `n`: e.g. the cell before the lowest address of a head-1 window, see §6.
 
 ## 5. Data blocks
@@ -182,9 +185,7 @@ Expressions are evaluated at assembly time, **after layout**.
 
 There are no conditional instructions. A value-dependent branch jumps *through the value itself* into an RNop sled, so that `D` ends on different words `[H §6.4]`.
 
-In malbolge-unleashed, sleds and branch values use the head-2 constants. That avoids any classic wrap-around (spec §2.2).
-- `...21` and `...2` have width ≤ 1.
-- `...2 + 1 = 0` is an ordinary increment.
+**Head 2 is out of reach.** `crz` maps heads 0 and 1 to heads 0 and 1 (spec §3.2: `T[0][0] = T[1][0] = 1`, `T[0][1] = T[1][1] = 0`), rotation keeps the head, the loader and the fill produce only heads 0 and 1, and an increment never turns head 0 or 1 into head 2. So no cell holds a head-2 value unless `In` returned EOF (`...2`), and `C` and `D`, which are loaded from cells, never reach a head-2 address. The assembler therefore rejects head-2 data words (§4.3) and head-2 `@` offsets (§7); head-2 constants such as `C2` remain useful inside expressions (`C2 ! 'H'`).
 
 **Cell 0.** Cell 0 of every assembled program is the startup `Jmp` (`b`), and cells 0..98 belong to the startup code (§7). Cell 0 stays a `Jmp` only if the program never encrypts or overwrites it. The assembler enforces the static part, and the program is responsible for the rest:
 - **Rejected by the assembler:**
@@ -192,18 +193,20 @@ In malbolge-unleashed, sleds and branch values use the head-2 constants. That av
   - a constant data word with value `0` in a code-reference position, i.e. the first word of a data line (§2, "Lines in data blocks"), or the operand of a code unit known to `Jmp`/`MovD` through it.
 - **Forbidden at run time** (not checkable): jumping through the value 0, which encrypts cell 0, and `Opr`/`Rot` with `D = 0`.
 
-With that guarantee, a block pinned at `@C21` holding two `RNop`s forms a 3-entry sled `...21 → ...2 → 0 (Jmp)`:
+**Sleds.** A sled is an ordinary code block of `RNop`s ending in a `Jmp`:
 
 ```
-@C21
-SLED:   RNop        ; ...21
-        RNop        ; ...2   (then C = 0: the startup Jmp)
+SLED:   RNop
+        RNop
+        Jmp
 ```
 
-Its reserved cell is `...20` (§7). How a branch runs:
-1. The program drives a variable `var` to `C2`, `C21` or `C20`.
-2. `MOVED var` moves `D` onto `var`, and MOVED's `Jmp` then jumps through `[var]`. The stored value `C2`/`C21`/`C20` is a jump target landing at `0`/`...2`/`...21`, so it executes 0, 1 or 2 RNops.
-3. The cell-0 `Jmp` then reads `[var+1]`, `[var+2]` or `[var+3]`, typically `U_NOP …` dispatch entries `[H §6.4]`.
+How a branch runs:
+1. The program drives a variable `var` to one of the values `SLED`, `SLED+1` or `SLED+2` (a label leaf is the address − 1, §4.3), typically with `crz` against a table of such words.
+2. `MOVED var` moves `D` onto `var`, and MOVED's `Jmp` then jumps through `[var]`. The value lands at `SLED`, `SLED+1` or `SLED+2`, so the sled executes 2, 1 or 0 RNops. The cell before the landing address is encrypted: the reserved cell or an RNop, both safe.
+3. The sled's `Jmp` then reads `[var+3]`, `[var+2]` or `[var+1]`, typically `U_NOP …` dispatch entries `[H §6.4]`.
+
+The one head-2 value a program sees, EOF, lands at cell 0 when jumped through (`...2 + 1 = 0`), and the startup `Jmp` there then continues with the next data word. That is why cell 0 stays a `Jmp`.
 
 **Pointer safety (spec §2.2, "Consequences for code generators"):**
 - Every address that `C` or `D` *visits* must have width ≤ `n − 1`. That includes the landing address, i.e. the stored value + 1.
@@ -213,23 +216,20 @@ Its reserved cell is `...20` (§7). How a branch runs:
 
 ## 7. Layout and generated code
 
-This section is the contract for #14 and #15.
+This section is the contract for #14 and #15. `src/asm/startup.hpp` describes the generated code in detail.
 
 - **Determinism:** assembling the same source with the same options gives the same bytes. There is no randomness and no time-dependent filler (unlike LMAO `[H §7.1]`).
   - Placement is first-fit in source order. Ties between residues go to the lowest address.
   - The character for a reserved cell is chosen by a fixed rule (see "Characters" below).
-- **Startup area:** cells 0..98 belong to the startup code. Cell 0 is `b` (a `Jmp` to 99), so `L ≥ 100`. No user block, reserved cell or RNop run may use them (§6).
-- **Windows.** User blocks live in three windows:
-  - **head 0:** `[100, 3^(n−1))`. The loaded program text `0 .. L−1` is part of it.
-  - **head 1 / head 2:** all addresses of width ≤ `n − 1` with that head.
+- **The program text** is the startup code and nothing else: cell 0 is `b` (a `Jmp` to 99, with `D = 1`), cells 1..98 hold the startup code's constants and pointers, the startup code follows from cell 99, and the text ends with two characters chosen to make the fill predictable (spec §2.4). Its length `L` is the **base**: no user block, reserved cell or RNop run may lie below it (§6).
+- **Windows.** User blocks live in two windows:
+  - **head 0:** `[base, 3^(n−1) − 1)`;
+  - **head 1:** all addresses of width ≤ `n − 1` with head 1, except the last.
 
-  Each block **and its reserved cell** lie wholly inside one window. A block must not cross a window's end, with one exception: the cell after `...2` is cell 0 (§6).
-- **Preinitialized vs. runtime-written:**
-  - A code block inside `[100, L)` whose initial characters are all loadable at their positions is part of the program text ("preinitialized").
-  - Everything else (all data, the other code blocks, reserved cells, RNops whose character isn't loadable) is written by the startup code.
-  - A block pinned (`@`) below `L` must be loadable, otherwise it's an error.
+  The last address of each window is left out because writing a cell leaves `D` on the next one, which would then have width `n`. Head-2 addresses are unreachable (§6), and a block pinned there is an error. Each block **and its reserved cell** lie wholly inside one window.
+- **Runtime-written:** every block, reserved cell and RNop run is written by the startup code; none is part of the program text. (Preinitializing loadable code is a possible size optimization.) A block pinned below the base is an error.
 - **Positions:** a code block's start position mod 94 is chosen so that every word's cycle exists there (§3.1).
-  - For head-1/head-2 addresses, the position is `addr mod 94` under the remainder rule (spec §1.4).
+  - For head-1 addresses, the position is `addr mod 94` under the remainder rule (spec §1.4).
   - Blocks with `@` are placed exactly; a residue that doesn't fit is an error.
 - **Reserved cells:**
   - The cell before every code block (or before its `U_` RNop run, §5.2) is reserved and receives a character in 33..126.
@@ -239,18 +239,15 @@ This section is the contract for #14 and #15.
   - **hard**: every other code or data cell. A hard cell needs its address to itself.
 
   A `?-` slot claims nothing, so a cell of any other block may sit on it.
-- **First fit.** Pinned blocks are placed first, exactly where they are pinned. The other blocks follow in source order. Each one goes to the lowest footprint start in the head-0 window where its footprint fits and every code cell's cycle exists at its position. Only pinned blocks use the head-1 and head-2 windows.
+- **First fit.** Pinned blocks are placed first, exactly where they are pinned. The other blocks follow in source order. Each one goes to the lowest footprint start in the head-0 window where its footprint fits and every code cell's cycle exists at its position. Only pinned blocks use the head-1 window.
 - **Characters.** All of these are deterministic:
   - a single command: the loadable character for it at the cell's position;
   - a cycle: the smallest loadable character whose xlat2 cycle matches it there (§3.1), or the smallest matching character if none is loadable;
   - an RNop, an all-`Nop` cycle or a run cell: `rnop_char` (§3.1);
   - a reserved cell: the loadable `o` (Nop) at its position. It is encrypted when a jump lands after it, but it is never executed.
 - **The image.** Layout gives every cell with a defined initial value: code cells, reserved cells, run cells and data words. A `?` cell has no defined value, so the startup code doesn't write it.
-- **Width forcing.** Before any `Rot`, any I/O and any access at width ≥ the initial `n`, the startup code raises `n` to the program width `N`:
-  1. A `MovD` lands on an address `v` such that both `v` and `v + 1` have width `N − 1`, e.g. `v = 3^(N−2)`.
-  2. A back-jump word at `v` returns to the startup code.
-
-  This is needed because the back-jump increments `D` again, so a landing address at the edge of width `N − 1` would grow `n` to `N + 1`. It is the deterministic analogue of LMFAO's `init_all` `[H §8.2]`. After forcing, `n` must not change while the program runs (§6, pointer safety).
+- **Writing the image.** The startup code writes the image cells in address order. For each cell `X` it builds two values in its work area, a pointer to a base `B ≤ X` a few cells below `X` (reused for the following cells) and an operand `a` with `crz(a, [X]) = V`. A `MovD` through the pointer and `X − B` Nops bring `D` to `X`, and one `Opr` writes `V`. `D` is then on `X + 1`, a fill cell, and a `MovD` there returns to the work area. If `[X]` has a trit 0 where `V` has a trit 2, a first `Opr` with `A = 0` turns `[X]` into `...111`. Values are built trit by trit with a rotating mask, at a cost of about 2 steps per position the mask passes and 5 per trit it changes. The costs are tracked by `tests/asm/startup_test.cpp`.
+- **Width forcing.** Before building anything that depends on `n` (rotations), the startup code raises `n` from the initial `n` of the text to the program width `N`, one step at a time: a `MovD` through `swap01(rotr(f))`, built from a fill cell `f` whose trit 0 differs from its head, lands at width exactly `n` and so grows `n` by one. It is the deterministic analogue of LMFAO's `init_all` `[H §8.2]`. After forcing, `n` must not change while the program runs (§6, pointer safety).
 - **No I/O:** the startup code performs no input or output.
 - **Outputs** of `malm asm`:
   - a `.malm` (default), or text with `--text`;
@@ -261,16 +258,16 @@ This section is the contract for #14 and #15.
 ### 8.1 `.WIDTH n`
 - Sets the program width `n` (10 ≤ n ≤ 39). It is used for `<<`/`>>` and for width checks. The startup code forces it.
 - **Default** (a deterministic search):
-  1. Start with `n = max(10, width(L₀ − 1) + 1)`, where `L₀` is a lower bound of the program length.
-  2. Lay out the whole program, including the startup code, for that `n`.
-  3. If it doesn't fit (some address would need width ≥ `n`, or the final `L` raises the initial `n`), set `n += 1` and lay out again from scratch.
+  1. Start with the smallest `n ≥ 10` at which the blocks could fit above the base, starting with base 100.
+  2. Lay out the program at that base and `n`, then generate the startup code.
+  3. If the text ends above the base, raise the base past the end of the text and repeat. If some address would need width ≥ `n`, or the text's length raises the initial `n` above `n` (spec §2.2), set `n += 1` and repeat.
   4. `n > 39` is an error.
 - An explicit `.WIDTH` that is too small for the layout is an error.
 - Programs that use `<<`/`>>` get the same result either way, because their values are computed for the final `n`. An explicit `.WIDTH` just makes it visible in the source.
 - It may appear once, in the root file, before any section and any `.INCLUDE`.
 
 ### 8.2 `@expr` / `.OFFSET expr`
-- Only at the start of a block, before its first label. It pins the block's first cell to the address `expr`. For a braced block it may stand directly before the `{` (`@C21 {`) or right after it; `@expr {` also starts a new block when it directly follows an unbraced block's last line. An offset anywhere else in a block is an error.
+- Only at the start of a block, before its first label. It pins the block's first cell to the address `expr`. For a braced block it may stand directly before the `{` (`@1t0 {`) or right after it; `@expr {` also starts a new block when it directly follows an unbraced block's last line. An offset anywhere else in a block is an error.
 - `expr` is a constant expression: no labels and no `<<`/`>>`, since the latter depend on `n`.
 - The cell before a pinned code block is reserved like any other.
 
@@ -298,6 +295,7 @@ They cover:
 - cycles that don't exist;
 - values wider than `n`;
 - impossible layouts;
+- head-2 data words and head-2 `@` offsets;
 - a missing `ENTRY`.
 
 **Two kinds of check:**
@@ -407,13 +405,13 @@ The goto works like this:
 | `C1`, `C2`, `C20`, `C21`, `EOF` | LMAO: 10-trit numbers | 3-adic (`...1`, `...2`, …); `EOF` = `...2` |
 | `<<` / `>>` | LMAO: 10-trit rotate; LMFAO: shift (unknown width) | rotation over the program width `n` |
 | Rotation width | LMFAO: unknown, forced up by doubling | deterministic: `.WIDTH`, forced once at startup, fixed afterwards |
-| Sled for value branches | `@C21` relying on the classic wrap 59048 → 0 | `@C21` = `...21`, `...2`, then cell 0; plain 3-adic increment |
+| Sled for value branches | `@C21` relying on the classic wrap 59048 → 0 | an ordinary RNop/`Jmp` block; head-2 values and addresses are unreachable (§6) |
 | Precedence | `<<`/`>>` bind loosest, then `!`, then `+`/`-`, then `*`/`/` | `!` > `<<`/`>>` > `+`/`-`; `*` and `/` removed |
 | Comments | `;` `%` `#` `//` `/* */` | `%` dropped |
 | Expression range | `% 59048` wrap | exact; a word wider than `n` is an error |
 | Output | `rand()` filler, time-seeded | deterministic |
 | Reserved predecessor cell | holds a char in 33..126 (LMAO's fill alternates 81 and 29443; 29443 would break the reference interpreter too) | **must** hold a char in 33..126: otherwise `E_ENCRYPT` |
-| Low addresses | LMAO forbids anything at 0..1 besides `bP` | cells 0..98 belong to the startup code; cell 0 is the sled's `Jmp` |
+| Low addresses | LMAO forbids anything at 0..1 besides `bP` | the whole program text belongs to the startup code; cell 0 stays a `Jmp` for EOF branches (§6) |
 | Escapes | `\'` broken in LMAO's char lexer | `\n \r \t \0 \\ \' \"`, `\xHH` |
 | Startup module | 1433 / 19391 fixed GPL characters | our own, generated (#15) |
 
