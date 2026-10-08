@@ -94,25 +94,21 @@ struct Shape {
     void skip() { ++length; } // a `?-` slot
 };
 
-// Addresses [lo, hi) of a window (docs/asm.md 7) at program width n.
+// Addresses [lo, hi) of a window (docs/asm.md 7) at program width n: the addresses of width <= n -
+// 1 with that head, without the last one (its successor has width n) and, in head 0, below `base`.
 struct Window {
     Raw lo = 0;
     Raw hi = 0;
 };
 
-Window window_of(unsigned head, unsigned n) {
+Window window_of(unsigned head, unsigned n, Raw base) {
     const Raw size = pow3[n - 1];
-    switch (head) {
-    case 0:
-        return {kFirstUserAddress, size};
-    case 1: {
-        const Raw all_ones = (pow3[core::kTrits] - 1) / 2;
-        const Raw low_ones = (size - 1) / 2;
-        return {all_ones - low_ones, all_ones - low_ones + size};
+    if (head == 0) {
+        return {base, size - 1};
     }
-    default:
-        return {pow3[core::kTrits] - size, pow3[core::kTrits]};
-    }
+    const Raw all_ones = (pow3[core::kTrits] - 1) / 2;
+    const Raw low_ones = (size - 1) / 2;
+    return {all_ones - low_ones, all_ones - low_ones + size - 1};
 }
 
 struct Occupant {
@@ -157,17 +153,20 @@ enum class Outcome { Ok, Wider, Failed };
 
 class Placer {
   public:
-    Placer(const Program& p, Diagnostics& d) : p_(p), d_(d) {}
+    Placer(const Program& p, Diagnostics& d, const LayoutOptions& o) : p_(p), d_(d), base_(o.base) {
+        min_width_ = std::max(10u, o.min_width);
+    }
 
     std::optional<Layout> run() {
         if (!prepare()) {
             return std::nullopt;
         }
-        unsigned n = 10;
+        unsigned n = min_width_;
         if (p_.width) {
             n = p_.width->value;
         } else {
-            n = std::max(n, Value::natural(kFirstUserAddress - 1 + hard_cells_)->width() + 1);
+            const auto top = Value::natural(base_ + hard_cells_);
+            n = std::max(n, top ? top->width() + 1 : core::kMaxWidth);
         }
         for (;; ++n) {
             const Outcome o = attempt(n);
@@ -191,6 +190,8 @@ class Placer {
   private:
     const Program& p_;
     Diagnostics& d_;
+    Raw base_ = kFirstUserAddress;
+    unsigned min_width_ = 10;
     std::unordered_map<std::string, std::pair<std::size_t, std::size_t>> label_cells_;
     std::vector<std::uint64_t> k_max_;                 // per block: its U_ RNop run
     std::vector<Shape> shapes_;                        // per block
@@ -314,7 +315,7 @@ class Placer {
             return Outcome::Wider;
         }
         std::unordered_map<std::string, Raw> next_try; // by shape key
-        const Window w = window_of(0, n);
+        const Window w = window_of(0, n, base_);
         for (std::size_t b = 0; b < p_.blocks.size(); ++b) {
             if (pins_[b]) {
                 continue;
@@ -346,10 +347,16 @@ class Placer {
         const auto start = subtract(first, *Value::natural(s.lead));
         const auto end = start ? add(*start, *Value::natural(s.length - 1)) : std::nullopt;
         const unsigned h = first.head();
-        if (h == 0 && (!start || start->head() != 0 || start->raw() < kFirstUserAddress)) {
+        if (h == 2) {
+            d_.error(loc, where(b) + " has a head-2 address, which C and D never reach: they only "
+                                     "take values loaded from memory, and no cell holds a head-2 "
+                                     "value unless In returned EOF");
+            return Outcome::Failed;
+        }
+        if (h == 0 && (!start || start->head() != 0 || start->raw() < base_)) {
             d_.error(loc,
                      where(b) + " overlaps the startup area, cells 0.." +
-                         std::to_string(kFirstUserAddress - 1) +
+                         std::to_string(base_ - 1) +
                          (s.lead > 0 ? " (with its reserved cell" +
                                            std::string(k_max_[b] > 0 ? " and RNop run" : "") + ")"
                                      : ""));
@@ -359,7 +366,9 @@ class Placer {
             d_.error(loc, where(b) + " crosses the end of its address window");
             return Outcome::Failed;
         }
-        const unsigned need = std::max(start->width(), end->width());
+        // Writing the last cell leaves D on the cell after it, which must stay addressable too.
+        const auto after = add(*end, *Value::natural(1));
+        const unsigned need = std::max(start->width(), after ? after->width() : core::kMaxWidth);
         if (need > n - 1) {
             wider_loc_ = loc;
             wider_msg_ = where(b) + " needs addresses of width " + std::to_string(need) +
@@ -521,6 +530,12 @@ class Placer {
             return std::nullopt;
         }
         const std::string ns = " (n = " + std::to_string(n) + ")";
+        if (v->head() == 2) {
+            d_.error(w.loc, "the value " + v->to_string() +
+                                " has head 2, which the startup code cannot build: crz and "
+                                "rotation never turn heads 0 and 1 into head 2 (docs/asm.md 4.3)");
+            return std::nullopt;
+        }
         if (!v->fits_width(n)) {
             d_.error(w.loc, "the value " + v->to_string() + " has width " +
                                 std::to_string(v->width()) + ", wider than the program width" + ns);
@@ -549,8 +564,9 @@ class Placer {
 
 } // namespace
 
-std::optional<Layout> layout_program(const Program& program, Diagnostics& diags) {
-    return Placer(program, diags).run();
+std::optional<Layout> layout_program(const Program& program, Diagnostics& diags,
+                                     const LayoutOptions& options) {
+    return Placer(program, diags, options).run();
 }
 
 } // namespace malm::assembler

@@ -176,18 +176,6 @@ TEST_CASE("7: identical units pack first-fit") {
 }
 
 TEST_CASE("8.2: pinned blocks") {
-    SUBCASE("the @C21 sled: ...21, ...2, reserved cell ...20") {
-        const std::string src = ".CODE\n@C21\nSLED: RNop\n      RNop\n\n.DATA\nENTRY: SLED\n";
-        const Layout l = laid(src);
-        check_image(checked(src), l);
-        const Value c21 = *Value::parse("...21");
-        CHECK(addr_of(l, "SLED") == c21);
-        CHECK(l.blocks[0].last == *Value::parse("...2"));
-        CHECK(cell_at(l, *Value::parse("...20")).role == CellRole::Reserved);
-        CHECK(char_at(l, c21) == rnop_char(c21.mod94()));
-        // Head 2 sorts after head 0.
-        CHECK(l.cells.back().addr == *Value::parse("...2"));
-    }
     SUBCASE("a data block in the head-1 window") {
         const Layout l = laid(".DATA\n@1t0 {X: 5}\nENTRY: A\n.CODE\nA: Jmp\n");
         CHECK(addr_of(l, "X") == *Value::parse("...10"));
@@ -219,9 +207,17 @@ TEST_CASE("errors: layout") {
               V{"2:1: block pinned at 0t10201 overlaps the startup area, cells 0..99 (with its "
                 "reserved cell)"});
     }
-    SUBCASE("pinned across the end of a window") {
-        CHECK(layout_errors(".CODE\n@C2\nS: RNop\n   RNop\n\n.DATA\nENTRY: S\n") ==
-              V{"2:1: block pinned at ...2 crosses the end of its address window"});
+    SUBCASE("pinned in head 2") {
+        CHECK(layout_errors(".CODE\n@C21\nS: RNop\n   RNop\n\n.DATA\nENTRY: S\n") ==
+              V{"2:1: block pinned at ...21 has a head-2 address, which C and D never reach: they "
+                "only take values loaded from memory, and no cell holds a head-2 value unless In "
+                "returned EOF"});
+    }
+    SUBCASE("pinned at the last address of a window") {
+        // Writing 3^9 - 1 would leave D at 3^9, which has width 10.
+        Laid r = lay_out(".WIDTH 10\n.DATA\n@19682 {X: 1}\nENTRY: A\n.CODE\nA: Jmp\n");
+        CHECK(r.parsed.errors() == V{"3:1: block pinned at 0t222222222 needs addresses of width "
+                                     "10, but program width 10 allows at most 9"});
     }
     SUBCASE("pinned blocks that overlap") {
         Laid r = lay_out(".DATA\n@200 {X: 1 2}\n@201 {Y: 3}\nENTRY: A\n.CODE\nA: Jmp\n");
@@ -267,6 +263,10 @@ TEST_CASE("errors: data words (4.3, 6)") {
                             "be 0 (jumping through it would encrypt cell 0, the startup Jmp)"});
     CHECK(errs("\n 19682") == V{"6:2: the first word of a data line is a code reference, but its "
                                 "landing address 0t1000000000 is wider than n - 1 (n = 10)"});
+    // Head 2 (4.3): not even as a plain value, but fine inside an expression.
+    CHECK(errs("C2") ==
+          V{"5:10: the value ...2 has head 2, which the startup code cannot build: "
+            "crz and rotation never turn heads 0 and 1 into head 2 (docs/asm.md 4.3)"});
     // Not at the start of a line, or a value whose landing address fits.
-    CHECK(laid(".CODE\nA: Jmp\n.DATA\nENTRY: A 0 19682 C2\n C2\n C21\n").width == 10);
+    CHECK(laid(".CODE\nA: Jmp\n.DATA\nENTRY: A 0 19682 C2!'H'\n 1\n").width == 10);
 }
