@@ -26,7 +26,7 @@ struct Command {
 // Single table of subcommands; later tickets plug in handlers here.
 constexpr auto kCommands = std::to_array<Command>({
     {"run", "Run a .malm or Malbolge text program", run_command},
-    {"asm", "Check, print or (later) assemble a low-level .mua file", asm_command},
+    {"asm", "Assemble a low-level .mua file into a .malm", asm_command},
     {"hla", "Compile a high-level .mhl file to .malm", nullptr},
     {"disasm", "Disassemble a .malm or Malbolge text file", nullptr},
     {"build", "Build a C/C++/Rust/Zig source to .malm or an executable", nullptr},

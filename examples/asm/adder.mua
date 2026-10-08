@@ -1,0 +1,326 @@
+; Adder: reads two 3-digit decimal numbers separated by one byte (e.g. "123 456" or "123+456";
+; anything after the second number is ignored) and prints their sum in decimal, without leading
+; zeros, and a newline: "123 456" prints 579, "999 999" prints 1998, "000 000" prints 0.
+; Any other input is undefined behaviour; EOF before the sixth digit halts without output.
+;
+; Column sums. Each column (H, T, O) has a 4-cycle and a 5-cycle counter (MovD/Nop x3,
+; MovD/Nop x4); a digit d passes them d mod 4 and d mod 5 times, so the pair holds the column sum
+; a + b (+ carry) mod 20 (Chinese remainder theorem; at most 19).
+;
+; Reading a counter: a k-cycle that was passed s times fires on pass 1 when s = 0 mod k, on pass 2
+; when s = k-1, ..., so `Q L0 Q L3 Q L2 Q L1` branches on s mod 4; afterwards the counter has
+; passed s + (number of passes) = 1 mod k times. The ones and tens columns are read, then the
+; digit is added back (phase 1 + digit) for printing; the carry goes on to the next column. The
+; hundreds column is printed directly from its 20 branches.
+;
+; Digits are branched on as in digital_root.mua: DISP crazies the byte into X, jumps through X
+; into SLED and lands on a table entry per digit. The stub of digit d picks the column body
+; (flags FH, FT, otherwise O); the body passes the column's counters d times, sets the column's
+; return flag and resets X to 0t1..1 (RST_d); the return flag then continues the input sequence.
+; ALT tells the first number's ones digit from the second's.
+
+.CODE
+IN:     In/Nop
+        Jmp
+
+OUT:    Out/Nop
+        Jmp
+
+ROT:    Rot/Nop
+        Jmp
+
+OPR:    Opr/Nop
+        Jmp
+
+MOVED:  MovD/Nop
+        Jmp
+
+NOP:    Jmp
+
+HALT:   Hlt
+
+FH:     Nop/MovD                ; the digit is a hundreds digit
+        Jmp
+
+FT:     Nop/MovD                ; the digit is a tens digit
+        Jmp
+
+RH:     Nop/MovD                ; return from a reset pass of DISP (hundreds digit)
+        Jmp
+
+RT:     Nop/MovD                ; ... tens digit
+        Jmp
+
+RO:     Nop/MovD                ; ... ones digit
+        Jmp
+
+ALT:    Nop/MovD                ; toggles: second visit = second number done
+        Jmp
+
+LEAD:   Nop/MovD                ; set: no digit printed yet
+        Jmp
+
+QH4:    MovD/Nop/Nop/Nop        ; column H, mod 4
+        Jmp
+
+QH5:    MovD/Nop/Nop/Nop/Nop    ; column H, mod 5
+        Jmp
+
+QT4:    MovD/Nop/Nop/Nop        ; column T, mod 4
+        Jmp
+
+QT5:    MovD/Nop/Nop/Nop/Nop    ; column T, mod 5
+        Jmp
+
+QO4:    MovD/Nop/Nop/Nop        ; column O, mod 4
+        Jmp
+
+QO5:    MovD/Nop/Nop/Nop/Nop    ; column O, mod 5
+        Jmp
+
+@1t0201 {
+SLED:   RNop RNop RNop RNop RNop RNop RNop RNop
+        RNop RNop RNop RNop RNop RNop RNop RNop
+        RNop RNop RNop RNop RNop RNop RNop RNop
+        RNop RNop RNop RNop RNop RNop RNop RNop
+        RNop RNop RNop RNop RNop RNop RNop RNop
+        RNop RNop RNop RNop RNop RNop RNop RNop
+        RNop RNop RNop RNop RNop RNop RNop RNop
+        RNop RNop RNop RNop RNop RNop RNop
+        Jmp
+}
+
+; EOF lands at 3^12, above the program text; its 12 RNops select the first table entry.
+@531441 {
+EOFL:   RNop RNop RNop RNop RNop RNop RNop RNop RNop RNop RNop RNop
+        Jmp
+}
+
+.DATA
+{
+ENTRY:  R_MOVED                 ; disarm MOVED: READ re-arms it
+READ:   R_MOVED
+        R_FH IN ?- R_IN MOVED DISP      ; hundreds digit
+RETH:   R_FT IN ?- R_IN MOVED DISP      ; tens digit
+RETT:   IN ?- R_IN MOVED DISP           ; ones digit
+RETO:   ALT SUM
+        IN ?- R_IN                      ; the separator
+        MOVED READ
+DISP:   R_MOVED
+        OPR X: 0t111111111111
+        R_OPR
+        RH RETH R_RH
+        RT RETT R_RT
+        RO RETO R_RO
+        MOVED X                 ; jump through X; entry j is read after j RNops
+        U_NOP STOP   ; EOF
+        U_NOP D8     ; '8'
+        U_NOP D6     ; '6'
+        U_NOP D7     ; '7'
+        ?-   ; unused
+        U_NOP D9     ; '9'
+        ?- ?- ?- ?- ?- ?- ?- ?- ?- ?- ?- ?- ?- ?- ?- ?-   ; unused
+        ?- ?- ?- ?- ?- ?- ?- ?- ?- ?- ?- ?- ?- ?- ?- ?-
+        ?- ?- ?- ?- ?-
+        U_NOP D5     ; '5'
+        U_NOP D3     ; '3'
+        U_NOP D4     ; '4'
+        ?- ?- ?-   ; unused
+        U_NOP D2     ; '2'
+        U_NOP D0     ; '0'
+        U_NOP D1     ; '1'
+
+D0:     R_MOVED FH BH0 R_FH FT BT0 R_FT MOVED BO0
+D1:     R_MOVED FH BH1 R_FH FT BT1 R_FT MOVED BO1
+D2:     R_MOVED FH BH2 R_FH FT BT2 R_FT MOVED BO2
+D3:     R_MOVED FH BH3 R_FH FT BT3 R_FT MOVED BO3
+D4:     R_MOVED FH BH4 R_FH FT BT4 R_FT MOVED BO4
+D5:     R_MOVED FH BH5 R_FH FT BT5 R_FT MOVED BO5
+D6:     R_MOVED FH BH6 R_FH FT BT6 R_FT MOVED BO6
+D7:     R_MOVED FH BH7 R_FH FT BT7 R_FT MOVED BO7
+D8:     R_MOVED FH BH8 R_FH FT BT8 R_FT MOVED BO8
+D9:     R_MOVED FH BH9 R_FH FT BT9 R_FT MOVED BO9
+STOP:   HALT
+}
+
+.DATA
+BH0:    R_RH MOVED RST0
+BT0:    R_RT MOVED RST0
+BO0:    R_MOVED R_RO MOVED RST0
+RST0:   R_MOVED ROT C1 R_ROT OPR 0t222222222022 R_OPR OPR 1t000000000200 R_OPR MOVED DISP
+
+BH1:    QH4 V1 V1: QH5 V2 V2: R_RH MOVED RST1
+BT1:    QT4 V3 V3: QT5 V4 V4: R_RT MOVED RST1
+BO1:    R_MOVED QO4 V5 V5: QO5 V6 V6: R_RO MOVED RST1
+RST1:   R_MOVED ROT C1 R_ROT OPR 0t222222222022 R_OPR OPR 1t000000000200 R_OPR MOVED DISP
+
+BH2:    QH4 V7 V7: QH4 V8 V8: QH5 V9 V9: QH5 V10 V10: R_RH MOVED RST2
+BT2:    QT4 V11 V11: QT4 V12 V12: QT5 V13 V13: QT5 V14 V14: R_RT MOVED RST2
+BO2:    R_MOVED QO4 V15 V15: QO4 V16 V16: QO5 V17 V17: QO5 V18 V18: R_RO MOVED RST2
+RST2:   R_MOVED ROT C1 R_ROT OPR 0t222222222020 R_OPR OPR 1t000000000202 R_OPR MOVED DISP
+
+BH3:    QH4 V19 V19: QH4 V20 V20: QH4 V21 V21: QH5 V22 V22: QH5 V23 V23: QH5 V24 V24:
+        R_RH MOVED RST3
+BT3:    QT4 V25 V25: QT4 V26 V26: QT4 V27 V27: QT5 V28 V28: QT5 V29 V29: QT5 V30 V30:
+        R_RT MOVED RST3
+BO3:    R_MOVED QO4 V31 V31: QO4 V32 V32: QO4 V33 V33: QO5 V34 V34: QO5 V35 V35: QO5 V36 V36:
+        R_RO MOVED RST3
+RST3:   R_MOVED ROT C1 R_ROT OPR 0t222222222002 R_OPR OPR 1t000000000220 R_OPR MOVED DISP
+
+BH4:    QH5 V37 V37: QH5 V38 V38: QH5 V39 V39: QH5 V40 V40: R_RH MOVED RST4
+BT4:    QT5 V41 V41: QT5 V42 V42: QT5 V43 V43: QT5 V44 V44: R_RT MOVED RST4
+BO4:    R_MOVED QO5 V45 V45: QO5 V46 V46: QO5 V47 V47: QO5 V48 V48: R_RO MOVED RST4
+RST4:   R_MOVED ROT C1 R_ROT OPR 0t222222222002 R_OPR OPR 1t000000000220 R_OPR MOVED DISP
+
+BH5:    QH4 V49 V49: R_RH MOVED RST5
+BT5:    QT4 V50 V50: R_RT MOVED RST5
+BO5:    R_MOVED QO4 V51 V51: R_RO MOVED RST5
+RST5:   R_MOVED ROT C1 R_ROT OPR 0t222222222000 R_OPR OPR 1t000000000222 R_OPR MOVED DISP
+
+BH6:    QH4 V52 V52: QH4 V53 V53: QH5 V54 V54: R_RH MOVED RST6
+BT6:    QT4 V55 V55: QT4 V56 V56: QT5 V57 V57: R_RT MOVED RST6
+BO6:    R_MOVED QO4 V58 V58: QO4 V59 V59: QO5 V60 V60: R_RO MOVED RST6
+RST6:   R_MOVED ROT C1 R_ROT OPR 0t222222220222 R_OPR OPR 1t000000002000 R_OPR MOVED DISP
+
+BH7:    QH4 V61 V61: QH4 V62 V62: QH4 V63 V63: QH5 V64 V64: QH5 V65 V65: R_RH MOVED RST7
+BT7:    QT4 V66 V66: QT4 V67 V67: QT4 V68 V68: QT5 V69 V69: QT5 V70 V70: R_RT MOVED RST7
+BO7:    R_MOVED QO4 V71 V71: QO4 V72 V72: QO4 V73 V73: QO5 V74 V74: QO5 V75 V75:
+        R_RO MOVED RST7
+RST7:   R_MOVED ROT C1 R_ROT OPR 0t222222220222 R_OPR OPR 1t000000002000 R_OPR MOVED DISP
+
+BH8:    QH5 V76 V76: QH5 V77 V77: QH5 V78 V78: R_RH MOVED RST8
+BT8:    QT5 V79 V79: QT5 V80 V80: QT5 V81 V81: R_RT MOVED RST8
+BO8:    R_MOVED QO5 V82 V82: QO5 V83 V83: QO5 V84 V84: R_RO MOVED RST8
+RST8:   R_MOVED ROT C1 R_ROT OPR 0t222222220220 R_OPR OPR 1t000000002002 R_OPR MOVED DISP
+
+BH9:    QH4 V85 V85: QH5 V86 V86: QH5 V87 V87: QH5 V88 V88: QH5 V89 V89: R_RH MOVED RST9
+BT9:    QT4 V90 V90: QT5 V91 V91: QT5 V92 V92: QT5 V93 V93: QT5 V94 V94: R_RT MOVED RST9
+BO9:    R_MOVED QO4 V95 V95: QO5 V96 V96: QO5 V97 V97: QO5 V98 V98: QO5 V99 V99:
+        R_RO MOVED RST9
+RST9:   R_MOVED ROT C1 R_ROT OPR 0t222222220222 R_OPR OPR 1t000000002000 R_OPR MOVED DISP
+
+; Column sums, ones first. The carry of a column is one more pass of the next column's counters.
+; `Q Vk Vk:` passes the counter Q once: execution continues at Vk whether Q fires or not.
+SUM:    QO5 OR0 QO5 OR4 QO5 OR3 QO5 OR2 QO5 OR1
+OR0:    QO4 OS0 QO4 OS15 QO4 OS10 QO4 OS5
+OR1:    QO4 OS16 QO4 OS11 QO4 OS6 QO4 OS1
+OR2:    QO4 OS12 QO4 OS7 QO4 OS2 QO4 OS17
+OR3:    QO4 OS8 QO4 OS3 QO4 OS18 QO4 OS13
+OR4:    QO4 OS4 QO4 OS19 QO4 OS14 QO4 OS9
+OS0:    MOVED TSUM
+OS1:    QO4 V100 V100: QO5 V101 V101: MOVED TSUM
+OS2:    QO4 V102 V102: QO4 V103 V103: QO5 V104 V104: QO5 V105 V105: MOVED TSUM
+OS3:    QO4 V106 V106: QO4 V107 V107: QO4 V108 V108:
+        QO5 V109 V109: QO5 V110 V110: QO5 V111 V111: MOVED TSUM
+OS4:    QO5 V112 V112: QO5 V113 V113: QO5 V114 V114: QO5 V115 V115: MOVED TSUM
+OS5:    QO4 V116 V116: MOVED TSUM
+OS6:    QO4 V117 V117: QO4 V118 V118: QO5 V119 V119: MOVED TSUM
+OS7:    QO4 V120 V120: QO4 V121 V121: QO4 V122 V122: QO5 V123 V123: QO5 V124 V124: MOVED TSUM
+OS8:    QO5 V125 V125: QO5 V126 V126: QO5 V127 V127: MOVED TSUM
+OS9:    QO4 V128 V128: QO5 V129 V129: QO5 V130 V130: QO5 V131 V131: QO5 V132 V132: MOVED TSUM
+OS10:   MOVED TCARRY
+OS11:   QO4 V133 V133: QO5 V134 V134: MOVED TCARRY
+OS12:   QO4 V135 V135: QO4 V136 V136: QO5 V137 V137: QO5 V138 V138: MOVED TCARRY
+OS13:   QO4 V139 V139: QO4 V140 V140: QO4 V141 V141:
+        QO5 V142 V142: QO5 V143 V143: QO5 V144 V144: MOVED TCARRY
+OS14:   QO5 V145 V145: QO5 V146 V146: QO5 V147 V147: QO5 V148 V148: MOVED TCARRY
+OS15:   QO4 V149 V149: MOVED TCARRY
+OS16:   QO4 V150 V150: QO4 V151 V151: QO5 V152 V152: MOVED TCARRY
+OS17:   QO4 V153 V153: QO4 V154 V154: QO4 V155 V155: QO5 V156 V156: QO5 V157 V157: MOVED TCARRY
+OS18:   QO5 V158 V158: QO5 V159 V159: QO5 V160 V160: MOVED TCARRY
+OS19:   QO4 V161 V161: QO5 V162 V162: QO5 V163 V163: QO5 V164 V164: QO5 V165 V165: MOVED TCARRY
+TCARRY: R_MOVED QT4 V166 V166: QT5 V167 V167: MOVED TSUM
+TSUM:   R_MOVED
+        QT5 TR0 QT5 TR4 QT5 TR3 QT5 TR2 QT5 TR1
+TR0:    QT4 TS0 QT4 TS15 QT4 TS10 QT4 TS5
+TR1:    QT4 TS16 QT4 TS11 QT4 TS6 QT4 TS1
+TR2:    QT4 TS12 QT4 TS7 QT4 TS2 QT4 TS17
+TR3:    QT4 TS8 QT4 TS3 QT4 TS18 QT4 TS13
+TR4:    QT4 TS4 QT4 TS19 QT4 TS14 QT4 TS9
+TS0:    MOVED HSUM
+TS1:    QT4 V168 V168: QT5 V169 V169: MOVED HSUM
+TS2:    QT4 V170 V170: QT4 V171 V171: QT5 V172 V172: QT5 V173 V173: MOVED HSUM
+TS3:    QT4 V174 V174: QT4 V175 V175: QT4 V176 V176:
+        QT5 V177 V177: QT5 V178 V178: QT5 V179 V179: MOVED HSUM
+TS4:    QT5 V180 V180: QT5 V181 V181: QT5 V182 V182: QT5 V183 V183: MOVED HSUM
+TS5:    QT4 V184 V184: MOVED HSUM
+TS6:    QT4 V185 V185: QT4 V186 V186: QT5 V187 V187: MOVED HSUM
+TS7:    QT4 V188 V188: QT4 V189 V189: QT4 V190 V190: QT5 V191 V191: QT5 V192 V192: MOVED HSUM
+TS8:    QT5 V193 V193: QT5 V194 V194: QT5 V195 V195: MOVED HSUM
+TS9:    QT4 V196 V196: QT5 V197 V197: QT5 V198 V198: QT5 V199 V199: QT5 V200 V200: MOVED HSUM
+TS10:   MOVED HCARRY
+TS11:   QT4 V201 V201: QT5 V202 V202: MOVED HCARRY
+TS12:   QT4 V203 V203: QT4 V204 V204: QT5 V205 V205: QT5 V206 V206: MOVED HCARRY
+TS13:   QT4 V207 V207: QT4 V208 V208: QT4 V209 V209:
+        QT5 V210 V210: QT5 V211 V211: QT5 V212 V212: MOVED HCARRY
+TS14:   QT5 V213 V213: QT5 V214 V214: QT5 V215 V215: QT5 V216 V216: MOVED HCARRY
+TS15:   QT4 V217 V217: MOVED HCARRY
+TS16:   QT4 V218 V218: QT4 V219 V219: QT5 V220 V220: MOVED HCARRY
+TS17:   QT4 V221 V221: QT4 V222 V222: QT4 V223 V223: QT5 V224 V224: QT5 V225 V225: MOVED HCARRY
+TS18:   QT5 V226 V226: QT5 V227 V227: QT5 V228 V228: MOVED HCARRY
+TS19:   QT4 V229 V229: QT5 V230 V230: QT5 V231 V231: QT5 V232 V232: QT5 V233 V233: MOVED HCARRY
+HCARRY: R_MOVED QH4 V234 V234: QH5 V235 V235: MOVED HSUM
+; The hundreds column: print a leading 1 for a carry, and the digit unless it is a leading 0.
+HSUM:   R_MOVED
+        QH5 HR0 QH5 HR4 QH5 HR3 QH5 HR2 QH5 HR1
+HR0:    QH4 HS0 QH4 HS15 QH4 HS10 QH4 HS5
+HR1:    QH4 HS16 QH4 HS11 QH4 HS6 QH4 HS1
+HR2:    QH4 HS12 QH4 HS7 QH4 HS2 QH4 HS17
+HR3:    QH4 HS8 QH4 HS3 QH4 HS18 QH4 HS13
+HR4:    QH4 HS4 QH4 HS19 QH4 HS14 QH4 HS9
+HS0:    R_LEAD MOVED PT
+HS1:    ROT '1'<<1 R_ROT OUT ?- R_OUT MOVED PT
+HS2:    ROT '2'<<1 R_ROT OUT ?- R_OUT MOVED PT
+HS3:    ROT '3'<<1 R_ROT OUT ?- R_OUT MOVED PT
+HS4:    ROT '4'<<1 R_ROT OUT ?- R_OUT MOVED PT
+HS5:    ROT '5'<<1 R_ROT OUT ?- R_OUT MOVED PT
+HS6:    ROT '6'<<1 R_ROT OUT ?- R_OUT MOVED PT
+HS7:    ROT '7'<<1 R_ROT OUT ?- R_OUT MOVED PT
+HS8:    ROT '8'<<1 R_ROT OUT ?- R_OUT MOVED PT
+HS9:    ROT '9'<<1 R_ROT OUT ?- R_OUT MOVED PT
+HS10:   ROT '1'<<1 R_ROT OUT ?- R_OUT ROT '0'<<1 R_ROT OUT ?- R_OUT MOVED PT
+HS11:   ROT '1'<<1 R_ROT OUT ?- R_OUT ROT '1'<<1 R_ROT OUT ?- R_OUT MOVED PT
+HS12:   ROT '1'<<1 R_ROT OUT ?- R_OUT ROT '2'<<1 R_ROT OUT ?- R_OUT MOVED PT
+HS13:   ROT '1'<<1 R_ROT OUT ?- R_OUT ROT '3'<<1 R_ROT OUT ?- R_OUT MOVED PT
+HS14:   ROT '1'<<1 R_ROT OUT ?- R_OUT ROT '4'<<1 R_ROT OUT ?- R_OUT MOVED PT
+HS15:   ROT '1'<<1 R_ROT OUT ?- R_OUT ROT '5'<<1 R_ROT OUT ?- R_OUT MOVED PT
+HS16:   ROT '1'<<1 R_ROT OUT ?- R_OUT ROT '6'<<1 R_ROT OUT ?- R_OUT MOVED PT
+HS17:   ROT '1'<<1 R_ROT OUT ?- R_OUT ROT '7'<<1 R_ROT OUT ?- R_OUT MOVED PT
+HS18:   ROT '1'<<1 R_ROT OUT ?- R_OUT ROT '8'<<1 R_ROT OUT ?- R_OUT MOVED PT
+HS19:   ROT '1'<<1 R_ROT OUT ?- R_OUT ROT '9'<<1 R_ROT OUT ?- R_OUT MOVED PT
+; Tens and ones from their counters; a tens 0 after a leading 0 is not printed.
+PT:     R_MOVED
+        QT5 PTR0 QT5 PTR4 QT5 PTR3 QT5 PTR2 QT5 PTR1
+PTR0:   QT4 STOP QT4 STOP QT4 TP9 QT4 TP4
+PTR1:   QT4 STOP QT4 STOP QT4 TP5 QT4 TP0
+PTR2:   QT4 STOP QT4 TP6 QT4 TP1 QT4 STOP
+PTR3:   QT4 TP7 QT4 TP2 QT4 STOP QT4 STOP
+PTR4:   QT4 TP3 QT4 STOP QT4 STOP QT4 TP8
+TP0:    LEAD TZ R_LEAD ROT '0'<<1 R_ROT OUT ?- R_OUT TZ: MOVED PO
+TP1:    ROT '1'<<1 R_ROT OUT ?- R_OUT MOVED PO
+TP2:    ROT '2'<<1 R_ROT OUT ?- R_OUT MOVED PO
+TP3:    ROT '3'<<1 R_ROT OUT ?- R_OUT MOVED PO
+TP4:    ROT '4'<<1 R_ROT OUT ?- R_OUT MOVED PO
+TP5:    ROT '5'<<1 R_ROT OUT ?- R_OUT MOVED PO
+TP6:    ROT '6'<<1 R_ROT OUT ?- R_OUT MOVED PO
+TP7:    ROT '7'<<1 R_ROT OUT ?- R_OUT MOVED PO
+TP8:    ROT '8'<<1 R_ROT OUT ?- R_OUT MOVED PO
+TP9:    ROT '9'<<1 R_ROT OUT ?- R_OUT MOVED PO
+PO:     R_MOVED
+        QO5 POR0 QO5 POR4 QO5 POR3 QO5 POR2 QO5 POR1
+POR0:   QO4 STOP QO4 STOP QO4 OP9 QO4 OP4
+POR1:   QO4 STOP QO4 STOP QO4 OP5 QO4 OP0
+POR2:   QO4 STOP QO4 OP6 QO4 OP1 QO4 STOP
+POR3:   QO4 OP7 QO4 OP2 QO4 STOP QO4 STOP
+POR4:   QO4 OP3 QO4 STOP QO4 STOP QO4 OP8
+OP0:    ROT '0'<<1 R_ROT OUT ?- R_OUT MOVED NL
+OP1:    ROT '1'<<1 R_ROT OUT ?- R_OUT MOVED NL
+OP2:    ROT '2'<<1 R_ROT OUT ?- R_OUT MOVED NL
+OP3:    ROT '3'<<1 R_ROT OUT ?- R_OUT MOVED NL
+OP4:    ROT '4'<<1 R_ROT OUT ?- R_OUT MOVED NL
+OP5:    ROT '5'<<1 R_ROT OUT ?- R_OUT MOVED NL
+OP6:    ROT '6'<<1 R_ROT OUT ?- R_OUT MOVED NL
+OP7:    ROT '7'<<1 R_ROT OUT ?- R_OUT MOVED NL
+OP8:    ROT '8'<<1 R_ROT OUT ?- R_OUT MOVED NL
+OP9:    ROT '9'<<1 R_ROT OUT ?- R_OUT MOVED NL
+NL:     R_MOVED ROT '\n'<<1 R_ROT OUT ?- R_OUT HALT

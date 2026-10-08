@@ -1,0 +1,106 @@
+; Cat that halts cleanly on EOF: copies stdin to stdout byte for byte and halts at end of input,
+; without writing anything for the EOF.
+;
+; One pass of the loop:
+;   1. In, then store the byte c twice: W1 := swap01(c) and W2 := swap01(W1) = c (crz with C1
+;      swaps the trits 0 and 1). A ends as c.
+;   2. Branch on EOF: two more crazies squeeze every byte onto one value and EOF onto another:
+;      V1 := crz(c, 0) has only trits 0 and 1 for a byte, so V2 := crz(V1, 0t2..2) is 0t2..2 again
+;      for every byte (V2 restores itself), while EOF (...2) gives a head-1 value. MOVED V2 jumps
+;      through V2: a byte lands on BYTE, EOF on EOFL; the two sleds run 3 and 2 RNops, so the
+;      next data word differs.
+;   3. For a byte, A is 0t2..2. Running W1 and W2 again with that A turns A back into c (the
+;      sigma/swap01 identities, trit by trit) and leaves W2 = c. Out.
+;   4. Reset W1 and W2 to C1 with four more passes (A = C1, Z0, 0, then the A that is left), and
+;      V1 to 0 with one pass (A = C1).
+; Each pass over W1/W2 or V1 is a call: set the return flag, MOVED to the entry, and the flag
+; chain after the cell sends execution back. The normal pass falls through all chains.
+
+.CODE
+IN:     In/Nop
+        Jmp
+
+OUT:    Out/Nop
+        Jmp
+
+ROT:    Rot/Nop
+        Jmp
+
+OPR:    Opr/Nop
+        Jmp
+
+MOVED:  MovD/Nop
+        Jmp
+
+HALT:   Hlt
+
+FO:     Nop/MovD                ; return flags of the calls
+        Jmp
+
+F1:     Nop/MovD
+        Jmp
+
+F2:     Nop/MovD
+        Jmp
+
+F3:     Nop/MovD
+        Jmp
+
+F4:     Nop/MovD
+        Jmp
+
+FV:     Nop/MovD
+        Jmp
+
+; Landing pads of the EOF branch. A byte leaves V2 = 3^9 - 1, EOF leaves V2 = ...1222222222.
+@19683 {
+BYTE:   RNop
+        RNop
+        RNop
+        Jmp
+}
+
+@1t2000000000 {
+EOFL:   RNop
+        RNop
+        Jmp
+}
+
+.DATA
+{
+ENTRY:  R_MOVED                 ; disarm MOVED: LOOP re-arms it
+LOOP:   R_MOVED
+        IN ?- R_IN              ; A := c
+EW1:    OPR W1: C1 R_OPR        ; W1 := swap01(c)
+EW2:    OPR W2: C1 R_OPR        ; W2 := c, A = c
+        FO DO_OUT R_FO
+        F1 RET1 R_F1
+        F2 RET2 R_F2
+        F3 RET3 R_F3
+        F4 RET4 R_F4
+EV1:    OPR V1: 0 R_OPR         ; V1 := crz(c, 0)
+        FV RETV R_FV
+        OPR V2: 19682           ; V2 := crz(V1, 3^9 - 1)
+        MOVED V2                ; jump through V2
+        HALT                    ; EOF: EOFL ran 2 RNops
+        R_OPR                   ; byte: BYTE ran 3 RNops; A = 3^9 - 1
+        R_MOVED
+        R_FO MOVED EW1          ; W1 := sigma(W1); A := c
+DO_OUT: R_MOVED
+        OUT ?- R_OUT
+        ROT C1 R_ROT
+        R_F1 MOVED EW1
+RET1:   R_MOVED
+        ROT (1>>1)+(1>>1)+(1>>1)-1 R_ROT    ; A := Z0, the low n trits 2
+        R_F2 MOVED EW1
+RET2:   R_MOVED
+        ROT 1-1 R_ROT           ; A := 0
+        R_F3 MOVED EW1
+RET3:   R_MOVED
+        R_F4 MOVED EW2          ; W2 with the A that is left: W1 = W2 = C1
+RET4:   R_MOVED
+        ROT C1 R_ROT
+        R_FV MOVED EV1          ; V1 := 0
+RETV:   R_MOVED
+        MOVED LOOP
+}

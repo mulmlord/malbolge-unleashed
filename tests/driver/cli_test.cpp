@@ -1133,23 +1133,114 @@ TEST_CASE("asm --check --print together, and -- ends the options") {
     CHECK(!r.out.empty());
 }
 
-TEST_CASE("asm: assembling is not implemented yet") {
+namespace {
+
+// The hello world of docs/asm.md 10.1, shortened.
+constexpr std::string_view kAsmHi = ".CODE\n"
+                                    "ROT: Rot/Nop\n Jmp\n\n"
+                                    "OUT: Out/Nop\n Jmp\n\n"
+                                    "HALT: Hlt\n\n"
+                                    ".DATA\n"
+                                    "ENTRY: ROT 'H'<<1 R_ROT OUT ?- R_OUT\n"
+                                    "       ROT 'i'<<1 R_ROT OUT ?- R_OUT HALT\n";
+
+} // namespace
+
+TEST_CASE("asm -o: writes a .malm that passes the strict loader and runs") {
     TempDir d;
-    const std::string f = d.write("ok.mua", std::string(kAsmOk));
-    for (const auto& args : std::vector<std::vector<std::string_view>>{
-             {"asm", f}, {"asm", f, "-o", "out.malm"}, {"asm", "--text", "-o", "-", f}}) {
-        const Result r = run(args);
-        CHECK(r.code == 2);
-        CHECK(r.out.empty());
-        CHECK(r.err ==
-              "malm asm: assembly not implemented yet (#14-#16); use --check or --print\n");
+    const std::string f = d.write("hi.mua", std::string(kAsmHi));
+    const std::string out = (d.path / "hi.malm").string();
+    Result r = run({"asm", f, "-o", out});
+    REQUIRE_MESSAGE(r.code == 0, r.err);
+    CHECK(r.out.empty());
+    CHECK(r.err.empty());
+    const std::string malm = slurp(out);
+    CHECK(malm.starts_with("MALM"));
+    r = run({"run", out});
+    CHECK(r.code == 0);
+    CHECK(r.out == "Hi");
+
+    // --text gives the same program as plain text (one trailing newline), and the .malm holds
+    // exactly that program: nothing but the cells, unleashed, no EXIT_A.
+    r = run({"asm", "--text", f, "-o", "-"});
+    REQUIRE(r.code == 0);
+    CHECK(r.out.ends_with("\n"));
+    CHECK(r.out.find_first_of(" \t\r") == std::string::npos);
+    CHECK(r.out.starts_with("b")); // cell 0: the startup Jmp
+    CHECK(run({"export", "--text", out, "-o", "-"}).out == r.out);
+    const TempFile text(r.out);
+    CHECK(run({"run", text.str()}).out == "Hi");
+    CHECK(run({"export", "--malm", text.str(), "-o", "-"}).out == malm);
+
+    // -o - writes the .malm to stdout; assembling is deterministic.
+    r = run({"asm", "-o", "-", "--", f});
+    CHECK(r.code == 0);
+    CHECK(r.out == malm);
+}
+
+TEST_CASE("asm --map: one line per label, by address") {
+    TempDir d;
+    const std::string f = d.write("hi.mua", std::string(kAsmHi));
+    const std::string out = (d.path / "hi.malm").string();
+    const std::string map = (d.path / "hi.map").string();
+    REQUIRE(run({"asm", "--map", map, f, "-o", out}).code == 0);
+    std::istringstream lines(slurp(map));
+    std::vector<std::string> names;
+    std::string name;
+    std::string addr;
+    std::string kind;
+    std::string first;
+    std::string last;
+    while (lines >> name >> addr >> kind >> first >> last) {
+        names.push_back(name);
+        CHECK(addr.starts_with("0t"));
+        CHECK((kind == "code" || kind == "data"));
+        CHECK(((name == "ENTRY") == (kind == "data")));
+        if (name == "ENTRY") {
+            CHECK(first == addr);
+            CHECK(last != first);
+        }
     }
+    std::vector<std::string> sorted = names;
+    std::ranges::sort(sorted);
+    CHECK(sorted == std::vector<std::string>{"ENTRY", "HALT", "OUT", "ROT"});
+}
+
+TEST_CASE("asm: assembly errors are diagnostics, exit 1, and no output file") {
+    TempDir d;
+    const std::string f = d.write("wide.mua", ".WIDTH 10\n.CODE\nJ: Jmp\n.DATA\nENTRY: J 1t1 " +
+                                                  std::string("0t") + std::string(11, '1') + "\n");
+    const std::string out = (d.path / "wide.malm").string();
+    const Result r = run({"asm", f, "-o", out});
+    CHECK(r.code == 1);
+    CHECK(r.out.empty());
+    CHECK(r.err.starts_with(f + ":"));
+    CHECK(r.err.find(": error: ") != std::string::npos);
+    CHECK_FALSE(std::filesystem::exists(out));
+}
+
+TEST_CASE("asm: refuses to overwrite the input file") {
+    TempDir d;
+    const std::string f = d.write("hi.mua", std::string(kAsmHi));
+    for (const auto& args : std::vector<std::vector<std::string_view>>{
+             {"asm", f, "-o", f}, {"asm", f, "-o", "-", "--map", f}}) {
+        const Result r = run(args);
+        CHECK(r.code == 1);
+        CHECK(r.err.find("refusing to overwrite the input file") != std::string::npos);
+    }
+    CHECK(slurp(f) == kAsmHi);
 }
 
 TEST_CASE("asm: usage errors exit 2") {
     for (const auto& args :
          std::vector<std::vector<std::string_view>>{{"asm"},
                                                     {"asm", "--check"},
+                                                    {"asm", "a.mua"},
+                                                    {"asm", "--text", "a.mua"},
+                                                    {"asm", "--map", "m", "a.mua"},
+                                                    {"asm", "a.mua", "-o", "x", "-o", "y"},
+                                                    {"asm", "a.mua", "-o", "x", "--map", "-"},
+                                                    {"asm", "a.mua", "-o", "x", "--map", "x"},
                                                     {"asm", "--print", "a.mua", "b.mua"},
                                                     {"asm", "--bogus", "a.mua"},
                                                     {"asm", "--check", "-o"},

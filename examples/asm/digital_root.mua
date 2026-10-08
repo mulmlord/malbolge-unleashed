@@ -1,0 +1,227 @@
+; Digital root: reads a decimal number (digits, ended by a newline or EOF) and prints its
+; digital root and a newline. "" and "000" print 0, "9875" prints 2 (9+8+7+5 = 29, 2+9 = 11,
+; 1+1 = 2).
+; Any other input byte is undefined behaviour.
+;
+; The digit sum mod 9 is kept in SUM, a 9-cycle MovD/Nop x8: a digit d passes SUM d mod 9
+; times. NZ is set once a nonzero digit was seen, so that 9, 18, ... print 9 and 0 prints 0.
+;
+; Branching on the input byte c (docs/asm.md 6):
+;   - DISP crazies c into X = 0t1..1 (10 ones). For a byte below 81 this leaves X = ...1 followed by
+;     swap01 of c's 4 low trits, so MOVED X jumps into SLED, a run of RNops in the head-1 window;
+;     digits and the newline land on different cells, and the sled's Jmp reads a different entry
+;     of the table after X. EOF (...2) leaves X = 3^10 - 1 and lands on EOFL instead.
+;   - The table entries are U_NOP jumps to the stubs D0..D9, CNL and the result code FIN.
+;   - Each digit's body knows X (it depends only on the digit), loads the A that turns it back
+;     into 0t1..1, and sets RF before running DISP again; RF then returns to LOOP.
+;   - Loading a constant into A leaves its cells unchanged, so the loop can repeat it: Rot of
+;     C1 gives A = C1, and crazy with a cell y that maps C1 to y (y has only trits 0 and 2 and
+;     head 0) and then with the target a (a has trit 0 where y has 2, and 2 where y has 0)
+;     yields y and a without changing the cells.
+
+.CODE
+IN:     In/Nop
+        Jmp
+
+OUT:    Out/Nop
+        Jmp
+
+ROT:    Rot/Nop
+        Jmp
+
+OPR:    Opr/Nop
+        Jmp
+
+MOVED:  MovD/Nop
+        Jmp
+
+NOP:    Jmp
+
+HALT:   Hlt
+
+RF:     Nop/MovD                ; set: DISP is a reset pass, return to LOOP
+        Jmp
+
+NZ:     Nop/MovD                ; set: a nonzero digit was seen
+        Jmp
+
+SUM:    MovD/Nop/Nop/Nop/Nop/Nop/Nop/Nop/Nop   ; digit sum mod 9
+        Jmp
+
+; Bytes land at 1t0000 + swap01(c mod 81) + 1; the Jmp is 7 cells past the last digit's landing.
+@1t0201 {
+SLED:   RNop RNop RNop RNop RNop RNop RNop RNop
+        RNop RNop RNop RNop RNop RNop RNop RNop
+        RNop RNop RNop RNop RNop RNop RNop RNop
+        RNop RNop RNop RNop RNop RNop RNop RNop
+        RNop RNop RNop RNop RNop RNop RNop RNop
+        RNop RNop RNop RNop RNop RNop RNop RNop
+        RNop RNop RNop RNop RNop RNop RNop RNop
+        RNop
+        Jmp
+}
+
+; EOF lands at 3^10; its 6 RNops select the first table entry.
+@59049 {
+EOFL:   RNop RNop RNop RNop RNop RNop
+        Jmp
+}
+
+.DATA
+{
+ENTRY:
+LOOP:   IN ?- R_IN              ; A := c
+        MOVED DISP
+DISP:   R_MOVED
+        OPR X: 0t1111111111
+        R_OPR
+        RF LOOP R_RF            ; after a reset pass
+        MOVED X                 ; jump through X; entry j is read after j RNops
+        U_NOP FIN    ; EOF
+        U_NOP D8     ; '8'
+        U_NOP D6     ; '6'
+        U_NOP D7     ; '7'
+        ?-   ; unused
+        U_NOP D9     ; '9'
+        ?- ?- ?- ?- ?- ?- ?- ?- ?- ?- ?- ?- ?- ?- ?- ?-   ; unused
+        ?- ?- ?- ?- ?- ?- ?- ?- ?- ?- ?- ?- ?- ?- ?- ?-
+        ?-
+        U_NOP CNL    ; newline
+        ?- ?- ?-   ; unused
+        U_NOP D5     ; '5'
+        U_NOP D3     ; '3'
+        U_NOP D4     ; '4'
+        ?- ?- ?-   ; unused
+        U_NOP D2     ; '2'
+        U_NOP D0     ; '0'
+        U_NOP D1     ; '1'
+
+D0:     R_MOVED MOVED B0
+D1:     R_MOVED MOVED B1
+D2:     R_MOVED MOVED B2
+D3:     R_MOVED MOVED B3
+D4:     R_MOVED MOVED B4
+D5:     R_MOVED MOVED B5
+D6:     R_MOVED MOVED B6
+D7:     R_MOVED MOVED B7
+D8:     R_MOVED MOVED B8
+D9:     R_MOVED MOVED B9
+CNL:    R_MOVED MOVED FIN
+
+; The result: SUM fires on the first of nine passes when the sum is 0 mod 9, on the second when
+; it is 8 mod 9, ..., on the ninth when it is 1 mod 9.
+FIN:    R_MOVED
+        NZ NONZERO R_NZ
+        ROT '0'<<1 R_ROT
+        OUT ?- R_OUT
+        MOVED ENDL
+NONZERO: SUM P9 SUM P8 SUM P7 SUM P6 SUM P5 SUM P4 SUM P3 SUM P2 SUM P1
+P1:     ROT '1'<<1 R_ROT OUT ?- R_OUT MOVED ENDL
+P2:     ROT '2'<<1 R_ROT OUT ?- R_OUT MOVED ENDL
+P3:     ROT '3'<<1 R_ROT OUT ?- R_OUT MOVED ENDL
+P4:     ROT '4'<<1 R_ROT OUT ?- R_OUT MOVED ENDL
+P5:     ROT '5'<<1 R_ROT OUT ?- R_OUT MOVED ENDL
+P6:     ROT '6'<<1 R_ROT OUT ?- R_OUT MOVED ENDL
+P7:     ROT '7'<<1 R_ROT OUT ?- R_OUT MOVED ENDL
+P8:     ROT '8'<<1 R_ROT OUT ?- R_OUT MOVED ENDL
+P9:     ROT '9'<<1 R_ROT OUT ?- R_OUT MOVED ENDL
+ENDL:   R_MOVED
+        ROT '\n'<<1 R_ROT
+        OUT ?- R_OUT
+        HALT
+}
+
+; '0': X = ...10201
+B0:     R_MOVED
+        ROT C1 R_ROT OPR 0t2222222022 R_OPR OPR 1t0000000200 R_OPR
+        R_RF MOVED DISP         ; X := 0t1..1, then LOOP
+
+; '1': X = ...10200
+B1:     R_MOVED
+        NZ S1 R_NZ S1: R_NZ    ; set NZ (whatever its state)
+        SUM A10 A10:
+        ROT C1 R_ROT OPR 0t2222222022 R_OPR OPR 1t0000000200 R_OPR
+        R_RF MOVED DISP         ; X := 0t1..1, then LOOP
+
+; '2': X = ...10202
+B2:     R_MOVED
+        NZ S2 R_NZ S2: R_NZ    ; set NZ (whatever its state)
+        SUM A20 A20:
+        SUM A21 A21:
+        ROT C1 R_ROT OPR 0t2222222020 R_OPR OPR 1t0000000202 R_OPR
+        R_RF MOVED DISP         ; X := 0t1..1, then LOOP
+
+; '3': X = ...10221
+B3:     R_MOVED
+        NZ S3 R_NZ S3: R_NZ    ; set NZ (whatever its state)
+        SUM A30 A30:
+        SUM A31 A31:
+        SUM A32 A32:
+        ROT C1 R_ROT OPR 0t2222222002 R_OPR OPR 1t0000000220 R_OPR
+        R_RF MOVED DISP         ; X := 0t1..1, then LOOP
+
+; '4': X = ...10220
+B4:     R_MOVED
+        NZ S4 R_NZ S4: R_NZ    ; set NZ (whatever its state)
+        SUM A40 A40:
+        SUM A41 A41:
+        SUM A42 A42:
+        SUM A43 A43:
+        ROT C1 R_ROT OPR 0t2222222002 R_OPR OPR 1t0000000220 R_OPR
+        R_RF MOVED DISP         ; X := 0t1..1, then LOOP
+
+; '5': X = ...10222
+B5:     R_MOVED
+        NZ S5 R_NZ S5: R_NZ    ; set NZ (whatever its state)
+        SUM A50 A50:
+        SUM A51 A51:
+        SUM A52 A52:
+        SUM A53 A53:
+        SUM A54 A54:
+        ROT C1 R_ROT OPR 0t2222222000 R_OPR OPR 1t0000000222 R_OPR
+        R_RF MOVED DISP         ; X := 0t1..1, then LOOP
+
+; '6': X = ...12111
+B6:     R_MOVED
+        NZ S6 R_NZ S6: R_NZ    ; set NZ (whatever its state)
+        SUM A60 A60:
+        SUM A61 A61:
+        SUM A62 A62:
+        SUM A63 A63:
+        SUM A64 A64:
+        SUM A65 A65:
+        ROT C1 R_ROT OPR 0t2222220222 R_OPR OPR 1t0000002000 R_OPR
+        R_RF MOVED DISP         ; X := 0t1..1, then LOOP
+
+; '7': X = ...12110
+B7:     R_MOVED
+        NZ S7 R_NZ S7: R_NZ    ; set NZ (whatever its state)
+        SUM A70 A70:
+        SUM A71 A71:
+        SUM A72 A72:
+        SUM A73 A73:
+        SUM A74 A74:
+        SUM A75 A75:
+        SUM A76 A76:
+        ROT C1 R_ROT OPR 0t2222220222 R_OPR OPR 1t0000002000 R_OPR
+        R_RF MOVED DISP         ; X := 0t1..1, then LOOP
+
+; '8': X = ...12112
+B8:     R_MOVED
+        NZ S8 R_NZ S8: R_NZ    ; set NZ (whatever its state)
+        SUM A80 A80:
+        SUM A81 A81:
+        SUM A82 A82:
+        SUM A83 A83:
+        SUM A84 A84:
+        SUM A85 A85:
+        SUM A86 A86:
+        SUM A87 A87:
+        ROT C1 R_ROT OPR 0t2222220220 R_OPR OPR 1t0000002002 R_OPR
+        R_RF MOVED DISP         ; X := 0t1..1, then LOOP
+
+; '9': X = ...12101
+B9:     R_MOVED
+        NZ S9 R_NZ S9: R_NZ    ; set NZ (whatever its state)
+        ROT C1 R_ROT OPR 0t2222220222 R_OPR OPR 1t0000002000 R_OPR
+        R_RF MOVED DISP         ; X := 0t1..1, then LOOP
