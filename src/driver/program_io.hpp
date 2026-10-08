@@ -24,6 +24,10 @@ struct LoadedProgram {
 // Reads a whole regular file. On failure prints `malm: ...` to `err` and returns false.
 bool read_file(std::string_view path, std::vector<std::uint8_t>& bytes, std::ostream& err);
 
+// True if both paths name the same existing file, or are spelled the same; "-" (stdout) is never
+// the same file.
+bool same_file(std::string_view a, std::string_view b);
+
 // Parses a --max-cells value: a positive decimal integer. Returns nullopt otherwise.
 std::optional<std::size_t> parse_max_cells(std::string_view text);
 

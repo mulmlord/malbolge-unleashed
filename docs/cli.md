@@ -13,9 +13,10 @@ usage: malm <command> [args...]
 | `export` | implemented | convert between `.malm` and plain Malbolge text |
 | `pack` | implemented | pack a program into a native executable |
 | `asm` | implemented | assemble a `.mua` file into a `.malm` or Malbolge text; check and pretty-print it |
-| `hla`, `disasm`, `build` | not implemented yet | exit 2 with `malm <cmd>: not implemented` |
+| `disasm` | implemented | turn a program back into readable assembly, or list it cell by cell |
+| `hla`, `build` | not implemented yet | exit 2 with `malm <cmd>: not implemented` |
 
-The program file of `run`, `export` and `pack` is a `.malm` container ([malm-format.md](malm-format.md))
+The program file of `run`, `export`, `pack` and `disasm` is a `.malm` container ([malm-format.md](malm-format.md))
 or Malbolge text (spec 4); the two are told apart by the first four bytes. For a `.malm` the header
 decides the mode, and `--classic` must agree with it. For text, `--classic` selects classic mode
 (spec 8). `--max-cells N` is a resource cap on the cells a reader accepts (default 2^30, a positive
@@ -226,3 +227,48 @@ there are diagnostics.
 `--print` flattens `.INCLUDE`s (the output holds the blocks of the included files inline), drops
 comments and keeps the source's grouping of cells into lines; it is a fixed point: printing the
 printed output gives the same text.
+
+## `malm disasm`
+
+```
+usage: malm disasm [--map <file>] [--raw] [--classic] [--max-cells N] [-o <out>] [--] <file>
+```
+
+The disassembler, for debugging programs from `malm asm`. Implementation: `src/asm/disasm.cpp` and
+`src/driver/disasm_cmd.cpp`; tests: `tests/asm/disasm_test.cpp`.
+
+| option | meaning |
+|---|---|
+| `--map <file>` | take labels and blocks from the label map of `malm asm --map` |
+| `--raw` | list the program text cell by cell, even for a program from `malm asm` |
+| `-o <out>` | write the output to `<out>`; the default (and `-o -`) is stdout |
+
+The text of an assembled program is only its startup code (asm.md section 7), so `malm disasm`
+runs it, without I/O, up to its final `Jmp` into `ENTRY`, and reads the memory image the startup
+code wrote. From that it writes a `.mua` that `malm asm` turns back into the same program text:
+
+- `.WIDTH` is the program width, and every block is pinned with `@` at its address;
+- code cells are written as the cycle their character performs at its position (`Rot/Nop`,
+  `Nop/MovD`, `RNop`, ...), or as a single command for a 68-cycle; each one is annotated with its
+  address, position mod 94 (`p=`), character and xlat2 cycle (`2-cycle #1`: the cycle's length
+  and the character's index in it);
+- data words that point into a block are written as label references, `X` or `R_X`, the rest as
+  constants (`'H'<<1` where that is what rotating the value gives); data lines follow the units
+  they invoke, as in `ROT 'H'<<1 R_ROT`.
+
+With `--map` the labels and blocks are the map's. Without it, code is what the data-driven
+execution model reaches from `ENTRY` without running the program (both states of every flag
+included), code blocks are named after their first unit (`ROT`, `MOVED`, `FLAG`, `SLED`, ...),
+and other labels after their address (`L0t101112110`); cells that are only reached through
+values computed at run time, such as branch sleds, come out as data. Either way, `malm disasm`
+checks in-process that its output lays out to the same image and prints
+`malm disasm: warning: ...` on stderr if it does not.
+
+Any other program (classic mode, `--raw`, or a text whose run does I/O, halts or faults before a
+second `Jmp`, or does not reach one within as many steps as it has cells) is listed instead:
+one line per cell with its address, position, character, normalized instruction letter
+(research 4.1), decoded instruction and xlat2 cycle.
+
+Exit codes: 0 on success (also with a warning), 1 for a file that cannot be read or written and
+for a label map that is malformed or does not belong to the program, 2 for a usage error.
+`malm disasm` refuses to write over its input file or the label map.

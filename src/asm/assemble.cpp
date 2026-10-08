@@ -1,5 +1,6 @@
 #include "asm/assemble.hpp"
 
+#include <algorithm>
 #include <string>
 
 namespace malm::assembler {
@@ -43,8 +44,17 @@ std::optional<Assembly> assemble(const Program& program, Diagnostics& diags) {
         if (length <= options.base) {
             return Assembly{std::move(*layout), std::move(*startup), options.base};
         }
-        // Leave some room: the next layout's addresses, and so its startup code, may grow.
-        options.base = length + length / 16 + 16;
+        // Leave some room: the next layout's addresses, and so its startup code, may grow. A block
+        // pinned in head 0 caps the room, so that a program whose blocks are all pinned (e.g. the
+        // output of `malm disasm`) keeps its layout; the text itself must still end below it.
+        std::uint64_t next = length + length / 16 + 16;
+        for (std::size_t b = 0; b < program.blocks.size(); ++b) {
+            const Value start = layout->blocks[b].footprint;
+            if (program.blocks[b].offset && start.head() == 0 && start.raw() >= length) {
+                next = std::min(next, start.raw());
+            }
+        }
+        options.base = next;
         options.min_width = layout->width;
     }
     diags.error(root, "the layout and the startup code do not converge");

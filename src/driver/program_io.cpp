@@ -17,6 +17,15 @@
 
 namespace malm {
 
+bool same_file(std::string_view a, std::string_view b) {
+    if (a == "-" || b == "-") {
+        return false;
+    }
+    std::error_code ec;
+    return a == b || std::filesystem::equivalent(std::filesystem::path(std::string(a)),
+                                                 std::filesystem::path(std::string(b)), ec);
+}
+
 bool read_file(std::string_view path, std::vector<std::uint8_t>& bytes, std::ostream& err) {
     const std::filesystem::path fs_path{std::string(path)};
     std::error_code ec;

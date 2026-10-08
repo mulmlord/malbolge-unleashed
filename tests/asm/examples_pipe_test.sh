@@ -1,6 +1,7 @@
 #!/bin/sh
 # The golden examples through the real CLI and real pipes (issue #16): `malm asm` to a .malm, then
-# `malm run` with piped stdin. Usage: examples_pipe_test.sh <malm> <examples-dir> <case>
+# `malm run` with piped stdin, and back through `malm disasm` (issue #17).
+# Usage: examples_pipe_test.sh <malm> <examples-dir> <case>
 set -u
 malm=$1
 dir=$2
@@ -9,6 +10,17 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
 "$malm" asm "$dir/$case_.mua" -o "$tmp/p.malm" || exit 1
+
+# The disassembly re-assembles to the same program (issue #17), with and without the label map.
+"$malm" asm "$dir/$case_.mua" --map "$tmp/p.map" -o "$tmp/m.malm" || exit 1
+cmp "$tmp/p.malm" "$tmp/m.malm" || exit 1
+"$malm" disasm --map "$tmp/p.map" "$tmp/p.malm" -o "$tmp/d1.mua" 2> "$tmp/err" || exit 1
+"$malm" disasm "$tmp/p.malm" > "$tmp/d2.mua" 2>> "$tmp/err" || exit 1
+test ! -s "$tmp/err" || { cat "$tmp/err" >&2; exit 1; }
+for d in d1 d2; do
+    "$malm" asm "$tmp/$d.mua" -o "$tmp/$d.malm" || exit 1
+    cmp "$tmp/p.malm" "$tmp/$d.malm" || exit 1
+done
 
 # Runs the program on stdin; the output must equal $1 byte for byte and the exit status be 0.
 expect() {

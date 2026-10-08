@@ -57,7 +57,9 @@ the compressed `.malm` format (`malm export`) and standalone native executables 
 M1 (the assembler): `malm asm` assembles `.mua` programs into pure `.malm` files; the examples in
 `examples/asm` (`malm asm examples/asm/adder.mua -o adder.malm`, then `echo 123 456 | malm run
 adder.malm`) run in unleashed mode, which is the M1 exit criterion. The disassembler (`malm disasm`)
-is still to come; see [docs/asm.md](docs/asm.md) and the GitHub milestones.
+turns an assembled program back into a `.mua` that re-assembles to the same program, with
+labels from `malm asm --map` or recovered from the control flow; see [docs/asm.md](docs/asm.md),
+[docs/cli.md](docs/cli.md) and the GitHub milestones.
 
 ## License
 
