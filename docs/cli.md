@@ -12,7 +12,8 @@ usage: malm <command> [args...]
 | `run` | implemented | run a `.malm` or Malbolge text program |
 | `export` | implemented | convert between `.malm` and plain Malbolge text |
 | `pack` | implemented | pack a program into a native executable |
-| `asm`, `hla`, `disasm`, `build` | not implemented yet | exit 2 with `malm <cmd>: not implemented` |
+| `asm` | `--check` and `--print` only | parse, check and pretty-print a `.mua` file; assembling is not implemented yet |
+| `hla`, `disasm`, `build` | not implemented yet | exit 2 with `malm <cmd>: not implemented` |
 
 The program file of `run`, `export` and `pack` is a `.malm` container ([malm-format.md](malm-format.md))
 or Malbolge text (spec 4); the two are told apart by the first four bytes. For a `.malm` the header
@@ -183,3 +184,32 @@ Writes a native executable: a copy of the running `malm` with the program append
 payload. The result runs the embedded program on stdin and stdout, ignores its command line and
 exits as `malm run` does. `-o -` is not supported. `pack` refuses to overwrite the running
 binary or the input.
+
+## `malm asm`
+
+```
+usage: malm asm (--check | --print) [--] <file.mua>
+       malm asm [--text] [--map <file>] -o <out> [--] <file.mua>   (not implemented yet)
+```
+
+The front end of the assembler ([asm.md](asm.md), issue #13): lexer, parser, `.INCLUDE` expansion
+and the static checks of asm.md section 9. Implementation: `src/asm/` (`lexer`, `parser`, `check`,
+`printer`) and `src/driver/asm_cmd.cpp`; tests: `tests/asm/`.
+
+| option | meaning |
+|---|---|
+| `--check` | parse the file (and everything it includes) and run the static checks; prints nothing on success |
+| `--print` | after the same checks, print the program in canonical form on stdout |
+
+Diagnostics go to stderr as `file:line:col: error: message`, followed by `file:line:col: note: ...`
+lines (the first definition of a duplicate label, and one `included from here` note per include
+level), in source order. Independent syntax errors are all reported; the static checks (unknown
+and duplicate labels, `R_`/`U_` rules, `ENTRY`, cycles that exist nowhere, ...) run only when the
+parse was clean, so that one syntax error does not cascade into a wall of unknown labels. Exit
+codes: 0 for a clean file, 1 for diagnostics or a file that cannot be read, 2 for a usage error.
+
+`--print` flattens `.INCLUDE`s (the output holds the blocks of the included files inline), drops
+comments and keeps the source's grouping of cells into lines; it is a fixed point: printing the printed output gives the
+same text. A plain `malm asm <file> -o <out>` exits 2 with `assembly not implemented yet
+(#14-#16); use --check or --print`; layout, startup code and the `.malm` output come with those
+tickets.
