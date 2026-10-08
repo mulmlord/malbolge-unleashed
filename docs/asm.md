@@ -313,7 +313,8 @@ They cover:
 
 ## 10. Examples
 
-These two programs are the reference examples. They become golden tests in #16, assembled and run in unleashed mode.
+These two programs are the reference examples. They are `examples/asm/hello.mua` and
+`examples/asm/cat.mua`, golden tests assembled and run in unleashed mode (§10.3).
 
 ### 10.1 Hello world
 
@@ -370,7 +371,7 @@ Trace of the first line, with `p` = the address of `ENTRY`:
 
 ### 10.2 Cat (endless)
 
-Reads a byte and writes it, forever. After end of input, `In` gives `...2` (EOF), and `Out` writes `...2 mod 256` = 168, as in classic Malbolge (spec §6). A cat that halts on EOF needs a value-dependent branch (§6), and is the golden test in #16.
+Reads a byte and writes it, forever. After end of input, `In` gives `...2` (EOF), and `Out` writes `...2 mod 256` = 168, as in classic Malbolge (spec §6). A cat that halts on EOF needs a value-dependent branch (§6); see `examples/asm/halting_cat.mua` (§10.3).
 
 ```
 .CODE
@@ -396,6 +397,37 @@ LOOP:   R_MOVED             ; landing pad: re-arm MOVED after the goto
 The goto works like this:
 1. `MOVED LOOP` executes `MovD` with `[D] = LOOP − 1`, so `D` becomes `LOOP − 1`, and the encryption puts `MOVED` into its Nop state. The increment gives `D = LOOP`.
 2. `MOVED`'s `Jmp` reads `[LOOP] = R_MOVED`, which re-arms `MOVED` and continues with `IN` `[H §6.1]`.
+
+### 10.3 The examples directory
+
+`examples/asm` holds the golden examples, with the behaviour of LMAO's examples. Each file's header
+describes its input format and technique. `tests/asm/examples_test.cpp` and
+`tests/asm/examples_pipe_test.sh` assemble and run them.
+
+| File | Behaviour |
+|---|---|
+| `hello.mua` | §10.1: prints `Hello, world!` and a newline |
+| `cat.mua` | §10.2: endless cat |
+| `halting_cat.mua` | copies stdin to stdout byte for byte, halts at EOF |
+| `digital_root.mua` | reads a decimal number (ended by a newline or EOF), prints its digital root |
+| `adder.mua` | reads two 3-digit numbers separated by one byte, prints their sum |
+
+Techniques they use, beyond §3.3 and §6:
+- **Constants in A without destroying cells.** `Opr` leaves a cell `x` unchanged and loads `A := x`
+  when, trit by trit, `crz(A, x) = x` (x = 0 with A in {1, 2}, x = 1 with A = 0, x = 2 with A in
+  {0, 1}, head included). Starting from a `Rot` fixed point (`0`, `C1`, or the low `n` trits 2,
+  written `(1>>1)+(1>>1)+(1>>1)-1`), a few such steps load any constant, so loops can repeat
+  them.
+- **Resetting a cell of unknown value.** With `A = C1`, two `Opr`s on the same cell (the second with
+  the `A` the first left) turn any value into `C1`.
+- **Branching on a byte.** Crazy the byte into a known cell and jump through it. With the cell
+  `0t1..1`, a byte below 81 lands in a head-1 sled at `...1` followed by swap01 of its 4 low trits
+  (so digits and the newline land on distinct cells), and EOF on a separate pad in head 0. Each
+  branch knows what the cell holds and loads the `A` that turns it back. To tell EOF from all bytes,
+  two crazies with `0` and `0t2..2` squeeze every byte onto one value (and the second cell restores
+  itself), and two crazies with `C1` keep a copy of the byte for later.
+- **Calls.** A cell reached through `MOVED` is followed by a chain of flag tests, one per call site;
+  the caller sets its flag, and the chain returns to it (§3.3).
 
 ## 11. Differences from HeLL (LMAO/LMFAO)
 

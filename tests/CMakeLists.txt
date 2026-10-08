@@ -56,3 +56,15 @@ target_compile_definitions(asm_front_test PRIVATE MALM_ASM_DOC="${PROJECT_SOURCE
 malm_add_test(NAME asm_layout_test LABEL fast
     SOURCES asm/layout_test.cpp asm/units_test.cpp asm/startup_test.cpp
     LIBS malm_asm)
+
+# The golden examples of examples/asm (issue #16): in-process, and through the CLI with real pipes.
+malm_add_test(NAME asm_examples_test LABEL fast SOURCES asm/examples_test.cpp
+    LIBS malm_asm malm_container TIMEOUT 300)
+target_compile_definitions(asm_examples_test PRIVATE
+    MALM_EXAMPLES_DIR="${PROJECT_SOURCE_DIR}/examples/asm")
+foreach(case hello cat halting_cat digital_root adder)
+    add_test(NAME asm_example_${case}
+        COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/asm/examples_pipe_test.sh
+                $<TARGET_FILE:malm> ${PROJECT_SOURCE_DIR}/examples/asm ${case})
+    set_tests_properties(asm_example_${case} PROPERTIES LABELS fast TIMEOUT 120)
+endforeach()

@@ -12,7 +12,7 @@ usage: malm <command> [args...]
 | `run` | implemented | run a `.malm` or Malbolge text program |
 | `export` | implemented | convert between `.malm` and plain Malbolge text |
 | `pack` | implemented | pack a program into a native executable |
-| `asm` | `--check` and `--print` only | parse, check and pretty-print a `.mua` file; assembling is not implemented yet |
+| `asm` | implemented | assemble a `.mua` file into a `.malm` or Malbolge text; check and pretty-print it |
 | `hla`, `disasm`, `build` | not implemented yet | exit 2 with `malm <cmd>: not implemented` |
 
 The program file of `run`, `export` and `pack` is a `.malm` container ([malm-format.md](malm-format.md))
@@ -188,28 +188,41 @@ binary or the input.
 ## `malm asm`
 
 ```
-usage: malm asm (--check | --print) [--] <file.mua>
-       malm asm [--text] [--map <file>] -o <out> [--] <file.mua>   (not implemented yet)
+usage: malm asm [--text] [--map <file>] -o <out> [--] <file.mua>
+       malm asm (--check | --print) [--] <file.mua>
 ```
 
-The front end of the assembler ([asm.md](asm.md), issue #13): lexer, parser, `.INCLUDE` expansion
-and the static checks of asm.md section 9. Implementation: `src/asm/` (`lexer`, `parser`, `check`,
-`printer`) and `src/driver/asm_cmd.cpp`; tests: `tests/asm/`.
+The assembler ([asm.md](asm.md)): lexer, parser, `.INCLUDE` expansion, the static checks of
+asm.md section 9, layout and the startup code (asm.md section 7). Implementation: `src/asm/`
+and `src/driver/asm_cmd.cpp`; tests: `tests/asm/`. Golden examples: `examples/asm/`.
 
 | option | meaning |
 |---|---|
+| `-o <out>` | write the assembled program, a `.malm` (zstd); `-o -` writes it to stdout |
+| `--text` | write Malbolge text instead (one trailing newline), as `malm export --text` would |
+| `--map <file>` | also write the label map (below); not to stdout |
 | `--check` | parse the file (and everything it includes) and run the static checks; prints nothing on success |
 | `--print` | after the same checks, print the program in canonical form on stdout |
+
+The output is pure (spec 4): before writing, `malm asm` checks that the program text passes the
+strict loader unchanged and that the `.malm` holds exactly these cells (unleashed mode, no
+`EXIT_A`, no other data); a failure would be an assembler bug and exits 1. Assembling the same
+source gives the same bytes. `malm asm` refuses to write over its input file, and `-o` and `--map`
+must name different files.
+
+The label map has one line per label, ordered by address and then by name:
+`name address code|data first last`, where `address` is the label's cell and `first`/`last` the
+extent of its block, all in the notation of spec 1 (`0t...`, `...1...`).
 
 Diagnostics go to stderr as `file:line:col: error: message`, followed by `file:line:col: note: ...`
 lines (the first definition of a duplicate label, and one `included from here` note per include
 level), in source order. Independent syntax errors are all reported; the static checks (unknown
 and duplicate labels, `R_`/`U_` rules, `ENTRY`, cycles that exist nowhere, ...) run only when the
-parse was clean, so that one syntax error does not cascade into a wall of unknown labels. Exit
-codes: 0 for a clean file, 1 for diagnostics or a file that cannot be read, 2 for a usage error.
+parse was clean, so that one syntax error does not cascade into a wall of unknown labels. Layout
+errors (asm.md section 9) are reported when assembling. Exit codes: 0 on success, 1 for
+diagnostics, a file that cannot be read or written, 2 for a usage error. Nothing is written when
+there are diagnostics.
 
 `--print` flattens `.INCLUDE`s (the output holds the blocks of the included files inline), drops
-comments and keeps the source's grouping of cells into lines; it is a fixed point: printing the printed output gives the
-same text. A plain `malm asm <file> -o <out>` exits 2 with `assembly not implemented yet
-(#14-#16); use --check or --print`; layout, startup code and the `.malm` output come with those
-tickets.
+comments and keeps the source's grouping of cells into lines; it is a fixed point: printing the
+printed output gives the same text.

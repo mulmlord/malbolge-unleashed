@@ -1,0 +1,18 @@
+.CODE
+IN:     In/Nop
+        Jmp
+
+OUT:    Out/Nop
+        Jmp
+
+MOVED:  MovD/Nop
+        Jmp
+
+.DATA
+{
+ENTRY:  R_MOVED             ; disarm MOVED: the R_MOVED at LOOP re-arms it
+LOOP:   R_MOVED             ; landing pad: re-arm MOVED after the goto
+        IN ?- R_IN          ; A := next byte
+        OUT ?- R_OUT        ; write A
+        MOVED LOOP          ; goto LOOP (D := LOOP − 1, then D = LOOP)
+}

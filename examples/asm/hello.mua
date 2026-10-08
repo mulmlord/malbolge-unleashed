@@ -1,0 +1,41 @@
+.CODE
+ROT:    Rot/Nop
+        Jmp
+
+OUT:    Out/Nop
+        Jmp
+
+HALT:   Hlt
+
+.DATA
+{
+ENTRY:  ROT 'H'<<1 R_ROT    ; A := rotr('H'<<1) = 'H'; restore ROT
+        OUT ?- R_OUT        ; write A; Out ignores its operand
+        ROT 'e'<<1 R_ROT
+        OUT ?- R_OUT
+        ROT 'l'<<1 R_ROT
+        OUT ?- R_OUT
+        ROT 'l'<<1 R_ROT
+        OUT ?- R_OUT
+        ROT 'o'<<1 R_ROT
+        OUT ?- R_OUT
+        ROT ','<<1 R_ROT
+        OUT ?- R_OUT
+        ROT ' '<<1 R_ROT
+        OUT ?- R_OUT
+        ROT 'w'<<1 R_ROT
+        OUT ?- R_OUT
+        ROT 'o'<<1 R_ROT
+        OUT ?- R_OUT
+        ROT 'r'<<1 R_ROT
+        OUT ?- R_OUT
+        ROT 'l'<<1 R_ROT
+        OUT ?- R_OUT
+        ROT 'd'<<1 R_ROT
+        OUT ?- R_OUT
+        ROT '!'<<1 R_ROT
+        OUT ?- R_OUT
+        ROT '\n'<<1 R_ROT
+        OUT ?- R_OUT
+        HALT
+}

@@ -7,7 +7,7 @@ CLI binary, `malm`. See the [design spec](docs/superpowers/specs/2026-10-01-malb
 and the [Malbolge research notes](docs/research/malbolge-research.md).
 The normative language reference is [docs/spec.md](docs/spec.md).
 The assembly language (`.mua`) is specified in [docs/asm.md](docs/asm.md).
-The command line (`run`, `export`, `pack`, `--trace`, `--stats`) is documented in [docs/cli.md](docs/cli.md).
+The command line (`run`, `asm`, `export`, `pack`, `--trace`, `--stats`) is documented in [docs/cli.md](docs/cli.md).
 
 ## Prerequisites
 
@@ -45,6 +45,7 @@ Binaries land in `build/<preset>/src/driver/malm`. CMake options: `MALM_WERROR`,
 | `src/pack` | native executable packer |
 | `rv/emu` | RV32IM emulator written in HLA |
 | `rv/runtime` | RISC-V runtime (crt0, syscalls, libc) |
+| `examples/asm` | assembly examples: hello world, cat, halting cat, adder, digital root |
 | `tests/` | doctest suites (labels `fast`, `slow`) |
 | `docs/` | spec, CLI reference and research |
 
@@ -53,7 +54,10 @@ Binaries land in `build/<preset>/src/driver/malm`. CMake options: `MALM_WERROR`,
 Milestone M0 (Foundations) is complete: `malm run` executes malbolge-unleashed and classic Malbolge
 (`--classic`, checked step by step against Olmstead's reference interpreter), with `--trace`/`--stats`,
 the compressed `.malm` format (`malm export`) and standalone native executables (`malm pack`).
-M1 (the assembler) is in progress; see [docs/asm.md](docs/asm.md) and the GitHub milestones.
+M1 (the assembler): `malm asm` assembles `.mua` programs into pure `.malm` files; the examples in
+`examples/asm` (`malm asm examples/asm/adder.mua -o adder.malm`, then `echo 123 456 | malm run
+adder.malm`) run in unleashed mode, which is the M1 exit criterion. The disassembler (`malm disasm`)
+is still to come; see [docs/asm.md](docs/asm.md) and the GitHub milestones.
 
 ## License
 

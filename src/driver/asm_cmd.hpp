@@ -6,8 +6,8 @@
 
 namespace malm {
 
-// `malm asm (--check | --print) <file.mua>`; plain assembly is not implemented yet (#14-#16).
-// `args` excludes the subcommand name.
+// `malm asm [--text] [--map <file>] -o <out> <file.mua>` and `malm asm (--check | --print)
+// <file.mua>` (docs/cli.md). `args` excludes the subcommand name.
 int asm_command(std::span<const std::string_view> args, std::istream& in, std::ostream& out,
                 std::ostream& err);
 
