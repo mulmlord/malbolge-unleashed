@@ -21,12 +21,6 @@ const ImageCell* Layout::find(Value addr) const {
 
 namespace {
 
-using core::pow3;
-using Raw =
-    std::uint64_t; // an address as Value::raw(); within a window, raw order is address order
-using Residues = std::bitset<94>;
-using CharTable = std::array<std::uint8_t, 94>; // by position; 0 where the word does not exist
-
 bool all_nop(const std::vector<Op>& ops) {
     return std::all_of(ops.begin(), ops.end(), [](Op o) { return o == Op::Nop; });
 }
@@ -35,31 +29,48 @@ bool is_soft(const Word& w) {
     return w.kind == Word::Kind::RNop || (w.kind == Word::Kind::Cycle && all_nop(w.ops));
 }
 
-bool loadable_at(std::size_t p, std::uint8_t c) { return core::normalize(p, c) != core::kNoSymbol; }
+bool is_loadable(std::size_t p, std::uint8_t c) { return core::normalize(p, c) != core::kNoSymbol; }
 
-// The character of a code word at every position (docs/asm.md 3.1; the rule is in layout.hpp).
+} // namespace
+
+std::uint8_t word_char(const Word& w, std::size_t p) {
+    p %= 94;
+    if (is_soft(w)) {
+        return rnop_char(p);
+    }
+    if (w.kind == Word::Kind::Command) {
+        return loadable_char(p, w.ops[0]);
+    }
+    std::uint8_t best = 0;
+    for (unsigned c = 33; c <= 126 && (best == 0 || !is_loadable(p, best)); ++c) {
+        const auto ch = static_cast<std::uint8_t>(c);
+        if (w.ops.size() % cycle_length(ch) != 0) {
+            continue;
+        }
+        bool match = true;
+        for (std::size_t k = 0; k < w.ops.size() && match; ++k) {
+            match = op_at(p, ch, k) == w.ops[k];
+        }
+        if (match && (best == 0 || is_loadable(p, ch))) {
+            best = ch;
+        }
+    }
+    return best;
+}
+
+namespace {
+
+using core::pow3;
+using Raw =
+    std::uint64_t; // an address as Value::raw(); within a window, raw order is address order
+using Residues = std::bitset<94>;
+using CharTable = std::array<std::uint8_t, 94>; // by position; 0 where the word does not exist
+
+// The character of a code word at every position.
 CharTable char_table(const Word& w) {
     CharTable t{};
     for (std::size_t p = 0; p < 94; ++p) {
-        if (is_soft(w)) {
-            t[p] = rnop_char(p);
-        } else if (w.kind == Word::Kind::Command) {
-            t[p] = loadable_char(p, w.ops[0]);
-        } else {
-            for (unsigned c = 33; c <= 126 && (t[p] == 0 || !loadable_at(p, t[p])); ++c) {
-                const auto ch = static_cast<std::uint8_t>(c);
-                if (w.ops.size() % cycle_length(ch) != 0) {
-                    continue;
-                }
-                bool match = true;
-                for (std::size_t k = 0; k < w.ops.size() && match; ++k) {
-                    match = op_at(p, ch, k) == w.ops[k];
-                }
-                if (match && (t[p] == 0 || loadable_at(p, ch))) {
-                    t[p] = ch;
-                }
-            }
-        }
+        t[p] = word_char(w, p);
     }
     return t;
 }
@@ -452,7 +463,8 @@ class Placer {
         l.width = n;
         for (std::size_t b = 0; b < p_.blocks.size(); ++b) {
             const Block& blk = p_.blocks[b];
-            l.blocks.push_back({cell_addr(b, 0), cell_addr(b, blk.cells.size() - 1)});
+            l.blocks.push_back(
+                {cell_addr(b, 0), cell_addr(b, blk.cells.size() - 1), Value::from_raw(starts_[b])});
             for (std::size_t c = 0; c < blk.cells.size(); ++c) {
                 for (const Label& lab : blk.cells[c].labels) {
                     l.labels.emplace(lab.name, LabelInfo{cell_addr(b, c), blk.section, b});
@@ -466,7 +478,7 @@ class Placer {
         const auto put = [&image](Raw a, Value v, CellRole role) {
             const std::uint32_t p = position(a);
             const bool loadable = v.raw() >= 33 && v.raw() <= 126 &&
-                                  loadable_at(p, static_cast<std::uint8_t>(v.raw()));
+                                  is_loadable(p, static_cast<std::uint8_t>(v.raw()));
             auto [it, fresh] =
                 image.try_emplace(a, ImageCell{Value::from_raw(a), v, role, loadable});
             if (!fresh && it->second.role == CellRole::Reserved) {

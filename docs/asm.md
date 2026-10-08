@@ -251,7 +251,7 @@ This section is the contract for #14 and #15. `src/asm/startup.hpp` describes th
 - **No I/O:** the startup code performs no input or output.
 - **Outputs** of `malm asm`:
   - a `.malm` (default), or text with `--text`;
-  - optional `--map out.map`, used by `malm disasm` (#17). One line per label: `name`, its canonical address (spec §1.1 notation), `code` or `data`, and the extent (first and last cell) of its block.
+  - optional `--map out.map`, used by `malm disasm` (#17, docs/cli.md). One line per label: `name`, its canonical address (spec §1.1 notation), `code` or `data`, and the extent (first and last cell) of its block.
 
 ## 8. Directives
 
@@ -260,7 +260,7 @@ This section is the contract for #14 and #15. `src/asm/startup.hpp` describes th
 - **Default** (a deterministic search):
   1. Start with the smallest `n ≥ 10` at which the blocks could fit above the base, starting with base 100.
   2. Lay out the program at that base and `n`, then generate the startup code.
-  3. If the text ends above the base, raise the base past the end of the text and repeat. If some address would need width ≥ `n`, or the text's length raises the initial `n` above `n` (spec §2.2), set `n += 1` and repeat.
+  3. If the text ends above the base, raise the base past the end of the text, with some room but not above a block pinned in head 0, and repeat. (So a program whose blocks are all pinned, such as the output of `malm disasm`, keeps its layout.) If some address would need width ≥ `n`, or the text's length raises the initial `n` above `n` (spec §2.2), set `n += 1` and repeat.
   4. `n > 39` is an error.
 - An explicit `.WIDTH` that is too small for the layout is an error.
 - Programs that use `<<`/`>>` get the same result either way, because their values are computed for the final `n`. An explicit `.WIDTH` just makes it visible in the source.

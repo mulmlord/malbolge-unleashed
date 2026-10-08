@@ -80,8 +80,9 @@ struct LabelInfo {
 };
 
 struct PlacedBlock {
-    Value first; // the block's first cell
-    Value last;  // its last cell
+    Value first;     // the block's first cell
+    Value last;      // its last cell
+    Value footprint; // the first cell of its footprint: a code block's reserved cell
 };
 
 struct Layout {
@@ -95,6 +96,10 @@ struct Layout {
     // The image cell at `addr`, or null.
     const ImageCell* find(Value addr) const;
 };
+
+// The character code word `w` assembles to at position p (mod 94), or 0 if its cycle does not
+// exist there (the rule above).
+std::uint8_t word_char(const Word& w, std::size_t p);
 
 // Lays out a program that passed check_program. Errors go to `diags`; the result is then nullopt.
 std::optional<Layout> layout_program(const Program& program, Diagnostics& diags,

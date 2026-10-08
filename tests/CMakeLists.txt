@@ -62,6 +62,11 @@ malm_add_test(NAME asm_examples_test LABEL fast SOURCES asm/examples_test.cpp
     LIBS malm_asm malm_container TIMEOUT 300)
 target_compile_definitions(asm_examples_test PRIVATE
     MALM_EXAMPLES_DIR="${PROJECT_SOURCE_DIR}/examples/asm")
+# The disassembler (issue #17): the golden examples round-trip through `malm disasm`.
+malm_add_test(NAME asm_disasm_test LABEL fast SOURCES asm/disasm_test.cpp
+    LIBS malm_asm TIMEOUT 300)
+target_compile_definitions(asm_disasm_test PRIVATE
+    MALM_EXAMPLES_DIR="${PROJECT_SOURCE_DIR}/examples/asm")
 foreach(case hello cat halting_cat digital_root adder)
     add_test(NAME asm_example_${case}
         COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/asm/examples_pipe_test.sh

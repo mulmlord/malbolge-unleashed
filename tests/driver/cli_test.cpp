@@ -79,7 +79,7 @@ TEST_CASE("unknown command") {
 
 TEST_CASE("known subcommands are not implemented yet") {
     for (std::string_view sub : kSubcommands) {
-        if (sub == "run" || sub == "export" || sub == "pack" || sub == "asm") {
+        if (sub == "run" || sub == "export" || sub == "pack" || sub == "asm" || sub == "disasm") {
             continue;
         }
         const Result r = run({sub, "x"});
@@ -1261,4 +1261,90 @@ TEST_CASE("asm: a dash-leading file name works after --") {
     const Result r = run({"asm", "--check", "--", "-odd.mua"});
     std::filesystem::current_path(old);
     CHECK(r.code == 0);
+}
+
+TEST_CASE("disasm: re-assembles to the same program, with and without the label map") {
+    TempDir d;
+    const std::string f = d.write("hi.mua", std::string(kAsmHi));
+    const std::string out = (d.path / "hi.malm").string();
+    const std::string map = (d.path / "hi.map").string();
+    REQUIRE(run({"asm", "--map", map, f, "-o", out}).code == 0);
+    for (const bool with_map : {true, false}) {
+        CAPTURE(with_map);
+        const std::string mua = (d.path / "back.mua").string();
+        Result r =
+            with_map ? run({"disasm", "--map", map, out, "-o", mua}) : run({"disasm", "--", out});
+        REQUIRE(r.code == 0);
+        CHECK(r.err.empty());
+        if (with_map) {
+            CHECK(r.out.empty());
+        } else {
+            CHECK(r.out.starts_with("; malm disasm: " + out + "\n"));
+            d.write("back.mua", r.out);
+        }
+        r = run({"asm", mua, "-o", "-"});
+        REQUIRE(r.code == 0);
+        CHECK(r.out == slurp(out));
+    }
+}
+
+TEST_CASE("disasm: other programs are listed, and map errors exit 1") {
+    TempDir d;
+    const std::string f = d.write("hi.mua", std::string(kAsmHi));
+    const std::string out = (d.path / "hi.malm").string();
+    REQUIRE(run({"asm", f, "-o", out}).code == 0);
+    const TempFile foreign("(P");
+    Result r = run({"disasm", foreign.str()});
+    CHECK(r.code == 0);
+    CHECK(r.out.find("listing the program text") != std::string::npos);
+    r = run({"disasm", "--raw", out});
+    CHECK(r.code == 0);
+    CHECK(r.out.find("; listing requested: listing the program text") != std::string::npos);
+
+    const std::string bad = d.write("bad.map", "ENTRY 0t1 data\n");
+    r = run({"disasm", "--map", bad, out});
+    CHECK(r.code == 1);
+    CHECK(r.err ==
+          "malm disasm: " + bad + ": line 1: expected 'name address code|data first last'\n");
+    const std::string other = d.write("other.map", "ENTRY 0t1 data 0t1 0t1\n");
+    r = run({"disasm", "--map", other, out});
+    CHECK(r.code == 1);
+    CHECK(r.err.starts_with("malm disasm: the label map does not match this program: "));
+    r = run({"disasm", "--map", (d.path / "missing.map").string(), out});
+    CHECK(r.code == 1);
+    CHECK(r.out.empty());
+}
+
+TEST_CASE("disasm: refuses to overwrite its input") {
+    TempDir d;
+    const std::string f = d.write("hi.mua", std::string(kAsmHi));
+    const std::string out = (d.path / "hi.malm").string();
+    const std::string map = (d.path / "hi.map").string();
+    REQUIRE(run({"asm", "--map", map, f, "-o", out}).code == 0);
+    const std::string before = slurp(out);
+    for (const auto& args : std::vector<std::vector<std::string_view>>{
+             {"disasm", out, "-o", out}, {"disasm", "--map", map, out, "-o", map}}) {
+        const Result r = run(args);
+        CHECK(r.code == 1);
+        CHECK(r.err.find("refusing to overwrite the input file") != std::string::npos);
+    }
+    CHECK(slurp(out) == before);
+}
+
+TEST_CASE("disasm: usage errors exit 2") {
+    for (const auto& args :
+         std::vector<std::vector<std::string_view>>{{"disasm"},
+                                                    {"disasm", "a", "b"},
+                                                    {"disasm", "--bogus", "a"},
+                                                    {"disasm", "-o"},
+                                                    {"disasm", "a", "-o", "x", "-o", "y"},
+                                                    {"disasm", "a", "--map", "m", "--map", "n"},
+                                                    {"disasm", "--map", "m", "--raw", "a"},
+                                                    {"disasm", "--map", "m", "--classic", "a"},
+                                                    {"disasm", "--max-cells", "0", "a"}}) {
+        const Result r = run(args);
+        CHECK(r.code == 2);
+        CHECK(r.out.empty());
+        CHECK(r.err.find("usage: malm disasm") != std::string::npos);
+    }
 }

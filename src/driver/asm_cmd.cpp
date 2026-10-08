@@ -1,10 +1,8 @@
 #include "driver/asm_cmd.hpp"
 
-#include <algorithm>
 #include <cerrno>
 #include <cstdint>
 #include <cstring>
-#include <filesystem>
 #include <fstream>
 #include <ostream>
 #include <string>
@@ -12,10 +10,12 @@
 
 #include "asm/assemble.hpp"
 #include "asm/check.hpp"
+#include "asm/label_map.hpp"
 #include "asm/parser.hpp"
 #include "asm/printer.hpp"
 #include "container/container.hpp"
 #include "core/loader.hpp"
+#include "driver/program_io.hpp"
 
 namespace malm {
 namespace {
@@ -35,16 +35,6 @@ int usage_error(std::ostream& err, std::string_view msg) {
     }
     err << kUsage;
     return 2;
-}
-
-// True if both paths name the same existing file, or are spelled the same.
-bool same_file(std::string_view a, std::string_view b) {
-    if (a == "-" || b == "-") {
-        return false;
-    }
-    std::error_code ec;
-    return a == b || std::filesystem::equivalent(std::filesystem::path(std::string(a)),
-                                                 std::filesystem::path(std::string(b)), ec);
 }
 
 // Writes `bytes` to `path`, or to `out` for "-". On failure prints a diagnostic and returns false.
@@ -71,28 +61,6 @@ bool write_output(std::string_view path, const std::vector<std::uint8_t>& bytes,
         return false;
     }
     return true;
-}
-
-// The label map (docs/asm.md 7): one line per label, `name address code|data first last`, ordered
-// by address and then by name.
-std::vector<std::uint8_t> label_map(const assembler::Assembly& a) {
-    std::vector<std::pair<std::string, const assembler::LabelInfo*>> labels;
-    for (const auto& [name, info] : a.layout.labels) {
-        labels.emplace_back(name, &info);
-    }
-    std::ranges::sort(labels, [](const auto& x, const auto& y) {
-        return x.second->addr.raw() != y.second->addr.raw()
-                   ? x.second->addr.raw() < y.second->addr.raw()
-                   : x.first < y.first;
-    });
-    std::string text;
-    for (const auto& [name, info] : labels) {
-        const assembler::PlacedBlock& block = a.layout.blocks[info->block];
-        text += name + ' ' + info->addr.to_string() + ' ' +
-                (info->section == assembler::Section::Code ? "code" : "data") + ' ' +
-                block.first.to_string() + ' ' + block.last.to_string() + '\n';
-    }
-    return {text.begin(), text.end()};
 }
 
 // Purity check (spec 4): the program text passes the strict loader unchanged, and the .malm holds
@@ -205,7 +173,8 @@ int asm_command(std::span<const std::string_view> args, std::istream&, std::ostr
     if (!write_output(output, bytes, out, err)) {
         return 1;
     }
-    if (have_map && !write_output(map, label_map(*assembly), out, err)) {
+    const std::string map_text = assembler::format_label_map(assembly->layout);
+    if (have_map && !write_output(map, {map_text.begin(), map_text.end()}, out, err)) {
         return 1;
     }
     return 0;
