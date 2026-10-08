@@ -154,6 +154,9 @@ struct Program {
     std::vector<Block> blocks;
 };
 
+// A code word's commands as written: `Rot`, `MovD/Nop`, ...
+std::string cycle_text(const std::vector<Op>& ops);
+
 // Structural equality that ignores source locations, the file table, Expr::height and
 // Expr::is_char.
 bool same_structure(const Expr& a, const Expr& b);

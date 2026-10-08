@@ -52,3 +52,7 @@ malm_add_test(NAME asm_front_test LABEL fast
     SOURCES asm/parser_test.cpp asm/limits_test.cpp asm/errors_test.cpp asm/roundtrip_test.cpp asm/fuzz_test.cpp
     LIBS malm_asm TIMEOUT 600)
 target_compile_definitions(asm_front_test PRIVATE MALM_ASM_DOC="${PROJECT_SOURCE_DIR}/docs/asm.md")
+
+malm_add_test(NAME asm_layout_test LABEL fast
+    SOURCES asm/layout_test.cpp asm/units_test.cpp
+    LIBS malm_asm)

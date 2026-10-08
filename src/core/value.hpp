@@ -148,7 +148,39 @@ class Value {
     // No ordering: 3-adic values have none at language level (spec 1.3). Use raw() for keys.
     friend constexpr bool operator==(const Value&, const Value&) noexcept = default;
 
+    // Exact 3-adic sum, negation and difference (spec 1.3); nullopt if the result needs a width
+    // above 39. Used by the assembler's constant expressions, not by the VM.
+    friend constexpr std::optional<Value> add(Value a, Value b) noexcept {
+        return from_half(a.offset() + b.offset(), a.head() + b.head());
+    }
+    friend constexpr std::optional<Value> negate(Value a) noexcept {
+        return from_half(static_cast<std::int64_t>(a.head()) - a.offset(), a.head());
+    }
+    friend constexpr std::optional<Value> subtract(Value a, Value b) noexcept {
+        const auto nb = negate(b);
+        return nb ? add(a, *nb) : std::nullopt;
+    }
+
   private:
+    // A value is v = offset - head/2 as a rational number (the all-1 value is -1/2 and the all-2
+    // value is -1), so head 0 is a natural, head 2 a negative integer and head 1 a half-integer.
+    // from_half builds the value s - half/2 (half in 0..4); |s| < 2^63 holds for sums of offsets.
+    static constexpr std::optional<Value> from_half(std::int64_t s, unsigned half) noexcept {
+        unsigned h = 1;
+        std::int64_t off = s - static_cast<std::int64_t>(half / 2);
+        if (half % 2 == 0) {
+            h = off >= 0 ? 0 : 2;
+            off += h / 2;
+        }
+        const std::int64_t q = kHalfPow3Minus1[kMaxWidth];
+        const auto hh = static_cast<std::int64_t>(h);
+        if (off < -hh * q || off > (2 - hh) * q) {
+            return std::nullopt;
+        }
+        const std::uint64_t all_h = h * ((pow3[kTrits] - 1) / 2);
+        return Value(all_h + static_cast<std::uint64_t>(off));
+    }
+
     // raw - H, where H is the all-h 40-trit value (wrapping): exactly the sum over i < 39 of
     // (t_i - h) * 3^i, since its magnitude is below 3^39 < 2^63.
     constexpr std::int64_t offset() const noexcept {

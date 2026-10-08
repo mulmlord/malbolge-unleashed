@@ -18,17 +18,6 @@ struct LabelInfo {
     std::size_t cell = 0;
 };
 
-std::string cycle_text(const std::vector<Op>& ops) {
-    std::string s;
-    for (std::size_t i = 0; i < ops.size(); ++i) {
-        if (i > 0) {
-            s += '/';
-        }
-        s += core::op_name(ops[i]);
-    }
-    return s;
-}
-
 // docs/asm.md 3.1: a cycle of written length m exists if some character c at some position p has
 // an xlat2 cycle whose length divides m and whose decode sequence repeated equals the written
 // one. A cycle written entirely of Nops matches every all-Nop cycle (rnop_char), so it always

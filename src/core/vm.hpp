@@ -122,6 +122,10 @@ template <class M> class BasicVm {
         d_ = M::normalize(r.d);
     }
 
+    // For tests and tools only: writes one memory cell directly, like set_registers without the
+    // invariants of spec 2.2 (cell width below n) or of the loader (cells in 33..126).
+    void poke(Word addr, Word v) { m_.write(M::normalize(addr), M::normalize(v)); }
+
     // One step (spec 5). On Halted or Faulted the VM flushes `io`; a flush failure on halt turns
     // the halt into an E_IO fault. A stopped VM keeps returning its final result.
     StepResult step(Io& io);

@@ -217,7 +217,7 @@ This section is the contract for #14 and #15.
 
 - **Determinism:** assembling the same source with the same options gives the same bytes. There is no randomness and no time-dependent filler (unlike LMAO `[H §7.1]`).
   - Placement is first-fit in source order. Ties between residues go to the lowest address.
-  - The character for a reserved cell is chosen by a fixed rule (#14 documents it).
+  - The character for a reserved cell is chosen by a fixed rule (see "Characters" below).
 - **Startup area:** cells 0..98 belong to the startup code. Cell 0 is `b` (a `Jmp` to 99), so `L ≥ 100`. No user block, reserved cell or RNop run may use them (§6).
 - **Windows.** User blocks live in three windows:
   - **head 0:** `[100, 3^(n−1))`. The loaded program text `0 .. L−1` is part of it.
@@ -234,6 +234,18 @@ This section is the contract for #14 and #15.
 - **Reserved cells:**
   - The cell before every code block (or before its `U_` RNop run, §5.2) is reserved and receives a character in 33..126.
   - No cell of another block may occupy it, except an RNop or a `?-` slot. In particular, two code blocks may not sit back to back, because B's reserved cell would be A's closing `Jmp`.
+- **Sharing cells.** A block's **footprint** is its cells, plus, for a code block, its reserved cell and its `U_` RNop run. Footprint cells are either:
+  - **soft**: an RNop or all-`Nop` cycle, a reserved cell, or a run cell. Each of these only needs a character fixed by its position, so soft cells of different blocks may share an address. A reserved cell that shares an address with an RNop holds the RNop.
+  - **hard**: every other code or data cell. A hard cell needs its address to itself.
+
+  A `?-` slot claims nothing, so a cell of any other block may sit on it.
+- **First fit.** Pinned blocks are placed first, exactly where they are pinned. The other blocks follow in source order. Each one goes to the lowest footprint start in the head-0 window where its footprint fits and every code cell's cycle exists at its position. Only pinned blocks use the head-1 and head-2 windows.
+- **Characters.** All of these are deterministic:
+  - a single command: the loadable character for it at the cell's position;
+  - a cycle: the smallest loadable character whose xlat2 cycle matches it there (§3.1), or the smallest matching character if none is loadable;
+  - an RNop, an all-`Nop` cycle or a run cell: `rnop_char` (§3.1);
+  - a reserved cell: the loadable `o` (Nop) at its position. It is encrypted when a jump lands after it, but it is never executed.
+- **The image.** Layout gives every cell with a defined initial value: code cells, reserved cells, run cells and data words. A `?` cell has no defined value, so the startup code doesn't write it.
 - **Width forcing.** Before any `Rot`, any I/O and any access at width ≥ the initial `n`, the startup code raises `n` to the program width `N`:
   1. A `MovD` lands on an address `v` such that both `v` and `v + 1` have width `N − 1`, e.g. `v = 3^(N−2)`.
   2. A back-jump word at `v` returns to the startup code.
