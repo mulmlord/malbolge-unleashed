@@ -101,16 +101,8 @@ std::string print_prec(const Expr& e, int min_prec) {
 std::string print_word(const Word& w) {
     switch (w.kind) {
     case Word::Kind::Command:
-    case Word::Kind::Cycle: {
-        std::string s;
-        for (std::size_t i = 0; i < w.ops.size(); ++i) {
-            if (i > 0) {
-                s += '/';
-            }
-            s += core::op_name(w.ops[i]);
-        }
-        return s;
-    }
+    case Word::Kind::Cycle:
+        return cycle_text(w.ops);
     case Word::Kind::RNop:
         return "RNop";
     case Word::Kind::Unknown:

@@ -121,6 +121,17 @@ bool same_block(const Block& a, const Block& b) {
 
 } // namespace
 
+std::string cycle_text(const std::vector<Op>& ops) {
+    std::string s;
+    for (std::size_t i = 0; i < ops.size(); ++i) {
+        if (i > 0) {
+            s += '/';
+        }
+        s += core::op_name(ops[i]);
+    }
+    return s;
+}
+
 bool same_structure(const Program& a, const Program& b) {
     if (a.width.has_value() != b.width.has_value() ||
         (a.width && a.width->value != b.width->value) || a.blocks.size() != b.blocks.size()) {

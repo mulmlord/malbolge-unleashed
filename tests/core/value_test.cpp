@@ -331,3 +331,66 @@ TEST_CASE("property: to_string / parse round trip") {
 }
 
 TEST_CASE("hash") { CHECK(std::hash<Value>{}(V("...1102")) == std::hash<Value>{}(V("...11102"))); }
+
+// ---- 3-adic arithmetic (add, negate, subtract) ----
+
+namespace {
+
+// Reference sum: trit-wise addition with carry, the heads repeating above trit 39. The sum fits
+// iff its trits from 39 upwards agree (they settle after a few positions).
+std::optional<Value> naive_add(Value a, Value b) {
+    std::uint64_t raw = 0;
+    unsigned carry = 0;
+    unsigned t39 = 0;
+    for (unsigned i = 0; i < 46; ++i) {
+        const unsigned s = a.trit(i) + b.trit(i) + carry;
+        carry = s / 3;
+        if (i < 40) {
+            raw += (s % 3) * pow3[i];
+        }
+        if (i == 39) {
+            t39 = s % 3;
+        } else if (i > 39 && s % 3 != t39) {
+            return std::nullopt;
+        }
+    }
+    return Value::from_raw(raw);
+}
+
+} // namespace
+
+TEST_CASE("arithmetic: worked examples") {
+    const auto i = [](std::int64_t k) { return *Value::from_int(k); };
+    CHECK(*add(i(2), i(3)) == i(5));
+    CHECK(*add(V("...2"), i(1)) == i(0)); // -1 + 1
+    CHECK(*add(V("...1"), V("...1")) == V("...2"));
+    CHECK(*add(V("...1"), V("...12")) == i(0)); // -1/2 + 1/2
+    CHECK(*negate(i(0)) == i(0));
+    CHECK(*negate(i(7)) == i(-7));
+    CHECK(*negate(V("...1")) == V("...12")); // -(-1/2) = 1/2
+    CHECK(*subtract(i(100), i(101)) == V("...2"));
+    CHECK(*subtract(V("...21"), i(1)) == V("...20"));
+    // Out of range: 3^38 * 3 needs width 40.
+    const Value big = Value::from_raw(pow3[38] * 2);
+    CHECK_FALSE(add(big, Value::from_raw(pow3[38])).has_value());
+    CHECK(add(big, Value::from_raw(pow3[38] - 1)).has_value());
+    CHECK_FALSE(negate(*Value::from_int(-static_cast<std::int64_t>(pow3[39]))).has_value());
+}
+
+TEST_CASE("property: add matches trit-wise addition; negate and subtract are its inverses") {
+    std::mt19937_64 rng(4242);
+    for (int k = 0; k < kCases; ++k) {
+        const Value a = random_value(rng);
+        const Value b = random_value(rng);
+        const auto sum = add(a, b);
+        const auto want = naive_add(a, b);
+        REQUIRE(sum.has_value() == want.has_value());
+        if (sum) {
+            REQUIRE(*sum == *want);
+            REQUIRE(subtract(*sum, b) == a);
+        }
+        if (const auto na = negate(a)) {
+            REQUIRE(add(a, *na) == Value());
+        }
+    }
+}
