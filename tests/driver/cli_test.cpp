@@ -79,7 +79,7 @@ TEST_CASE("unknown command") {
 
 TEST_CASE("known subcommands are not implemented yet") {
     for (std::string_view sub : kSubcommands) {
-        if (sub == "run" || sub == "export" || sub == "pack") {
+        if (sub == "run" || sub == "export" || sub == "pack" || sub == "asm") {
             continue;
         }
         const Result r = run({sub, "x"});
@@ -1018,4 +1018,156 @@ TEST_CASE("packed executable: corrupt trailer or payload exits 1") {
     t = good;
     t[trailer_at - 3] = static_cast<char>(t[trailer_at - 3] ^ 0x55);
     check_corrupt(t, "payload flipped");
+}
+
+// ---- malm asm ----
+
+namespace {
+
+constexpr std::string_view kAsmOk = ".CODE\n"
+                                    "J: Jmp\n"
+                                    "\n"
+                                    ".DATA\n"
+                                    "ENTRY: J 'a'<<1 (-1)\n";
+
+// A directory under the temp dir, removed on destruction; files are given relative to it.
+struct TempDir {
+    std::filesystem::path path;
+    TempDir() {
+        static int counter = 0;
+        path = std::filesystem::temp_directory_path() /
+               ("malm_asm_test_" + std::to_string(static_cast<long>(getpid())) + "_" +
+                std::to_string(counter++));
+        std::filesystem::create_directories(path);
+    }
+    ~TempDir() { std::filesystem::remove_all(path); }
+    std::string write(const std::string& name, const std::string& content) const {
+        std::filesystem::create_directories((path / name).parent_path());
+        std::ofstream(path / name, std::ios::binary) << content;
+        return (path / name).string();
+    }
+};
+
+} // namespace
+
+TEST_CASE("asm --check: a valid file prints nothing and exits 0") {
+    TempDir d;
+    const std::string f = d.write("ok.mua", std::string(kAsmOk));
+    const Result r = run({"asm", "--check", f});
+    CHECK(r.code == 0);
+    CHECK(r.out.empty());
+    CHECK(r.err.empty());
+}
+
+TEST_CASE("asm --check: diagnostics go to stderr and the exit code is 1") {
+    TempDir d;
+    const std::string f = d.write("bad.mua", ".CODE\nA: Foo\nB: Rot %\n");
+    const Result r = run({"asm", "--check", f});
+    CHECK(r.code == 1);
+    CHECK(r.out.empty());
+    CHECK(r.err == f + ":2:4: error: expected a command name, found 'Foo'\n" + f +
+                       ":3:8: error: unexpected character '%'\n");
+}
+
+TEST_CASE("asm --check: static check errors, with notes") {
+    TempDir d;
+    const std::string f = d.write("dup.mua", ".CODE\nJ: Jmp\nJ: Hlt\n.DATA\nENTRY: J\n");
+    const Result r = run({"asm", "--check", f});
+    CHECK(r.code == 1);
+    CHECK(r.err ==
+          f + ":3:1: error: duplicate label 'J'\n" + f + ":2:1: note: first defined here\n");
+}
+
+TEST_CASE("asm --check: includes are read relative to the including file") {
+    TempDir d;
+    d.write("lib/units.mua", ".CODE\nJ: Jmp\n");
+    const std::string f = d.write("main.mua", ".INCLUDE \"lib/units.mua\"\n.DATA\nENTRY: J\n");
+    CHECK(run({"asm", "--check", f}).code == 0);
+    d.write("lib/units.mua", ".CODE\nJ: Foo\n");
+    const Result r = run({"asm", "--check", f});
+    CHECK(r.code == 1);
+    const std::string lib = (d.path / "lib/units.mua").string();
+    CHECK(r.err == lib + ":2:4: error: expected a command name, found 'Foo'\n" + f +
+                       ":1:1: note: included from here\n");
+}
+
+TEST_CASE("asm --check: a missing file is a file error, exit 1") {
+    TempDir d;
+    const std::string f = (d.path / "nope.mua").string();
+    const Result r = run({"asm", "--check", f});
+    CHECK(r.code == 1);
+    CHECK(r.out.empty());
+    CHECK(r.err == f + ":1:1: error: cannot open '" + f + "': No such file or directory\n");
+}
+
+TEST_CASE("asm --print: canonical source on stdout after the checks") {
+    TempDir d;
+    const std::string f = d.write("ok.mua", std::string(kAsmOk));
+    const Result r = run({"asm", "--print", f});
+    CHECK(r.code == 0);
+    CHECK(r.err.empty());
+    CHECK(r.out == ".CODE\nJ:      Jmp\n\n.DATA\nENTRY:  J 'a'<<1 (-1)\n");
+    // the output is itself a valid program that prints to the same text
+    const std::string g = d.write("again.mua", r.out);
+    const Result r2 = run({"asm", "--print", g});
+    CHECK(r2.code == 0);
+    CHECK(r2.out == r.out);
+}
+
+TEST_CASE("asm --print: nothing on stdout when the checks fail") {
+    TempDir d;
+    const std::string f = d.write("noentry.mua", ".CODE\nJ: Jmp\n");
+    const Result r = run({"asm", "--print", f});
+    CHECK(r.code == 1);
+    CHECK(r.out.empty());
+    CHECK(r.err == f + ":1:1: error: missing ENTRY: the program must define the label ENTRY in a "
+                       ".DATA block\n");
+}
+
+TEST_CASE("asm --check --print together, and -- ends the options") {
+    TempDir d;
+    const std::string f = d.write("ok.mua", std::string(kAsmOk));
+    CHECK(run({"asm", "--check", "--print", f}).code == 0);
+    const Result r = run({"asm", "--print", "--", f});
+    CHECK(r.code == 0);
+    CHECK(!r.out.empty());
+}
+
+TEST_CASE("asm: assembling is not implemented yet") {
+    TempDir d;
+    const std::string f = d.write("ok.mua", std::string(kAsmOk));
+    for (const auto& args : std::vector<std::vector<std::string_view>>{
+             {"asm", f}, {"asm", f, "-o", "out.malm"}, {"asm", "--text", "-o", "-", f}}) {
+        const Result r = run(args);
+        CHECK(r.code == 2);
+        CHECK(r.out.empty());
+        CHECK(r.err ==
+              "malm asm: assembly not implemented yet (#14-#16); use --check or --print\n");
+    }
+}
+
+TEST_CASE("asm: usage errors exit 2") {
+    for (const auto& args :
+         std::vector<std::vector<std::string_view>>{{"asm"},
+                                                    {"asm", "--check"},
+                                                    {"asm", "--print", "a.mua", "b.mua"},
+                                                    {"asm", "--bogus", "a.mua"},
+                                                    {"asm", "--check", "-o"},
+                                                    {"asm", "--check", "-o", "x", "a.mua"},
+                                                    {"asm", "--check", "--text", "a.mua"}}) {
+        const Result r = run(args);
+        CHECK(r.code == 2);
+        CHECK(r.out.empty());
+        CHECK(r.err.find("usage: malm asm") != std::string::npos);
+    }
+}
+
+TEST_CASE("asm: a dash-leading file name works after --") {
+    TempDir d;
+    d.write("-odd.mua", std::string(kAsmOk));
+    const auto old = std::filesystem::current_path();
+    std::filesystem::current_path(d.path);
+    const Result r = run({"asm", "--check", "--", "-odd.mua"});
+    std::filesystem::current_path(old);
+    CHECK(r.code == 0);
 }

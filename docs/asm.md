@@ -35,11 +35,13 @@ A program is a set of **code blocks** and **data blocks**. The assembler places 
   - A label may precede any word, including mid-block, and several labels may name one cell.
   - A label must be followed by a word in its block.
   - Reserved words: the command names, `RNop` and the named constants (§4.2).
-- **Sections:** `.CODE` and `.DATA` switch sections. They may alternate any number of times. Apart from comments, blank lines and an optional `.WIDTH` (§8.1), the file must start with one of them.
+- **Sections:** `.CODE` and `.DATA` switch sections. They may alternate any number of times. Before the first section, a file may contain only comments, blank lines, an optional `.WIDTH` (§8.1) and `.INCLUDE` lines (§8.3); `.WIDTH` must come before any `.INCLUDE`. A block outside any section is an error. `.CODE`, `.DATA` and `.INCLUDE` inside braces are errors.
 - **Directives** (§8): `.WIDTH`, and `@` / `.OFFSET` at the start of a block.
-- **Token separation:** adjacent words need whitespace between them. Operators, `,`, `(`, `)` and `@` separate on their own.
+- **Token separation:** adjacent words need whitespace between them. Operators, `,`, `(`, `)`, `@`, `/` (between cycle commands) and `:` (after a label) separate on their own, so spaces around them are optional. `//` always starts a comment. Tokens are read greedily, e.g. `?-1` is `?-` directly followed by `1`, which is an error (missing whitespace).
+- **A blank line ends an expression**, also inside braces, where it does not end the block: a binary operator (or a string's `,` separator) after a blank line does not continue the previous word.
+- **Lines in data blocks.** The line a data word starts on is part of the program's meaning for one rule: §6 treats the *first word of a line* as a code-reference position. The printer (`malm asm --print`) therefore keeps the source's line grouping of data words.
 
-Every block starts with a label, optionally preceded by an offset directive. The assembler may place blocks anywhere, but the cells *within* a block stay contiguous and in order.
+Every block starts with a label, optionally preceded by an offset directive (§8.2); a block whose first cell has no label is an error. An empty block (`{ }`, or an offset with no cells) is an error. The assembler may place blocks anywhere, but the cells *within* a block stay contiguous and in order.
 
 ## 3. Code blocks
 
@@ -58,7 +60,8 @@ A code word describes one cell. Its commands are `Nop Jmp MovD Opr Rot In Out Hl
 
 Where a cycle exists is a property of the position mod 94 (`op_sequence` in `cycles.hpp`). For example, the only 2-cycle (F↔J) gives `X/Nop` only for Rot at 59/63, Out at 25/29, In at 43/47, MovD at 60/64 and Opr at 82/86. Counters (§3.3) match against the full `op_sequence`. Placement (§7) respects these constraints.
 
-- **`R_X` targets** must be a cycle cell (§5.2). On a single-command cell the state after encryption is unspecified, so `R_X` there is an error.
+- **`R_X` targets** must be a cycle cell that is not all-`Nop` (§5.2). On a single-command cell the state after encryption is unspecified, and on an `RNop` or all-`Nop` cycle restoring has no effect, so `R_X` there is an error.
+- **`Jmp` in a cycle** is allowed, but executing a `Jmp` never encrypts its own cell (spec §5), so such a cell advances only through `R_` or other jumps that land just after it.
 
 ### 3.2 Code units and idioms
 
@@ -96,11 +99,11 @@ All values are 3-adic, exactly as in spec §1. The assembler computes with the l
 | Form | Meaning |
 |---|---|
 | `123`, `-1` | Decimal. Negative values have head 2 (`-1` = `...2`, spec §1.3). |
-| `0t2101` | Head 0, the trits most significant first (spec §1.1). |
-| `1t00212`, `2t1` | Head = the digit before `t`, then the low trits. `1t00212` = `...100212`. |
-| `...1102` | Spec §1.1 notation: the first digit is the head. |
-| `'c'` | A character code. Escapes: `\n \r \t \0 \\ \' \"`, `\xHH`. |
-| `"text"` | Data only: one word per byte. `"ab", w` puts the word `w` *between* consecutive bytes `[H §3.2]`. |
+| `0t2101` | Head 0, the trits most significant first (spec §1.1). At least one trit after `t`. |
+| `1t00212`, `2t1` | Head = the digit before `t`, then the low trits (at least one). `1t00212` = `...100212`. |
+| `...1102` | Spec §1.1 notation: the first digit is the head; `...1` alone is the head with no low trits. |
+| `'c'` | A character code. Escapes: `\n \r \t \0 \\ \' \"`, `\xHH` (00..FF). Raw control or non-ASCII bytes inside a literal are errors; use an escape. |
+| `"text"` | Data only: one word per byte, same escapes; `""` is an error. `"ab", w` puts the word `w` (an expression, `?` or `?-`) *between* consecutive bytes `[H §3.2]`. A string in `.CODE` is an error, as is a command name in `.DATA`. |
 
 **Named constants** are 3-adic, not the classic 10-trit numbers:
 
@@ -157,10 +160,10 @@ Expressions are evaluated at assembly time, **after layout**.
 
 **`R_X`, restore:** the stored value is `addr(X)`, so execution continues at `X + 1`.
 - Jumping through it encrypts cell `X`, flipping or advancing its cycle, and continues at `X + 1`.
-- `X` must be a code label naming a **cycle** cell (§3.1), with at least one more cell after it in its block `[H §4.1]`.
+- `X` must be a code label naming a **cycle** cell that is not all-`Nop` (§3.1), with at least one more cell after it in its block `[H §4.1]`.
 
 **`U_X Y`, auto-RNop:** occupies **one** cell. `Y` is not stored; it is the prefix's operand.
-- `X` must be the first label of a code block, and `Y` a data label later in the same data block.
+- `X` must be a label of the **first cell** of a code block (any of its labels), and `Y` a data label of a later cell in the same data block.
 - Let `k = addr(Y) − addr(U word) − 1`, the number of cells strictly between them. The stored value is `addr(X) − 1 − k`.
 - The assembler makes sure the `k` cells before `X` are immutable Nops, placing RNops there if needed. If another cell occupies one of them, that is an error.
 - When several `U_` words name the same `X`, the RNop run has length `k_max`, and the block's reserved cell (§7) moves to `addr(X) − 1 − k_max`.
@@ -168,7 +171,7 @@ Expressions are evaluated at assembly time, **after layout**.
 
 ### 5.3 `ENTRY`
 
-`.DATA` must define `ENTRY`, and its first word must be a code reference. When execution reaches `ENTRY`, the startup code guarantees:
+`.DATA` must define `ENTRY`, and its first word must be a **code reference**: a code label, `R_X` with `X` a code label, or a `U_` word. Expressions (e.g. `X − 1`) are not accepted there. A missing `ENTRY` is reported at line 1, column 1 of the root file. When execution reaches `ENTRY`, the startup code guarantees:
 - `D = address(ENTRY)`, and `C` is at a `Jmp`;
 - `n` equals the program width (§8.1);
 - every cell of every block holds its declared initial value, and every reserved predecessor cell holds a character in 33..126;
@@ -186,7 +189,7 @@ In malbolge-unleashed, sleds and branch values use the head-2 constants. That av
 **Cell 0.** Cell 0 of every assembled program is the startup `Jmp` (`b`), and cells 0..98 belong to the startup code (§7). Cell 0 stays a `Jmp` only if the program never encrypts or overwrites it. The assembler enforces the static part, and the program is responsible for the rest:
 - **Rejected by the assembler:**
   - any block, reserved cell, `@` offset or `U_` RNop run at addresses 0..98;
-  - a constant data word with value `0` in a code-reference position, i.e. the first word of a data line, or the operand of a code unit known to `Jmp`/`MovD` through it.
+  - a constant data word with value `0` in a code-reference position, i.e. the first word of a data line (§2, "Lines in data blocks"), or the operand of a code unit known to `Jmp`/`MovD` through it.
 - **Forbidden at run time** (not checkable): jumping through the value 0, which encrypts cell 0, and `Opr`/`Rot` with `D = 0`.
 
 With that guarantee, a block pinned at `@C21` holding two `RNop`s forms a 3-entry sled `...21 → ...2 → 0 (Jmp)`:
@@ -252,16 +255,51 @@ This section is the contract for #14 and #15.
   4. `n > 39` is an error.
 - An explicit `.WIDTH` that is too small for the layout is an error.
 - Programs that use `<<`/`>>` get the same result either way, because their values are computed for the final `n`. An explicit `.WIDTH` just makes it visible in the source.
-- It may appear once, before the first section.
+- It may appear once, in the root file, before any section and any `.INCLUDE`.
 
 ### 8.2 `@expr` / `.OFFSET expr`
-- Only at the start of a block, before its first label. It pins the block's first cell to the address `expr`.
+- Only at the start of a block, before its first label. It pins the block's first cell to the address `expr`. For a braced block it may stand directly before the `{` (`@C21 {`) or right after it; `@expr {` also starts a new block when it directly follows an unbraced block's last line. An offset anywhere else in a block is an error.
 - `expr` is a constant expression: no labels and no `<<`/`>>`, since the latter depend on `n`.
 - The cell before a pinned code block is reserved like any other.
 
+### 8.3 `.INCLUDE "path"`
+- Textually includes another `.mua` file, so that shared units (e.g. a library of `Op/Nop` + `Jmp` units) can be reused.
+- **Where:** only between blocks, on a line of its own. It acts like a blank line, so it ends the current unbraced block. Inside braces it's an error.
+- **Path:** a string literal, resolved relative to the directory of the including file.
+- **Section:** the included file starts in no section, so it must switch to a section before its first block (§2 applies to it like to the root file). After the include, the including file stays in the section it was in before.
+- **Restrictions:** an included file may not contain `.WIDTH`. Including a file that is already being included (a cycle) is an error, while including the same file twice in sequence is allowed. Its labels share the global namespace.
+- **Files:** paths are resolved like the operating system does (symlinks followed, then `..`), and two paths are the same file if they resolve to the same file; that is what cycle detection compares. Only regular files can be read (the root file too); devices, FIFOs and directories are errors. Diagnostics show the path as written.
+- **Diagnostics** inside an included file name that file, followed by a `file:line:col: note: included from here` line (pointing at the `.INCLUDE`) for each level.
+- **Limits:** at most 64 nested include levels and 1000 includes per program (an include "bomb" would otherwise grow exponentially), and at most 64 MiB of source text and 4 Mi cells in total over all files. Exceeding a limit is one error, after which the assembly stops.
+
 ## 9. Errors
 
-Every diagnostic has the form `file:line:col: error: message`. This covers lexical and syntax errors, unknown or duplicate labels, misuse of `R_`/`U_`, `?-` after a label, cycles that don't exist, values wider than `n`, impossible layouts, and a missing `ENTRY`.
+Every diagnostic has the form `file:line:col: error: message`, followed where they help by `file:line:col: note: …` lines (e.g. the include chain, or the first definition of a duplicate label). An assembly reports as many independent errors as it can, not just the first, in source order. A syntax error suppresses the static checks (fix syntax first), and recovery skips to the end of the line without crossing `{`, `}`, a directive or a block boundary, so one mistake does not cascade.
+
+Implementation limits: identifiers 100 characters (for `R_`/`U_` references, after the prefix); parenthesis nesting 128 and expression height 256; the source and include limits of §8.3; at most 1000 reported errors (the first 1000 in source order).
+
+They cover:
+- lexical and syntax errors;
+- unknown or duplicate labels;
+- misuse of `R_`/`U_`;
+- `?-` after a label;
+- cycles that don't exist;
+- values wider than `n`;
+- impossible layouts;
+- a missing `ENTRY`.
+
+**Two kinds of check:**
+- **Static checks** need only the source and run before layout (#13):
+  - syntax;
+  - label rules and name resolution;
+  - `R_` on a code label naming a cycle cell with a following cell in its block;
+  - `U_` operand rules except its distance;
+  - `?-` rules;
+  - `ENTRY` present, with a code reference as its first word;
+  - constant `@` expressions;
+  - cycle existence at *some* position;
+  - `.INCLUDE`.
+- **Layout checks** run during placement and evaluation (#14/#15): positions, widths, windows, `U_` RNop runs, the cell-0 and pointer-safety rules.
 
 ## 10. Examples
 
