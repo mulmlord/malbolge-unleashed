@@ -42,6 +42,14 @@ const std::string kCarry = "_FC"; // flag: the ALU's carry
 const std::string kNeg = "_FN";   // flag: sra of a negative word (flip around the shift)
 const std::string kLeft = "_FSL"; // flag: a computed shift goes left
 const std::string kK9 = "_K9";    // counter: every 9th pass ends a rotation loop
+const std::string kOver = "_FO";  // flag: a division step shifted a 1 out of the remainder
+// Counters of the 32-pass loops of mul and div: 4 * 4 * 2 passes.
+const std::string kL4a = "_L4A";
+const std::string kL4b = "_L4B";
+const std::string kL2 = "_L2";
+
+// The trit above bit 31: a rotation right moves it into bit 31.
+constexpr unsigned kTop = kBit0 + kWordBits;
 
 // Lane-table tags (word.hpp): bit i is the trit i of the index.
 constexpr unsigned kByteTag = 0;
@@ -108,11 +116,17 @@ struct Stream {
     }
 };
 
+// The families of return flags (docs/hla.md 4.3): register accesses (_AF), routines and tables
+// (_SF), and the multiply and divide routines (_MF), which call routines and tables themselves.
+// A callee's flags stay set while it runs, so it calls only callees of other families.
+enum class Flags : std::uint8_t { Access, Sub, Muldiv };
+constexpr std::size_t kFlagFamilies = 3;
+
 // A routine or register that returns to its call sites through a tree of flags (docs/hla.md 4.3).
 // Every exit has its own tree over the same call sites.
 struct Callee {
-    bool sub = false; // subroutine flags (_SF), else register-access flags (_AF)
-    SourceLoc loc;    // where its support code is attributed
+    Flags flags = Flags::Access;
+    SourceLoc loc;                               // where its support code is attributed
     std::vector<std::vector<std::string>> exits; // exits[e][site]: where the site continues
 };
 
@@ -134,8 +148,10 @@ std::vector<unsigned> site_flags(std::size_t m, std::size_t site) {
     return out;
 }
 
-std::string flag_name(bool sub, unsigned depth) {
-    return (sub ? "_SF" : "_AF") + std::to_string(depth);
+std::string flag_name(Flags f, unsigned depth) {
+    return std::array<const char*, kFlagFamilies>{"_AF", "_SF",
+                                                  "_MF"}[static_cast<std::size_t>(f)] +
+           std::to_string(depth);
 }
 
 struct Reg {
@@ -234,6 +250,18 @@ class Lowerer {
         case Op::Sextb:
         case Op::Sexth:
             sext(reg_of(s.args[0]), reg_of(s.args[1]), s.op == Op::Sextb ? 8 : 16, s.loc);
+            return true;
+        case Op::Mul:
+        case Op::Mulh:
+        case Op::Mulhsu:
+        case Op::Mulhu:
+            mul(s);
+            return true;
+        case Op::Div:
+        case Op::Divu:
+        case Op::Rem:
+        case Op::Remu:
+            div(s);
             return true;
         case Op::Jmp:
             go(s.args[0], s.loc);
@@ -381,7 +409,7 @@ class Lowerer {
     void ram_access(Stream& s, int p, SourceLoc loc) {
         const Words w{loc};
         if (ram_ < 0) {
-            ram_ = new_callee(false, loc, 1);
+            ram_ = new_callee(Flags::Access, loc, 1);
         }
         reg_mut(p).ram = true;
         const std::string ret = fresh();
@@ -518,7 +546,7 @@ class Lowerer {
         const Words w{loc};
         lane_index(main_, reg, 0, kByteTag, loc);
         if (byte_ < 0) {
-            byte_ = new_callee(true, loc, 1);
+            byte_ = new_callee(Flags::Sub, loc, 1);
         }
         const std::string ret = fresh();
         main_.line({w.ref(kMoved), w.ref(reg_at(index_reg(loc)).name + "__M")}, byte_,
@@ -579,11 +607,7 @@ class Lowerer {
             run(main_, sum_sequence_imm(g), {{x, 0}, {sr, 0}}, st.loc);
         }
         if (st.op == Op::Add || st.op == Op::Sub) {
-            const std::string ret = fresh();
-            alu_call(cin, ret, ret, st.loc);
-            main_.label(ret, st.loc);
-            main_.line({w.restore(kMoved)});
-            mov_reg(main_, d, z_reg(st.loc), st.loc);
+            alu_result(main_, d, cin, st.loc);
             return;
         }
         // A compare: the carry-out is 1 iff x >= y.
@@ -591,7 +615,7 @@ class Lowerer {
         const std::string lt = fresh();
         const std::string ge = fresh();
         const std::string end = fresh();
-        alu_call(true, lt, ge, st.loc);
+        alu_call(main_, true, lt, ge, st.loc);
         main_.label(lt, st.loc);
         main_.line({w.restore(kMoved)});
         load(main_, *crz_operand(make_value({}, 1), word(1)), st.loc);
@@ -606,11 +630,22 @@ class Lowerer {
         main_.line({w.restore(kMoved)});
     }
 
+    // The ALU on the column sums in _AS with the carry-in; target := the sum.
+    void alu_result(Stream& s, int target, bool cin, SourceLoc loc) {
+        const Words w{loc};
+        const std::string ret = fresh();
+        alu_call(s, cin, ret, ret, loc);
+        s.label(ret, loc);
+        s.line({w.restore(kMoved)});
+        mov_reg(s, target, z_reg(loc), loc);
+    }
+
     // Calls the ALU routine with the carry-in; it returns to `no_carry` or `carry`.
-    void alu_call(bool cin, const std::string& no_carry, const std::string& carry, SourceLoc loc) {
+    void alu_call(Stream& s, bool cin, const std::string& no_carry, const std::string& carry,
+                  SourceLoc loc) {
         const Words w{loc};
         if (alu_ < 0) {
-            alu_ = new_callee(true, loc, 2);
+            alu_ = new_callee(Flags::Sub, loc, 2);
         }
         std::vector<Cell> cells;
         if (cin) {
@@ -618,7 +653,7 @@ class Lowerer {
         }
         cells.push_back(w.ref(kMoved));
         cells.push_back(w.ref("_ALU"));
-        main_.line(std::move(cells), alu_, add_site(alu_, {no_carry, carry}));
+        s.line(std::move(cells), alu_, add_site(alu_, {no_carry, carry}));
         use(kMoved);
         use(kCarry);
     }
@@ -686,7 +721,7 @@ class Lowerer {
         if (st.op == Op::Sra) {
             const std::string neg = fresh();
             const std::string join = fresh();
-            sign_test(h, kLanes - 1, join, neg, st.loc);
+            sign_test(main_, h, kLanes - 1, join, neg, st.loc);
             main_.label(neg, st.loc);
             main_.line({w.restore(kMoved)});
             run(main_, flip_all(), {{h, 0}}, st.loc);
@@ -696,7 +731,7 @@ class Lowerer {
             use(kNeg);
         }
         if (shift_ < 0) {
-            shift_ = new_callee(true, st.loc, 1);
+            shift_ = new_callee(Flags::Sub, st.loc, 1);
         }
         const std::string ret = fresh();
         if (!yreg) {
@@ -755,7 +790,7 @@ class Lowerer {
         const std::string pos = fresh();
         const std::string neg = fresh();
         const std::string end = fresh();
-        sign_test(d, bits / 8 - 1, pos, neg, loc);
+        sign_test(main_, d, bits / 8 - 1, pos, neg, loc);
         for (const bool negative : {true, false}) {
             main_.label(negative ? neg : pos, loc);
             main_.line({w.restore(kMoved)});
@@ -771,16 +806,186 @@ class Lowerer {
 
     // Continues at the landing pad `pos` or `neg` by the top bit of reg's byte lane, through the
     // lane's sign table. Nothing follows the dispatch line.
-    void sign_test(int reg, unsigned lane, const std::string& pos, const std::string& neg,
-                   SourceLoc loc) {
+    void sign_test(Stream& s, int reg, unsigned lane, const std::string& pos,
+                   const std::string& neg, SourceLoc loc) {
         const Words w{loc};
         const int ix = index_reg(loc);
-        index_sequence(main_, reg, sign_mask(lane), loc);
+        index_sequence(s, reg, sign_mask(lane), loc);
         if (sign_[lane] < 0) {
-            sign_[lane] = new_callee(true, loc, 2);
+            sign_[lane] = new_callee(Flags::Sub, loc, 2);
         }
-        main_.line({w.ref(kMoved), w.ref(reg_at(ix).name + "__M")}, sign_[lane],
-                   add_site(sign_[lane], {pos, neg}));
+        s.line({w.ref(kMoved), w.ref(reg_at(ix).name + "__M")}, sign_[lane],
+               add_site(sign_[lane], {pos, neg}));
+        use(kMd);
+    }
+
+    // Multiplication and division (docs/hla.md 4.6, docs/adr/0003-hla-muldiv.md).
+
+    // mul, mulh, mulhsu, mulhu: _MX := x, _MY := y; the multiply routine leaves the low word of
+    // the unsigned product in _MY and the high word in _MP. The signed high words subtract y if x
+    // is negative and x if y is (mulh), mod 2^32.
+    void mul(const Stmt& st) {
+        const int d = reg_of(st.args[0]);
+        const int x = reg_of(st.args[1]);
+        const bool yreg = is_reg(st.args[2]);
+        const int y = yreg ? reg_of(st.args[2]) : -1;
+        const std::uint32_t k = yreg ? 0 : const_of(st.args[2]);
+        mul_regs(st.loc);
+        mov_reg(main_, mx_, x, st.loc);
+        if (yreg) {
+            mov_reg(main_, my_, y, st.loc);
+        } else {
+            mov_value(main_, my_, word(k), st.loc);
+        }
+        routine_call(mul_, "_MUL", st.loc);
+        if (st.op == Op::Mulh || st.op == Op::Mulhsu) {
+            if_negative(x, st.loc, [&] { sub_from(main_, mp_, y, k, st.loc); });
+        }
+        if (st.op == Op::Mulh) {
+            if (yreg) {
+                if_negative(y, st.loc, [&] { sub_from(main_, mp_, x, 0, st.loc); });
+            } else if (k >> 31) {
+                sub_from(main_, mp_, x, 0, st.loc);
+            }
+        }
+        mov_reg(main_, d, st.op == Op::Mul ? my_ : mp_, st.loc);
+    }
+
+    // div, divu, rem, remu: _DX := x, _DY := y; the divide routine leaves the unsigned quotient in
+    // _DX and the remainder in _DR, RISC-V's results for y = 0 included (all ones, x). The signed
+    // ones divide |x| by |y|: the remainder takes the sign of x, the quotient is negated if the
+    // signs differ, unless its bit 31 is set: then y = 0 (the quotient stays -1) or x = INT_MIN
+    // and y = +-1 (INT_MIN, its own negation).
+    void div(const Stmt& st) {
+        const Words w{st.loc};
+        const int d = reg_of(st.args[0]);
+        const int x = reg_of(st.args[1]);
+        const bool yreg = is_reg(st.args[2]);
+        const int y = yreg ? reg_of(st.args[2]) : -1;
+        const std::uint32_t k = yreg ? 0 : const_of(st.args[2]);
+        const bool sgn = st.op == Op::Div || st.op == Op::Rem;
+        const bool quotient = st.op == Op::Div || st.op == Op::Divu;
+        div_regs(st.loc);
+        mov_reg(main_, dx_, x, st.loc);
+        if (yreg) {
+            mov_reg(main_, dy_, y, st.loc);
+        } else {
+            mov_value(main_, dy_, word(sgn && k >> 31 ? 0 - k : k), st.loc);
+        }
+        if (sgn) {
+            if_negative(x, st.loc, [&] { negate(main_, dx_, st.loc); });
+            if (yreg) {
+                if_negative(y, st.loc, [&] { negate(main_, dy_, st.loc); });
+            }
+        }
+        routine_call(div_, "_DIV", st.loc);
+        if (sgn && !quotient) {
+            if_negative(x, st.loc, [&] { negate(main_, dr_, st.loc); });
+        } else if (sgn) {
+            const std::string fix = fresh();
+            const std::string done = fresh();
+            const std::string xpos = fresh();
+            const std::string xneg = fresh();
+            sign_test(main_, x, kLanes - 1, xpos, xneg, st.loc);
+            for (const bool negative : {true, false}) {
+                // The signs differ: fix; else done.
+                main_.label(negative ? xneg : xpos, st.loc);
+                main_.line({w.restore(kMoved)});
+                if (yreg) {
+                    sign_test(main_, y, kLanes - 1, negative ? fix : done, negative ? done : fix,
+                              st.loc);
+                } else {
+                    main_.line({w.ref(kMoved), w.ref(negative != (k >> 31 != 0) ? fix : done)});
+                }
+            }
+            main_.label(fix, st.loc);
+            main_.line({w.restore(kMoved)});
+            const std::string neg = fresh();
+            bit_test(main_, dx_, kWordBits - 1, neg, done, st.loc);
+            main_.label(neg, st.loc);
+            main_.line({w.restore(kMoved)});
+            negate(main_, dx_, st.loc);
+            main_.line({w.ref(kMoved), w.ref(done)});
+            main_.label(done, st.loc);
+            main_.line({w.restore(kMoved)});
+        }
+        mov_reg(main_, d, quotient ? dx_ : dr_, st.loc);
+    }
+
+    // Calls the multiply or divide routine.
+    void routine_call(int callee, const std::string& entry, SourceLoc loc) {
+        const Words w{loc};
+        const std::string ret = fresh();
+        main_.line({w.ref(kMoved), w.ref(entry)}, callee, add_site(callee, {ret}));
+        main_.label(ret, loc);
+        main_.line({w.restore(kMoved)});
+        use(kMoved);
+    }
+
+    // Runs `body` (statements into the main stream) if reg is negative.
+    template <class F> void if_negative(int reg, SourceLoc loc, F body) {
+        const Words w{loc};
+        const std::string pos = fresh();
+        const std::string neg = fresh();
+        sign_test(main_, reg, kLanes - 1, pos, neg, loc);
+        main_.label(neg, loc);
+        main_.line({w.restore(kMoved)});
+        body();
+        main_.line({w.ref(kMoved), w.ref(pos)});
+        main_.label(pos, loc);
+        main_.line({w.restore(kMoved)});
+    }
+
+    // target := target - y, or target - k if y < 0 (the column sums of add and sub).
+    void sub_from(Stream& s, int target, int y, std::uint32_t k, SourceLoc loc) {
+        const int sr = sum_reg(loc);
+        if (y >= 0) {
+            run(s, sum_sequence(all_digits(Digit::Sub)), {{target, 0}, {y, 0}, {sr, 0}}, loc);
+        } else {
+            Digits g;
+            for (unsigned i = 0; i < kWordBits; ++i) {
+                g[i] = ((0 - k) >> i) & 1 ? Digit::XPlus1 : Digit::X;
+            }
+            run(s, sum_sequence_imm(g), {{target, 0}, {sr, 0}}, loc);
+        }
+        alu_result(s, target, y >= 0, loc);
+    }
+
+    // target := -target (~target + 1).
+    void negate(Stream& s, int target, SourceLoc loc) {
+        run(s, sum_sequence_imm(all_digits(Digit::NotX)), {{target, 0}, {sum_reg(loc), 0}}, loc);
+        alu_result(s, target, true, loc);
+    }
+
+    static Digits all_digits(Digit g) {
+        Digits d;
+        d.fill(g);
+        return d;
+    }
+
+    // Keep every trit but the ones given.
+    static TritMap trit_map(std::initializer_list<std::pair<unsigned, Trit>> changes) {
+        TritMap m;
+        m.fill(Trit::Keep);
+        for (const auto& [t, op] : changes) {
+            m[t] = op;
+        }
+        return m;
+    }
+
+    // Continues at the landing pad `clear` or `set` by bit i of reg (read on `path`), through the
+    // bit table (word.hpp bit_index). Nothing follows the dispatch line.
+    void bit_test(Stream& s, int reg, unsigned i, const std::string& clear, const std::string& set,
+                  SourceLoc loc, int path = 0) {
+        const Words w{loc};
+        const int ix = index_reg(loc);
+        index_sequence(s, reg, bit_mask(i), loc, path);
+        if (bits_ < 0) {
+            bits_ = new_callee(Flags::Sub, loc, 2);
+        }
+        bit_tests_.insert(i);
+        s.line({w.ref(kMoved), w.ref(reg_at(ix).name + "__M")}, bits_,
+               add_site(bits_, {clear, set}));
         use(kMd);
     }
 
@@ -827,24 +1032,24 @@ class Lowerer {
     }
 
     // dst := the word v.
-    void mov_value(Stream& s, int dst, Value v, SourceLoc loc) {
-        reset(s, dst, loc);
+    void mov_value(Stream& s, int dst, Value v, SourceLoc loc, int path = 0) {
+        reset(s, dst, loc, path);
         load(s, *crz_operand(make_value({}, 1), v), loc);
-        access(s, dst, loc);
+        access(s, dst, loc, path);
     }
 
     // dst := src. dst := C1; A := src; dst := crz(src, C1) (0 -> 1, 2 -> 2); with A = C1 the 1s
     // become 0. src may also hold its word as 1/2 instead of 0/2 (the ALU's result): the first
     // access with A = C1 turns it into 0/2.
-    void mov_reg(Stream& s, int dst, int src, SourceLoc loc) {
+    void mov_reg(Stream& s, int dst, int src, SourceLoc loc, int dst_path = 0, int src_path = 0) {
         if (src == dst) {
             return;
         }
-        reset(s, dst, loc);
-        access(s, src, loc);
-        access(s, dst, loc);
+        reset(s, dst, loc, dst_path);
+        access(s, src, loc, src_path);
+        access(s, dst, loc, dst_path);
         load(s, make_value({}, 1), loc);
-        access(s, dst, loc);
+        access(s, dst, loc, dst_path);
     }
 
     // A sequence of word.hpp; cells[i] is the register (and its path) of the sequence's cell i.
@@ -864,11 +1069,12 @@ class Lowerer {
     void lane_index(Stream& s, int reg, unsigned lane, unsigned tag, SourceLoc loc) {
         index_sequence(s, reg, lane_mask(lane, tag), loc);
     }
-    // The lane index sequence with the constant `mask` (lane_mask, sign_mask).
-    void index_sequence(Stream& s, int reg, Value mask, SourceLoc loc) {
+    // The lane index sequence with the constant `mask` (lane_mask, sign_mask, bit_mask); reg is
+    // read on `path`.
+    void index_sequence(Stream& s, int reg, Value mask, SourceLoc loc, int path = 0) {
         const int ix = index_reg(loc);
         reset(s, ix, loc);
-        access(s, reg, loc);
+        access(s, reg, loc, path);
         access(s, ix, loc);
         load(s, mask, loc);
         access(s, ix, loc);
@@ -883,7 +1089,7 @@ class Lowerer {
         r.name = name;
         r.init = init;
         r.dispatch = dispatch;
-        r.callee = new_callee(false, loc, 1);
+        r.callee = new_callee(Flags::Access, loc, 1);
         regs_.push_back(std::move(r));
         reg_by_name_[name] = static_cast<int>(regs_.size() - 1);
         return static_cast<int>(regs_.size() - 1);
@@ -909,7 +1115,7 @@ class Lowerer {
         if (sp_ < 0) {
             sp_ = add_reg("_SP", Value::from_raw(frame_record(0).raw() - 2), true, loc);
             reg_mut(sp_).ram = true;
-            move_ = new_callee(true, loc, 1);
+            move_ = new_callee(Flags::Sub, loc, 1);
         }
         return sp_;
     }
@@ -955,13 +1161,40 @@ class Lowerer {
         }
         return h_;
     }
+    // The multiply routine's registers: _MX (x), _MY (y, then the product's low word) and _MP
+    // (its high word); the divide routine's: _DX (x, then the quotient), _DY (y) and _DR (the
+    // remainder). The routines access them on path 1 and rotate them on path 2.
+    void mul_regs(SourceLoc loc) {
+        if (mul_ < 0) {
+            mul_ = new_callee(Flags::Muldiv, loc, 1);
+            mx_ = routine_reg("_MX", false, loc);
+            my_ = routine_reg("_MY", true, loc);
+            mp_ = routine_reg("_MP", true, loc);
+        }
+    }
+    void div_regs(SourceLoc loc) {
+        if (div_ < 0) {
+            div_ = new_callee(Flags::Muldiv, loc, 1);
+            dx_ = routine_reg("_DX", true, loc);
+            dy_ = routine_reg("_DY", false, loc);
+            dr_ = routine_reg("_DR", true, loc);
+        }
+    }
+    int routine_reg(const std::string& name, bool rot, SourceLoc loc) {
+        const int r = add_reg(name, Value{}, false, loc);
+        add_path(r, loc);
+        if (rot) {
+            reg_mut(r).rot = add_path(r, loc);
+        }
+        return r;
+    }
     int add_path(int reg, SourceLoc loc) {
-        reg_mut(reg).paths.push_back(new_callee(false, loc, 1));
+        reg_mut(reg).paths.push_back(new_callee(Flags::Access, loc, 1));
         return static_cast<int>(reg_at(reg).paths.size());
     }
 
-    int new_callee(bool sub, SourceLoc loc, std::size_t exits) {
-        callees_.push_back(Callee{sub, loc, std::vector<std::vector<std::string>>(exits)});
+    int new_callee(Flags flags, SourceLoc loc, std::size_t exits) {
+        callees_.push_back(Callee{flags, loc, std::vector<std::vector<std::string>>(exits)});
         return static_cast<int>(callees_.size() - 1);
     }
     std::size_t add_site(int callee, std::vector<std::string> targets) {
@@ -974,13 +1207,13 @@ class Lowerer {
     }
     int zero_callee(unsigned lane, SourceLoc loc) {
         if (zero_[lane] < 0) {
-            zero_[lane] = new_callee(true, loc, 2);
+            zero_[lane] = new_callee(Flags::Sub, loc, 2);
         }
         return zero_[lane];
     }
     int in_callee(SourceLoc loc) {
         if (in_ < 0) {
-            in_ = new_callee(true, loc, 2);
+            in_ = new_callee(Flags::Sub, loc, 2);
         }
         return in_;
     }
@@ -992,7 +1225,7 @@ class Lowerer {
 
     // The return tree of `leaves` (docs/hla.md 4.3): a flag per depth; a set flag sends the caller
     // to the upper half (and clears itself), a clear one falls through to the lower half.
-    void tree(Stream& s, const std::vector<std::string>& leaves, bool sub, SourceLoc loc,
+    void tree(Stream& s, const std::vector<std::string>& leaves, Flags flags, SourceLoc loc,
               std::size_t lo, std::size_t hi, unsigned depth) {
         const Words w{loc};
         if (hi - lo == 1) {
@@ -1001,16 +1234,17 @@ class Lowerer {
         }
         const std::size_t mid = lo + (hi - lo) / 2;
         const std::string upper = fresh();
-        const std::string f = flag_name(sub, depth);
+        const std::string f = flag_name(flags, depth);
         s.line({w.ref(f), w.ref(upper), w.restore(f)});
-        depth_[sub] = std::max(depth_[sub], depth + 1);
-        tree(s, leaves, sub, loc, lo, mid, depth + 1);
+        auto& max_depth = depth_[static_cast<std::size_t>(flags)];
+        max_depth = std::max(max_depth, depth + 1);
+        tree(s, leaves, flags, loc, lo, mid, depth + 1);
         s.label(upper, loc);
-        tree(s, leaves, sub, loc, mid, hi, depth + 1);
+        tree(s, leaves, flags, loc, mid, hi, depth + 1);
     }
     void tree(Stream& s, int callee, std::size_t exit) {
         const Callee& c = callees_[static_cast<std::size_t>(callee)];
-        tree(s, c.exits[exit], c.sub, c.loc, 0, c.exits[exit].size(), 0);
+        tree(s, c.exits[exit], c.flags, c.loc, 0, c.exits[exit].size(), 0);
     }
 
     void block(Stream& s, std::optional<Value> at = std::nullopt) {
@@ -1023,7 +1257,7 @@ class Lowerer {
                 const Callee& c = callees_[static_cast<std::size_t>(l.callee)];
                 const Words w{l.cells.front().word.loc};
                 for (const unsigned d : site_flags(c.exits[0].size(), l.site)) {
-                    cells.push_back(w.restore(flag_name(c.sub, d)));
+                    cells.push_back(w.restore(flag_name(c.flags, d)));
                 }
             }
             for (Cell& c : l.cells) {
@@ -1365,21 +1599,22 @@ class Lowerer {
         }
     }
 
-    // _H rotated right m times: loops of 9 rotations (the counter _K9 fires on every 9th pass and
-    // is back at its start then), the first one shortened by advancing the counter first.
-    void rotate(Stream& s, unsigned m, SourceLoc loc) {
+    // reg rotated right m times through its Rot path: loops of 9 rotations (the counter _K9 fires
+    // on every 9th pass and is back at its start then), the first one shortened by advancing the
+    // counter first.
+    void rotate(Stream& s, int reg, unsigned m, SourceLoc loc) {
         const Words w{loc};
-        const int rot = reg_at(h_).rot;
+        const int rot = reg_at(reg).rot;
         if (m % 9 != 0) {
             for (unsigned i = 0; i < 9 - m % 9; ++i) {
                 const std::string next = fresh();
                 s.line({w.ref(kK9), w.ref(next)});
                 s.label(next, loc);
             }
-            access(s, h_, loc, rot);
+            access(s, reg, loc, rot);
         }
         for (unsigned i = 0; i < m / 9; ++i) {
-            access(s, h_, loc, rot);
+            access(s, reg, loc, rot);
         }
         use(kK9);
     }
@@ -1410,7 +1645,7 @@ class Lowerer {
             Stream s;
             s.label(shift_entry(left, k), loc);
             s.line({w.restore(kMoved)});
-            rotate(s, rotations(left, k), loc);
+            rotate(s, h_, rotations(left, k), loc);
             const Sequence m = transform(shift_map(left, k));
             assert(m.size() == 4 && m[0].cell < 0 && m[2].k == tail[2].k); // the short form
             load(s, m[0].k, loc);
@@ -1431,6 +1666,162 @@ class Lowerer {
         use(kNeg);
     }
 
+    // The start of a loop of 32 passes; loop_end goes back to it until the counters _L4A, _L4B
+    // and _L2 (4 * 4 * 2 passes) fire together, and they are back at their start then.
+    std::string loop_start(Stream& s, SourceLoc loc) {
+        const Words w{loc};
+        const std::string top = fresh();
+        s.line({w.ref(kMoved), w.ref(top)});
+        s.label(top, loc);
+        s.line({w.restore(kMoved)});
+        return top;
+    }
+    void loop_end(Stream& s, const std::string& top, SourceLoc loc) {
+        const Words w{loc};
+        for (const std::string* k : {&kL4a, &kL4b, &kL2}) {
+            const std::string fired = fresh();
+            s.line({w.ref(*k), w.ref(fired), w.ref(kMoved), w.ref(top)});
+            s.label(fired, loc);
+            use(*k);
+        }
+    }
+
+    // The multiply routine (docs/adr/0003-hla-muldiv.md): _MP := 0, then 32 passes: if bit 0 of
+    // _MY is set, _MP += _MX with the carry into the trit 36 of _MP; bit 0 of _MP moves to the trit
+    // 36 of _MY (both bits 0 cleared); both are rotated right once, so the trits 36 become bits 31.
+    // _MP:_MY is then the product.
+    void mul_routine(Stream& s) {
+        const SourceLoc loc = callees_[static_cast<std::size_t>(mul_)].loc;
+        const Words w{loc};
+        const int sr = sum_reg(loc);
+        s.label("_MUL", loc);
+        s.line({w.restore(kMoved)});
+        mov_value(s, mp_, Value{}, loc, 1);
+        const std::string top = loop_start(s, loc);
+        const std::string add = fresh();
+        const std::string shift = fresh();
+        bit_test(s, my_, 0, shift, add, loc, 1);
+        s.label(add, loc);
+        s.line({w.restore(kMoved)});
+        run(s, sum_sequence(all_digits(Digit::Add)), {{mp_, 1}, {mx_, 1}, {sr, 0}}, loc);
+        const std::string no_carry = fresh();
+        const std::string carry = fresh();
+        alu_call(s, false, no_carry, carry, loc);
+        for (const bool c : {false, true}) {
+            s.label(c ? carry : no_carry, loc);
+            s.line({w.restore(kMoved)});
+            mov_reg(s, mp_, z_reg(loc), loc, 1);
+            if (c) {
+                run(s, transform(trit_map({{kTop, Trit::Fill}})), {{mp_, 1}}, loc);
+            }
+            s.line({w.ref(kMoved), w.ref(shift)});
+        }
+        s.label(shift, loc);
+        s.line({w.restore(kMoved)});
+        const std::string low0 = fresh();
+        const std::string low1 = fresh();
+        const std::string rot = fresh();
+        bit_test(s, mp_, 0, low0, low1, loc, 1);
+        for (const bool b : {false, true}) {
+            s.label(b ? low1 : low0, loc);
+            s.line({w.restore(kMoved)});
+            run(s,
+                transform(
+                    trit_map({{bit_trit(0), Trit::Clear}, {kTop, b ? Trit::Fill : Trit::Keep}})),
+                {{my_, 1}}, loc);
+            if (b) {
+                run(s, transform(trit_map({{bit_trit(0), Trit::Clear}})), {{mp_, 1}}, loc);
+            }
+            s.line({w.ref(kMoved), w.ref(rot)});
+        }
+        s.label(rot, loc);
+        s.line({w.restore(kMoved)});
+        rotate(s, mp_, 1, loc);
+        rotate(s, my_, 1, loc);
+        loop_end(s, top, loc);
+        tree(s, mul_, 0);
+    }
+
+    // The divide routine (restoring division): _DR := 0, then 32 passes: bit 31 of _DR leaves
+    // (setting _FO if it was 1) and bit 31 of _DX moves to the trit 3 of _DR; both are rotated left
+    // once (kWidth - 1 times right), so the trit 3 becomes bit 0. If _FO is set or _DR >= _DY (the
+    // carry of _DR - _DY), _DR := _DR - _DY and bit 0 of _DX := 1. _DX is then the quotient.
+    void div_routine(Stream& s) {
+        const SourceLoc loc = callees_[static_cast<std::size_t>(div_)].loc;
+        const Words w{loc};
+        const int sr = sum_reg(loc);
+        const unsigned b31 = bit_trit(kWordBits - 1);
+        s.label("_DIV", loc);
+        s.line({w.restore(kMoved)});
+        mov_value(s, dr_, Value{}, loc, 1);
+        const std::string top = loop_start(s, loc);
+        const std::string over = fresh();
+        const std::string next_bit = fresh();
+        bit_test(s, dr_, kWordBits - 1, next_bit, over, loc, 1);
+        s.label(over, loc);
+        s.line({w.restore(kMoved)});
+        run(s, transform(trit_map({{b31, Trit::Clear}})), {{dr_, 1}}, loc);
+        s.line({w.restore(kOver), w.ref(kMoved), w.ref(next_bit)});
+        use(kOver);
+        s.label(next_bit, loc);
+        s.line({w.restore(kMoved)});
+        const std::string one = fresh();
+        const std::string rot = fresh();
+        bit_test(s, dx_, kWordBits - 1, rot, one, loc, 1);
+        s.label(one, loc);
+        s.line({w.restore(kMoved)});
+        run(s, transform(trit_map({{kBit0 - 1, Trit::Fill}})), {{dr_, 1}}, loc);
+        run(s, transform(trit_map({{b31, Trit::Clear}})), {{dx_, 1}}, loc);
+        s.line({w.ref(kMoved), w.ref(rot)});
+        s.label(rot, loc);
+        s.line({w.restore(kMoved)});
+        rotate(s, dr_, kWidth - 1, loc);
+        rotate(s, dx_, kWidth - 1, loc);
+        run(s, sum_sequence(all_digits(Digit::Sub)), {{dr_, 1}, {dy_, 1}, {sr, 0}}, loc);
+        const std::string no_carry = fresh();
+        const std::string carry = fresh();
+        const std::string take = fresh();
+        const std::string next = fresh();
+        alu_call(s, true, no_carry, carry, loc);
+        // No carry (_DR < _DY): subtract only if _FO is set. Carry: subtract; clear _FO.
+        for (const bool c : {false, true}) {
+            const std::string set = fresh();
+            s.label(c ? carry : no_carry, loc);
+            s.line({w.restore(kMoved)});
+            s.line({w.ref(kOver), w.ref(set), w.restore(kOver)});
+            if (!c) {
+                s.line({w.ref(kMoved), w.ref(next)});
+            }
+            s.label(set, loc);
+            s.line({w.ref(kMoved), w.ref(take)});
+        }
+        s.label(take, loc);
+        s.line({w.restore(kMoved)});
+        mov_reg(s, dr_, z_reg(loc), loc, 1);
+        run(s, transform(trit_map({{kBit0, Trit::Fill}})), {{dx_, 1}}, loc);
+        s.line({w.ref(kMoved), w.ref(next)});
+        s.label(next, loc);
+        s.line({w.restore(kMoved)});
+        loop_end(s, top, loc);
+        tree(s, div_, 0);
+    }
+
+    // The bit tables: per bit tested its clear entry, and one entry for every set bit.
+    void bit_tables() {
+        const Words w{callees_[static_cast<std::size_t>(bits_)].loc};
+        const auto entry = [&](const std::string& name, const std::string& exit, Value ix) {
+            Stream s;
+            s.label(name, w.loc);
+            s.line({w.ref(kGo), w.ref(exit)});
+            block(s, Value::from_raw(ix.raw() + 1));
+        };
+        for (const unsigned i : bit_tests_) {
+            entry("_tb" + std::to_string(i), "_TB0", bit_index(i, 0));
+        }
+        entry("_tb", "_TB1", bit_index(0, 1));
+        use(kGo);
+    }
+
     void sign_tables(unsigned lane) {
         const Words w{callees_[static_cast<std::size_t>(sign_[lane])].loc};
         const std::string l = std::to_string(lane);
@@ -1448,7 +1839,16 @@ class Lowerer {
         if (in_ >= 0) {
             input_routine(in_routine);
         }
+        // The multiply and divide routines first: they call the ALU and the bit and sign tables.
         std::vector<Stream> routines;
+        if (mul_ >= 0) {
+            routines.emplace_back();
+            mul_routine(routines.back());
+        }
+        if (div_ >= 0) {
+            routines.emplace_back();
+            div_routine(routines.back());
+        }
         if (alu_ >= 0) {
             routines.emplace_back();
             alu_routine(routines.back());
@@ -1488,6 +1888,10 @@ class Lowerer {
                 exit("_SGP" + std::to_string(lane), sign_[lane], 0, {kMd, kGo, kMoved});
                 exit("_SGN" + std::to_string(lane), sign_[lane], 1, {kMd, kGo, kMoved});
             }
+        }
+        if (bits_ >= 0) {
+            exit("_TB0", bits_, 0, {kMd, kGo, kMoved});
+            exit("_TB1", bits_, 1, {kMd, kGo, kMoved});
         }
         if (ram_ >= 0) {
             exits.push_back(ram_back());
@@ -1597,6 +2001,9 @@ class Lowerer {
                 sign_tables(lane);
             }
         }
+        if (bits_ >= 0) {
+            bit_tables();
+        }
         if (ram_ >= 0) {
             ram_records();
         }
@@ -1638,9 +2045,14 @@ class Lowerer {
         if (units_.contains(kRa)) {
             ram_unit();
         }
-        for (const std::string* flag : {&kDir, &kCarry, &kNeg, &kLeft}) {
+        for (const std::string* flag : {&kDir, &kCarry, &kNeg, &kLeft, &kOver, &kL2}) {
             if (units_.contains(*flag)) {
                 code(*flag, {CoreOp::Nop, CoreOp::MovD});
+            }
+        }
+        for (const std::string* counter : {&kL4a, &kL4b}) {
+            if (units_.contains(*counter)) {
+                code(*counter, {CoreOp::Nop, CoreOp::Nop, CoreOp::Nop, CoreOp::MovD});
             }
         }
         if (units_.contains(kK9)) {
@@ -1651,9 +2063,9 @@ class Lowerer {
         for (int p = 1; p <= max_path_; ++p) {
             code(path_flag(p), {CoreOp::Nop, CoreOp::MovD});
         }
-        for (const bool sub : {false, true}) {
-            for (unsigned d = 0; d < depth_[sub]; ++d) {
-                code(flag_name(sub, d), {CoreOp::Nop, CoreOp::MovD});
+        for (const Flags f : {Flags::Access, Flags::Sub, Flags::Muldiv}) {
+            for (unsigned d = 0; d < depth_[static_cast<std::size_t>(f)]; ++d) {
+                code(flag_name(f, d), {CoreOp::Nop, CoreOp::MovD});
             }
         }
         for (as::Block& b : data_) {
@@ -1689,13 +2101,23 @@ class Lowerer {
     int shift_switch_ = -1;
     std::set<std::pair<bool, unsigned>> shift_entries_; // (left, amount) entries in use
     std::array<int, kLanes> sign_ = {-1, -1, -1, -1};
+    int bits_ = -1; // the bit tables
+    std::set<unsigned> bit_tests_;
+    int mul_ = -1; // the multiply routine and its registers
+    int mx_ = -1;
+    int my_ = -1;
+    int mp_ = -1;
+    int div_ = -1; // the divide routine and its registers
+    int dx_ = -1;
+    int dy_ = -1;
+    int dr_ = -1;
     int max_path_ = 0;
     std::unordered_map<std::string, std::uint32_t> ram_base_;
     std::unordered_map<std::string, std::uint32_t> code_ids_;
     std::vector<std::pair<std::string, SourceLoc>> code_pads_; // [id - 1]: the label, first use
     std::vector<SwitchTable> switches_;
     unsigned next_ = 0;
-    std::array<unsigned, 2> depth_ = {0, 0};
+    std::array<unsigned, kFlagFamilies> depth_{};
 };
 
 } // namespace

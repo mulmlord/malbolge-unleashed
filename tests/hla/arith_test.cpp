@@ -1,4 +1,4 @@
-// The arithmetic statements (issue #21) in the VM against C++ reference functions.
+// The arithmetic statements (issues #21, #22) in the VM against C++ reference functions.
 //
 // One harness program holds every statement form as a case of a switch:
 //     loop: in t, done / switch t, f0, f1, ... / f<i>: <statement> / jmp loop
@@ -7,7 +7,8 @@
 // The steps between two reads, minus those of an empty case, are the statement's cost.
 //
 // Fast: every form on edge values and random words. Slow: exhaustive on 8-bit operands and 10 000
-// random cases per operation, on several threads (each its own VM).
+// random cases per operation, on several threads (each its own VM). Multiplication and division
+// cost 40 to 50 times an add, so a debug build runs fewer of their cases.
 
 #include <doctest/doctest.h>
 
@@ -34,9 +35,36 @@ struct Regs {
 };
 
 std::int32_t s32(std::uint32_t v) { return static_cast<std::int32_t>(v); }
+std::int64_t s64(std::uint32_t v) { return s32(v); }
 
-// The C++ reference of an operation (RV32I semantics).
+// The C++ reference of an operation (RV32IM semantics: x / 0 = -1, x % 0 = x, INT_MIN / -1 =
+// INT_MIN, INT_MIN % -1 = 0).
 std::uint32_t ref(const std::string& op, std::uint32_t a, std::uint32_t b) {
+    const auto high = [](std::int64_t p) { return static_cast<std::uint32_t>(p >> 32); };
+    if (op == "mul") {
+        return a * b;
+    }
+    if (op == "mulh") {
+        return high(s64(a) * s64(b));
+    }
+    if (op == "mulhsu") {
+        return high(s64(a) * std::int64_t{b});
+    }
+    if (op == "mulhu") {
+        return static_cast<std::uint32_t>(std::uint64_t{a} * b >> 32);
+    }
+    if (op == "divu") {
+        return b == 0 ? 0xFFFFFFFF : a / b;
+    }
+    if (op == "remu") {
+        return b == 0 ? a : a % b;
+    }
+    if (op == "div") {
+        return b == 0 ? 0xFFFFFFFF : static_cast<std::uint32_t>(s64(a) / s64(b));
+    }
+    if (op == "rem") {
+        return b == 0 ? a : static_cast<std::uint32_t>(s64(a) % s64(b));
+    }
     if (op == "add") {
         return a + b;
     }
@@ -89,10 +117,14 @@ struct Form {
     std::function<void(Regs&)> model;
 };
 
-const std::vector<std::string> kBinary = {"add", "sub",  "and", "or",  "xor",
-                                          "slt", "sltu", "sll", "srl", "sra"};
+const std::vector<std::string> kBinary = {"add",    "sub",   "and", "or",   "xor", "slt",
+                                          "sltu",   "sll",   "srl", "sra",  "mul", "mulh",
+                                          "mulhsu", "mulhu", "div", "divu", "rem", "remu"};
 
 bool is_shift_op(const std::string& op) { return op == "sll" || op == "srl" || op == "sra"; }
+bool is_muldiv_op(const std::string& op) {
+    return op.starts_with("mul") || op.starts_with("div") || op.starts_with("rem");
+}
 
 std::vector<std::uint32_t> constants(const std::string& op) {
     if (is_shift_op(op)) {
@@ -100,6 +132,9 @@ std::vector<std::uint32_t> constants(const std::string& op) {
     }
     if (op == "and" || op == "or" || op == "xor") {
         return {0, 0xFF, 0xFFFF0000, 0xFFFFFFFF, 0x5A5A5A5A};
+    }
+    if (is_muldiv_op(op)) {
+        return {0, 1, 10, 0xFFFFFFFF, 0x80000000, 0xFFFFFFF9, 0x12345678};
     }
     return {0, 1, 0xFFFFFFFF, 0x80000000, 0x7FF, 0xFFFFF800, 0x12345678};
 }
@@ -325,6 +360,14 @@ const std::vector<std::uint32_t> kEdges = {0,          1,          2,          0
                                            0x80,       0xFF,       0x7FFFFFFF, 0x80000000,
                                            0xFFFFFFFF, 0xFFFFFFFE, 0x0000FFFF, 0x12345678};
 
+// Operand pairs every multiplication and division form runs: division by zero, INT_MIN / -1, the
+// signs, the largest products.
+const std::vector<std::pair<std::uint32_t, std::uint32_t>> kMulDivEdges = {
+    {0x80000000, 0xFFFFFFFF}, {0x80000000, 1},          {7, 0},
+    {0xFFFFFFF9, 0},          {0xFFFFFFF9, 2},          {7, 0xFFFFFFFE},
+    {0xFFFFFFFF, 0xFFFFFFFF}, {0x7FFFFFFF, 0x80000000},
+};
+
 } // namespace
 
 TEST_CASE("arithmetic statements match the C++ reference, every form, and their cost") {
@@ -332,11 +375,19 @@ TEST_CASE("arithmetic statements match the C++ reference, every form, and their 
     std::mt19937 rng(21);
     std::vector<Case> cases;
     for (const std::size_t f : hs.forms) {
-        for (int i = 0; i < 24; ++i) {
+        const bool muldiv = is_muldiv_op(forms()[f].op);
+        const int n = muldiv && kDebugBuild ? 2 : 24;
+        for (int i = 0; i < n; ++i) {
             const auto pick = [&] {
-                return i < 12 ? kEdges[rng() % kEdges.size()] : static_cast<std::uint32_t>(rng());
+                return i < n / 2 ? kEdges[rng() % kEdges.size()]
+                                 : static_cast<std::uint32_t>(rng());
             };
             cases.push_back({f, {pick(), pick(), static_cast<std::uint32_t>(rng())}});
+        }
+        if (muldiv) {
+            for (const auto& [x, y] : kMulDivEdges) {
+                cases.push_back({f, {x, y, static_cast<std::uint32_t>(rng())}});
+            }
         }
     }
     for (int i = 0; i < 24; ++i) {
@@ -365,21 +416,23 @@ TEST_CASE("arithmetic statements match the C++ reference, every form, and their 
         char line[96];
         std::snprintf(line, sizeof line, "%-24s %6.0f\n", forms()[f].text.c_str(), mean(f) - base);
         table += line;
-        CHECK(mean(f) - base < 6000); // a regression guard far above the baseline
+        // A regression guard far above the baseline.
+        CHECK(mean(f) - base < (is_muldiv_op(forms()[f].op) ? 200000 : 6000));
     }
     MESSAGE("steps per statement in the harness (empty case " << base << " steps):\n" << table);
 }
 
 TEST_CASE("arithmetic: exhaustive on 8-bit operands" * doctest::test_suite("slow")) {
     // x and y sign-extended 8-bit values (every lane of the word sees both signs); shift amounts
-    // the 256 bytes (the low 5 bits count). A debug build runs every 16th pair.
-    const std::uint32_t stride = kDebugBuild ? 16 : 1;
+    // the 256 bytes (the low 5 bits count). A debug build runs every 16th pair, of multiplication
+    // and division every 1021st (a prime: both operands vary).
     std::vector<Case> cases;
     for (std::size_t f = 0; f < forms().size(); ++f) {
         const std::string& text = forms()[f].text;
         if (text != forms()[f].op + " z, x, y" && text != forms()[f].op + " z, x") {
             continue;
         }
+        const std::uint32_t stride = kDebugBuild ? (is_muldiv_op(forms()[f].op) ? 1021 : 16) : 1;
         const bool shift = is_shift_op(forms()[f].op);
         for (std::uint32_t p = 0; p < 65536; p += stride) {
             const std::uint32_t i = p >> 8;
@@ -395,19 +448,25 @@ TEST_CASE("arithmetic: exhaustive on 8-bit operands" * doctest::test_suite("slow
 }
 
 TEST_CASE("arithmetic: 10 000 random 32-bit cases per operation" * doctest::test_suite("slow")) {
+    // A debug build runs 200 per multiplication and division. Their divisors are also shifted
+    // right by a random amount: small divisors make long quotients.
     std::mt19937 rng(2121);
     std::vector<Case> cases;
     std::map<std::string, int> per_op;
     for (std::size_t f = 0; f < forms().size(); ++f) {
         const std::string& text = forms()[f].text;
         if (text == forms()[f].op + " z, x, y" || text == forms()[f].op + " z, x") {
-            for (int i = 0; i < 10000; ++i) {
+            const bool muldiv = is_muldiv_op(forms()[f].op);
+            const int n = muldiv && kDebugBuild ? 200 : 10000;
+            for (int i = 0; i < n; ++i) {
+                auto y = static_cast<std::uint32_t>(rng());
+                if (muldiv && i % 2 == 1) {
+                    y >>= rng() % 32;
+                }
                 cases.push_back(
-                    {f,
-                     {static_cast<std::uint32_t>(rng()), static_cast<std::uint32_t>(rng()),
-                      static_cast<std::uint32_t>(rng())}});
+                    {f, {static_cast<std::uint32_t>(rng()), y, static_cast<std::uint32_t>(rng())}});
             }
-            per_op[forms()[f].op] += 10000;
+            per_op[forms()[f].op] += n;
         }
     }
     CHECK(per_op.size() == kBinary.size() + 2);

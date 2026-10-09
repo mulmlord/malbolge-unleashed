@@ -170,6 +170,16 @@ Value sign_index(unsigned lane, std::uint8_t byte) {
 
 Value sign_mask(unsigned lane) { return table_mask(lane, sign_tag(lane), 0); }
 
+// Per trit, the index sequence turns the trit x (0 or 2) of the cell into x / 2 where the mask has
+// a 0 and into 1 where it has a 1, whatever x is. The mask has 0s on bit i, the trit 37 and the
+// head.
+Value bit_index(unsigned i, unsigned bit) {
+    assert(i < kWordBits && bit < 2);
+    return trits([&](unsigned t) { return t == bit_trit(i) ? bit : t >= kWidth - 1 ? 0U : 1U; });
+}
+
+Value bit_mask(unsigned i) { return bit_index(i, 0); }
+
 Value in_seed() {
     // The trits 0..5 swap 0 and 1 of the byte (injective), the trit 35 marks the table, the rest
     // is 0, so a byte gives head 1 and EOF (all trits 2) head 0.

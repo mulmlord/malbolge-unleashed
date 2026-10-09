@@ -54,7 +54,16 @@ enum class Op {
     Srl,
     Sra,
     Sextb,
-    Sexth
+    Sexth,
+    // Multiplication and division (#22, RV32M): `op d, x, y` with y a register or a value.
+    Mul,
+    Mulh,
+    Mulhsu,
+    Mulhu,
+    Div,
+    Divu,
+    Rem,
+    Remu
 };
 
 // One statement, or a label definition (Op::Label, `name` set, no operands).
@@ -95,6 +104,7 @@ struct Program {
 };
 
 inline bool is_shift(Op op) { return op == Op::Sll || op == Op::Srl || op == Op::Sra; }
+inline bool is_muldiv(Op op) { return op >= Op::Mul && op <= Op::Remu; }
 
 // The 32-bit word an immediate stands for (two's complement for negative values).
 inline std::uint32_t imm_word(std::int64_t imm) { return static_cast<std::uint32_t>(imm); }

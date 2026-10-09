@@ -58,21 +58,24 @@ std::string show_char(char c) {
     return buf;
 }
 
-constexpr std::array<std::string_view, 29> kMnemonics = {
-    "mov", "jmp",    "bz",   "bnz",   "in",  "out", "halt",  "call",  "ret",   "push",
-    "pop", "switch", "load", "store", "reg", "ram", "stack", "add",   "sub",   "and",
-    "or",  "xor",    "slt",  "sltu",  "sll", "srl", "sra",   "sextb", "sexth",
+constexpr std::array<std::string_view, 37> kMnemonics = {
+    "mov",  "jmp",    "bz",    "bnz",   "in",   "out", "halt",  "call",  "ret",   "push",
+    "pop",  "switch", "load",  "store", "reg",  "ram", "stack", "add",   "sub",   "and",
+    "or",   "xor",    "slt",   "sltu",  "sll",  "srl", "sra",   "sextb", "sexth", "mul",
+    "mulh", "mulhsu", "mulhu", "div",   "divu", "rem", "remu",
 };
 
 // The statements' mnemonics.
-constexpr std::array<std::pair<std::string_view, Op>, 26> kOps = {{
-    {"mov", Op::Mov},     {"jmp", Op::Jmp},     {"bz", Op::Bz},     {"bnz", Op::Bnz},
-    {"in", Op::In},       {"out", Op::Out},     {"halt", Op::Halt}, {"call", Op::Call},
-    {"ret", Op::Ret},     {"push", Op::Push},   {"pop", Op::Pop},   {"switch", Op::Switch},
-    {"load", Op::Load},   {"store", Op::Store}, {"add", Op::Add},   {"sub", Op::Sub},
-    {"and", Op::And},     {"or", Op::Or},       {"xor", Op::Xor},   {"slt", Op::Slt},
-    {"sltu", Op::Sltu},   {"sll", Op::Sll},     {"srl", Op::Srl},   {"sra", Op::Sra},
-    {"sextb", Op::Sextb}, {"sexth", Op::Sexth},
+constexpr std::array<std::pair<std::string_view, Op>, 34> kOps = {{
+    {"mov", Op::Mov},       {"jmp", Op::Jmp},     {"bz", Op::Bz},     {"bnz", Op::Bnz},
+    {"in", Op::In},         {"out", Op::Out},     {"halt", Op::Halt}, {"call", Op::Call},
+    {"ret", Op::Ret},       {"push", Op::Push},   {"pop", Op::Pop},   {"switch", Op::Switch},
+    {"load", Op::Load},     {"store", Op::Store}, {"add", Op::Add},   {"sub", Op::Sub},
+    {"and", Op::And},       {"or", Op::Or},       {"xor", Op::Xor},   {"slt", Op::Slt},
+    {"sltu", Op::Sltu},     {"sll", Op::Sll},     {"srl", Op::Srl},   {"sra", Op::Sra},
+    {"sextb", Op::Sextb},   {"sexth", Op::Sexth}, {"mul", Op::Mul},   {"mulh", Op::Mulh},
+    {"mulhsu", Op::Mulhsu}, {"mulhu", Op::Mulhu}, {"div", Op::Div},   {"divu", Op::Divu},
+    {"rem", Op::Rem},       {"remu", Op::Remu},
 }};
 
 std::string_view mnemonic(Op op) {
@@ -647,6 +650,14 @@ class Parser {
         case Op::Sll:
         case Op::Srl:
         case Op::Sra:
+        case Op::Mul:
+        case Op::Mulh:
+        case Op::Mulhsu:
+        case Op::Mulhu:
+        case Op::Div:
+        case Op::Divu:
+        case Op::Rem:
+        case Op::Remu:
             want(n == 3 && reg(0) && reg(1) && val(2),
                  "'" + std::string(mnemonic(s.op)) + " <reg>, <reg>, <reg or value>'");
             if (is_shift(s.op) && kind(2) == K::Imm && (s.args[2].imm < 0 || s.args[2].imm > 31)) {
@@ -733,6 +744,14 @@ unsigned allowed(const Stmt& s, std::size_t i) {
     case Op::Xor:
     case Op::Slt:
     case Op::Sltu:
+    case Op::Mul:
+    case Op::Mulh:
+    case Op::Mulhsu:
+    case Op::Mulhu:
+    case Op::Div:
+    case Op::Divu:
+    case Op::Rem:
+    case Op::Remu:
         // A code address is not a number (docs/hla.md 1): no labels.
         return i < 2 ? kReg : kReg | kRam;
     default:
