@@ -47,7 +47,8 @@ Binaries land in `build/<preset>/src/driver/malm`. CMake options: `MALM_WERROR`,
 | `rv/runtime` | RISC-V runtime (crt0, syscalls, libc) |
 | `examples/asm` | assembly examples: hello world, cat, halting cat, adder, digital root |
 | `tests/` | doctest suites (labels `fast`, `slow`) |
-| `docs/` | spec, CLI reference and research |
+| `docs/` | spec, CLI reference, research and design decisions (`docs/adr`) |
+| `prototypes/` | throwaway spike code behind the ADRs; not built or tested |
 
 ## Status
 
