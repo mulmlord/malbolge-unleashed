@@ -33,8 +33,11 @@ const std::string kMoved = "_MOVED";
 const std::string kIn = "_INP";
 const std::string kOut = "_OUTP";
 const std::string kHalt = "_HALT";
-const std::string kMd = "_MD"; // MovD through a dispatch register
-const std::string kGo = "_GO"; // MovD through the next word: a goto out of a table
+const std::string kMd = "_MD";   // MovD through a dispatch register
+const std::string kGo = "_GO";   // MovD through the next word: a goto out of a table
+const std::string kRa = "_RA";   // RAM access: MovD through a pointer register, then Opr the word
+const std::string kMb = "_MB";   // MovD out of a record to _BACK
+const std::string kDir = "_DIR"; // flag: the stack pointer moves up
 
 // Lane-table tags (word.hpp): bit i is the trit i of the index.
 constexpr unsigned kByteTag = 0;
@@ -57,9 +60,11 @@ struct Words {
     Cell ref(const std::string& name) const { return word(Expr::label(name, loc)); }
     Cell restore(const std::string& name) const { return word(Expr::restore(name, loc)); }
     Cell lit(Value v) const { return word(Expr::literal(v, loc)); }
-    Cell unused() const {
+    Cell unused() const { return special(as::Word::Kind::Unused); }
+    Cell unknown() const { return special(as::Word::Kind::Unknown); }
+    Cell special(as::Word::Kind kind) const {
         Cell c;
-        c.word.kind = as::Word::Kind::Unused;
+        c.word.kind = kind;
         c.word.loc = loc;
         c.starts_line = false;
         return c;
@@ -134,6 +139,13 @@ struct Reg {
     Value init;
     bool dispatch = false; // also a `U_MD` entry for MovD through it
     int callee = -1;
+    bool ram = false; // also a `U_RA` entry: a pointer register
+};
+
+// A switch statement's table: the target of every byte.
+struct SwitchTable {
+    SourceLoc loc;
+    std::vector<std::string> targets; // 256
 };
 
 class Lowerer {
@@ -143,8 +155,11 @@ class Lowerer {
     as::Program run() {
         out_.files = p_.files;
         out_.width = as::Width{kWidth, SourceLoc{0, 1, 1}};
+        for (const RamDecl& r : p_.rams) {
+            ram_base_[r.name] = r.base;
+        }
         for (const RegDecl& r : p_.regs) {
-            add_reg(reg_name(r.name), word(r.init), false, r.loc);
+            add_reg(reg_name(r.name), value_of(r.init), false, r.loc);
         }
         main_.label("ENTRY", p_.stmts.empty() ? SourceLoc{0, 1, 1} : p_.stmts.front().loc);
         bool falls = true;
@@ -180,13 +195,12 @@ class Lowerer {
     // Statements (docs/hla.md 3, 4.2). Returns whether execution can continue with the next one.
     bool statement(const Stmt& s) {
         const Words w{s.loc};
-        const auto reg_of = [&](const Operand& o) { return reg_index(reg_name(o.name)); };
         switch (s.op) {
         case Op::Mov: {
             const int dst = reg_of(s.args[0]);
-            if (s.args[1].kind == Operand::Kind::Imm) {
+            if (!is_reg(s.args[1])) {
                 reset(main_, dst, s.loc);
-                load(main_, *crz_operand(make_value({}, 1), word(imm_word(s.args[1].imm))), s.loc);
+                load(main_, *crz_operand(make_value({}, 1), value_of(s.args[1])), s.loc);
                 access(main_, dst, s.loc);
             } else if (const int src = reg_of(s.args[1]); src != dst) {
                 // dst := C1; A := src; dst := crz(src, C1) (0 -> 1, 2 -> 2); with A = C1 the 1s
@@ -200,9 +214,41 @@ class Lowerer {
             return true;
         }
         case Op::Jmp:
-            main_.line({w.ref(kMoved), w.ref(label_name(s.args[0].name))});
-            use(kMoved);
+            go(s.args[0], s.loc);
             return false;
+        case Op::Call: {
+            const std::string ret = fresh();
+            push(Operand{}, code_address(code_id(ret, s.loc)), s.loc);
+            go(s.args[0], s.loc);
+            main_.label(ret, s.loc);
+            main_.line({w.restore(kMoved)});
+            return true;
+        }
+        case Op::Ret: {
+            stack_move(main_, false, s.loc);
+            const int r = return_reg(s.loc);
+            load_word(main_, r, stack_reg(s.loc), s.loc);
+            main_.line({w.ref(kMoved), w.ref(reg_at(r).name + "__M")});
+            use(kMd);
+            return false;
+        }
+        case Op::Push:
+            push(s.args[0], is_reg(s.args[0]) ? Value{} : value_of(s.args[0]), s.loc);
+            return true;
+        case Op::Pop:
+            stack_move(main_, false, s.loc);
+            load_word(main_, reg_of(s.args[0]), stack_reg(s.loc), s.loc);
+            return true;
+        case Op::Switch:
+            switch_table(s);
+            return true;
+        case Op::Load:
+            load_word(main_, reg_of(s.args[0]), pointer(s.args[1], s.loc), s.loc);
+            return true;
+        case Op::Store:
+            store_word(main_, pointer(s.args[0], s.loc), s.args[1],
+                       is_reg(s.args[1]) ? Value{} : value_of(s.args[1]), s.loc);
+            return true;
         case Op::Bz:
         case Op::Bnz:
             zero_test(s.op == Op::Bz, reg_of(s.args[0]), label_name(s.args[1].name), s.loc);
@@ -242,6 +288,165 @@ class Lowerer {
             break;
         }
         return true;
+    }
+
+    // Values and names (docs/hla.md 3).
+
+    bool is_reg(const Operand& o) const {
+        return o.kind == Operand::Kind::Name && reg_by_name_.contains(reg_name(o.name));
+    }
+    int reg_of(const Operand& o) const { return reg_index(reg_name(o.name)); }
+
+    // A number, a RAM region (its base address) or a label (its code address).
+    Value value_of(const Operand& o) {
+        if (o.kind == Operand::Kind::Imm) {
+            return word(imm_word(o.imm));
+        }
+        if (const auto r = ram_base_.find(o.name); r != ram_base_.end()) {
+            return word(r->second);
+        }
+        return code_address(code_id(label_name(o.name), o.loc));
+    }
+
+    // The id of the code address of `label` (a landing pad of the main stream, docs/hla.md 4.5).
+    std::uint32_t code_id(const std::string& label, SourceLoc loc) {
+        const auto [it, fresh] =
+            code_ids_.emplace(label, static_cast<std::uint32_t>(code_pads_.size() + 1));
+        if (fresh) {
+            code_pads_.emplace_back(label, loc);
+        }
+        return it->second;
+    }
+
+    // Continue at a label, or at the code address a register holds.
+    void go(const Operand& target, SourceLoc loc) {
+        const Words w{loc};
+        if (is_reg(target)) {
+            const int r = reg_of(target);
+            reg_mut(r).dispatch = true;
+            main_.line({w.ref(kMoved), w.ref(reg_at(r).name + "__M")});
+            use(kMd);
+        } else {
+            main_.line({w.ref(kMoved), w.ref(label_name(target.name))});
+        }
+        use(kMoved);
+    }
+
+    // `switch r, ...` (docs/hla.md 4.4): the lane-0 index of r, moved into the switch's own table,
+    // whose entries go to the labels or to the next statement.
+    void switch_table(const Stmt& s) {
+        const Words w{s.loc};
+        const auto n = static_cast<std::uint32_t>(switches_.size());
+        const int ix = index_reg(s.loc);
+        lane_index(main_, reg_of(s.args[0]), 0, kSwitchTag, s.loc);
+        load(main_, switch_mask(n), s.loc);
+        access(main_, ix, s.loc);
+        main_.line({w.ref(kMoved), w.ref(reg_at(ix).name + "__M")});
+        const std::string after = fresh();
+        SwitchTable t{s.loc, std::vector<std::string>(256, after)};
+        for (std::size_t b = 0; b + 1 < s.args.size(); ++b) {
+            t.targets[b] = label_name(s.args[b + 1].name);
+        }
+        switches_.push_back(std::move(t));
+        main_.label(after, s.loc);
+        main_.line({w.restore(kMoved)});
+        use(kMd);
+    }
+
+    // RAM and the stack (docs/hla.md 4.5).
+
+    // A := [word] := crz(A, [word]) for the word the pointer register p points at.
+    void ram_access(Stream& s, int p, SourceLoc loc) {
+        const Words w{loc};
+        if (ram_ < 0) {
+            ram_ = new_callee(false, loc, 1);
+        }
+        reg_mut(p).ram = true;
+        const std::string ret = fresh();
+        s.line({w.ref(kMoved), w.ref(reg_at(p).name + "__A")}, ram_, add_site(ram_, {ret}));
+        s.label(ret, loc);
+        s.line({w.restore(kMoved)});
+        use(kMoved);
+    }
+
+    // The pointer register := the pointer to the word at an address: a register (crz only,
+    // word.hpp) or a constant.
+    int pointer(const Operand& addr, SourceLoc loc) {
+        if (ptr_ < 0) {
+            ptr_ = add_reg("_P", make_value({}, 1), false, loc);
+        }
+        reset(main_, ptr_, loc);
+        if (is_reg(addr)) {
+            const int x = reg_of(addr);
+            load(main_, pointer_mask(), loc);
+            access(main_, x, loc);
+            access(main_, ptr_, loc);
+            load(main_, pointer_restore(), loc);
+            access(main_, x, loc);
+        } else {
+            const std::uint32_t a =
+                addr.kind == Operand::Kind::Imm ? imm_word(addr.imm) : ram_base_.at(addr.name);
+            load(main_, *crz_operand(make_value({}, 1), ram_pointer(a)), loc);
+            access(main_, ptr_, loc);
+        }
+        return ptr_;
+    }
+
+    // reg := the word p points at (read once, with A = C1).
+    void load_word(Stream& s, int reg, int p, SourceLoc loc) {
+        reset(s, reg, loc);
+        ram_access(s, p, loc);
+        access(s, reg, loc);
+        load(s, make_value({}, 1), loc);
+        access(s, reg, loc);
+    }
+
+    // The word p points at := a register, or the value v if `src` is not one. The word is reset
+    // to C1 and written once; a register is read with A = 0 and restored (ADR 0001: three
+    // accesses to the word, two to the register).
+    void store_word(Stream& s, int p, const Operand& src, Value v, SourceLoc loc) {
+        load(s, make_value({}, 1), loc);
+        ram_access(s, p, loc);
+        ram_access(s, p, loc);
+        if (is_reg(src)) {
+            const int x = reg_of(src);
+            load(s, Value{}, loc);
+            access(s, x, loc);
+            ram_access(s, p, loc);
+            load(s, make_value({}, 1), loc);
+            access(s, x, loc);
+        } else {
+            load(s, *crz_operand(make_value({}, 1), v), loc);
+            ram_access(s, p, loc);
+        }
+    }
+
+    // Push a register, or the value v if `src` is not one.
+    void push(const Operand& src, Value v, SourceLoc loc) {
+        store_word(main_, stack_reg(loc), src, v, loc);
+        stack_move(main_, true, loc);
+    }
+
+    // The stack pointer moves one frame up or down: a MovD through it lands on the frame's entry,
+    // whose stream loads the operand that turns the pointer into its neighbour (or halts past
+    // either end).
+    void stack_move(Stream& s, bool up, SourceLoc loc) {
+        const Words w{loc};
+        const int sp = stack_reg(loc);
+        const std::string ret = fresh();
+        std::vector<Cell> cells;
+        if (up) {
+            cells.push_back(w.restore(kDir));
+        }
+        cells.push_back(w.ref(kMoved));
+        cells.push_back(w.ref(reg_at(sp).name + "__M"));
+        s.line(std::move(cells), move_, add_site(move_, {ret}));
+        s.label(ret, loc);
+        s.line({w.restore(kMoved)});
+        use(kMoved);
+        use(kMd);
+        use(kGo);
+        use(kDir);
     }
 
     // `bz`/`bnz`: one lane at a time, the lane's zero table says zero (go on with the next lane, or
@@ -353,6 +558,7 @@ class Lowerer {
     }
     int reg_index(const std::string& name) const { return reg_by_name_.at(name); }
     const Reg& reg_at(int i) const { return regs_[static_cast<std::size_t>(i)]; }
+    Reg& reg_mut(int i) { return regs_[static_cast<std::size_t>(i)]; }
 
     int index_reg(SourceLoc loc) {
         if (index_ < 0) {
@@ -365,6 +571,22 @@ class Lowerer {
             input_ = add_reg("_S", make_value({}, 1), true, loc);
         }
         return input_;
+    }
+    // The stack pointer: a pointer register at frame 0, the bottom of the stack.
+    int stack_reg(SourceLoc loc) {
+        if (sp_ < 0) {
+            sp_ = add_reg("_SP", Value::from_raw(frame_record(0).raw() - 2), true, loc);
+            reg_mut(sp_).ram = true;
+            move_ = new_callee(true, loc, 1);
+        }
+        return sp_;
+    }
+    // The register `ret` jumps through.
+    int return_reg(SourceLoc loc) {
+        if (ret_ < 0) {
+            ret_ = add_reg("_R", make_value({}, 1), true, loc);
+        }
+        return ret_;
     }
 
     int new_callee(bool sub, SourceLoc loc, std::size_t exits) {
@@ -576,6 +798,126 @@ class Lowerer {
         use(kGo);
     }
 
+    // A landing pad at `at` (a code address + 1 or a switch entry): reached by MovD through a
+    // dispatch register, it re-arms _MD and _MOVED and continues at `target`.
+    void pad(const std::string& name, const std::string& target, SourceLoc loc, Value at) {
+        const Words w{loc};
+        Stream s;
+        s.label(name, loc);
+        s.line({w.restore(kMd), w.restore(kMoved), w.ref(kMoved), w.ref(target)});
+        block(s, at);
+        use(kMd);
+        use(kMoved);
+    }
+
+    // _RA: MovD through the pointer register (record - 2), an RNop, Opr on the record's word, and
+    // its Jmp continues at the record's MB. 4-cycles, because a MovD/Nop and an Opr/Nop 2-cycle
+    // are too far apart mod 94 (docs/adr/0001).
+    void ram_unit() {
+        as::Block b;
+        b.section = as::Section::Code;
+        b.loc = {0, 1, 1};
+        const auto cell = [&](as::Word::Kind kind, std::vector<CoreOp> ops) {
+            Cell c;
+            c.word.kind = kind;
+            c.word.loc = {0, 1, 1};
+            c.word.ops = std::move(ops);
+            b.cells.push_back(std::move(c));
+        };
+        cell(as::Word::Kind::Cycle, {CoreOp::MovD, CoreOp::Nop, CoreOp::Nop, CoreOp::Nop});
+        b.cells.back().labels.push_back({kRa, {0, 1, 1}});
+        cell(as::Word::Kind::RNop, {});
+        cell(as::Word::Kind::Cycle, {CoreOp::Opr, CoreOp::Nop, CoreOp::Nop, CoreOp::Nop});
+        cell(as::Word::Kind::Command, {CoreOp::Jmp});
+        out_.blocks.push_back(std::move(b));
+    }
+
+    // Where every RAM access ends: _MB moved D here. Re-arm _MB and _MOVED, step both 4-cycles of
+    // _RA back to their first state (each R__RA runs the RNop and the Opr cell as a Nop, so the
+    // next word is three cells on), and return.
+    Stream ram_back() {
+        const Words w{callees_[static_cast<std::size_t>(ram_)].loc};
+        Stream s;
+        s.label("_BACK", w.loc);
+        std::vector<Cell> cells = {w.restore(kMb), w.restore(kMoved)};
+        for (int i = 0; i < 3; ++i) {
+            cells.push_back(w.restore(kRa));
+            cells.push_back(w.unused());
+            cells.push_back(w.unused());
+        }
+        s.line(std::move(cells));
+        tree(s, ram_, 0);
+        return s;
+    }
+
+    // The records of the declared RAM: `? [value] MB BACK` from record - 1; the `?` keeps the
+    // value out of the first word of a line, where 0 is not allowed (docs/asm.md 6).
+    void ram_records() {
+        for (const RamDecl& r : p_.rams) {
+            const Words w{r.loc};
+            for (std::uint32_t i = 0; i < r.size; ++i) {
+                const std::uint32_t a = r.base + 4 * i;
+                Stream s;
+                s.label("_r" + std::to_string(a), r.loc);
+                s.line({w.unknown(), w.lit(i < r.init.size() ? value_of(r.init[i]) : Value{}),
+                        w.ref(kMb), w.ref("_BACK")});
+                block(s, Value::from_raw(ram_record(a).raw() - 1));
+            }
+        }
+    }
+
+    // The stack's shared exits: _SP_RET applies the operand a frame's stream loaded to the stack
+    // pointer and returns; _SOVF halts with 255 (overflow or underflow).
+    void stack_exits(std::vector<Stream>& exits) {
+        const Words w{callees_[static_cast<std::size_t>(move_)].loc};
+        Stream s;
+        s.label("_SP_RET", w.loc);
+        s.line({w.restore(kMoved)});
+        access(s, sp_, w.loc);
+        tree(s, move_, 0);
+        exits.push_back(std::move(s));
+        Stream o;
+        o.label("_SOVF", w.loc);
+        o.line({w.restore(kMoved)});
+        load(o, *Value::natural(255), w.loc);
+        o.line({w.ref(kHalt)});
+        use(kHalt);
+        exits.push_back(std::move(o));
+    }
+
+    // Frames 0..N (N = the stack size; the pointer is at frame k with k words pushed). A frame is
+    // a record `[entry][value][MB][BACK][Y]` from record - 1: a MovD through the stack pointer
+    // lands on the entry `U__GO Y`, and Y names the frame's stream, which tests _DIR and loads
+    // the operand that turns the pointer into the next or the previous frame's.
+    void frames() {
+        const Words w{callees_[static_cast<std::size_t>(move_)].loc};
+        const std::uint32_t n = p_.stack ? p_.stack->size : kDefaultStackFrames;
+        const auto ptr = [](std::uint32_t f) { return Value::from_raw(frame_record(f).raw() - 2); };
+        for (std::uint32_t f = 0; f <= n; ++f) {
+            const std::string k = std::to_string(f);
+            Stream r;
+            r.label("_f" + k, w.loc);
+            r.line({w.use(kGo, "_fy" + k), w.lit(Value{}), w.ref(kMb), w.ref("_BACK"),
+                    labeled(w.ref("_fs" + k), "_fy" + k)});
+            block(r, Value::from_raw(frame_record(f).raw() - 1));
+
+            Stream s;
+            s.label("_fs" + k, w.loc);
+            s.line({w.restore(kGo), w.restore(kMd), w.restore(kMoved)});
+            s.line({w.ref(kDir), w.ref("_fu" + k), w.restore(kDir)});
+            const auto to = [&](std::optional<std::uint32_t> g) {
+                if (g) {
+                    load(s, *crz_operand(ptr(f), ptr(*g)), w.loc);
+                }
+                s.line({w.ref(kMoved), w.ref(g ? "_SP_RET" : "_SOVF")});
+            };
+            to(f > 0 ? std::optional(f - 1) : std::nullopt);
+            s.label("_fu" + k, w.loc);
+            to(f < n ? std::optional(f + 1) : std::nullopt);
+            block(s);
+        }
+    }
+
     void finish() {
         Stream in_routine;
         if (in_ >= 0) {
@@ -608,14 +950,26 @@ class Lowerer {
             exit("_IN_B", in_, 0, {kMoved, kMd});
             exit("_IN_E", in_, 1, {kMoved, kMd});
         }
+        if (ram_ >= 0) {
+            exits.push_back(ram_back());
+        }
+        if (sp_ >= 0) {
+            stack_exits(exits);
+        }
         std::vector<Stream> reg_blocks;
         for (const Reg& r : regs_) {
             const Callee& c = callees_[static_cast<std::size_t>(r.callee)];
-            if (c.exits[0].empty()) {
+            if (c.exits[0].empty() && !r.dispatch && !r.ram) {
                 continue;
             }
             const Words w{c.loc};
             Stream s;
+            if (r.ram) {
+                s.label(r.name + "__A", c.loc);
+                s.line({w.use(kRa, r.name)});
+                use(kRa);
+                use(kMb);
+            }
             if (r.dispatch) {
                 s.label(r.name + "__M", c.loc);
                 s.line({w.use(kMd, r.name)});
@@ -624,7 +978,11 @@ class Lowerer {
             s.label(r.name + "__O", c.loc);
             s.line(
                 {w.ref(kOpr), labeled(w.lit(r.init), r.name), w.restore(kOpr), w.restore(kMoved)});
-            tree(s, r.callee, 0);
+            use(kOpr);
+            use(kMoved);
+            if (!c.exits[0].empty()) {
+                tree(s, r.callee, 0);
+            }
             reg_blocks.push_back(std::move(s));
         }
 
@@ -649,8 +1007,29 @@ class Lowerer {
         if (in_ >= 0) {
             input_tables();
         }
+        if (ram_ >= 0) {
+            ram_records();
+        }
+        if (sp_ >= 0) {
+            frames();
+        }
+        for (std::size_t i = 0; i < code_pads_.size(); ++i) {
+            const auto& [label, loc] = code_pads_[i];
+            pad("_c" + std::to_string(i + 1), label, loc,
+                Value::from_raw(code_address(static_cast<std::uint32_t>(i + 1)).raw() + 1));
+        }
+        for (std::size_t n = 0; n < switches_.size(); ++n) {
+            for (unsigned b = 0; b < 256; ++b) {
+                pad("_w" + std::to_string(n) + "_" + std::to_string(b), switches_[n].targets[b],
+                    switches_[n].loc,
+                    Value::from_raw(
+                        switch_index(static_cast<std::uint32_t>(n), static_cast<std::uint8_t>(b))
+                            .raw() +
+                        1));
+            }
+        }
 
-        const std::array<std::pair<const std::string*, std::vector<CoreOp>>, 8> units = {{
+        const std::array<std::pair<const std::string*, std::vector<CoreOp>>, 9> units = {{
             {&kMoved, {CoreOp::MovD, CoreOp::Nop}},
             {&kRot, {CoreOp::Rot, CoreOp::Nop}},
             {&kOpr, {CoreOp::Opr, CoreOp::Nop}},
@@ -658,12 +1037,19 @@ class Lowerer {
             {&kOut, {CoreOp::Out, CoreOp::Nop}},
             {&kMd, {CoreOp::MovD, CoreOp::Nop}},
             {&kGo, {CoreOp::MovD, CoreOp::Nop}},
+            {&kMb, {CoreOp::MovD, CoreOp::Nop}},
             {&kHalt, {CoreOp::Hlt}},
         }};
         for (const auto& [name, ops] : units) {
             if (units_.contains(*name)) {
                 code(*name, ops, *name != kHalt);
             }
+        }
+        if (units_.contains(kRa)) {
+            ram_unit();
+        }
+        if (units_.contains(kDir)) {
+            code(kDir, {CoreOp::Nop, CoreOp::MovD});
         }
         for (const bool sub : {false, true}) {
             for (unsigned d = 0; d < depth_[sub]; ++d) {
@@ -688,6 +1074,15 @@ class Lowerer {
     int byte_ = -1;
     std::array<int, kLanes> zero_ = {-1, -1, -1, -1};
     int in_ = -1;
+    int ram_ = -1;  // the RAM access callee
+    int ptr_ = -1;  // the pointer register of load and store
+    int sp_ = -1;   // the stack pointer
+    int move_ = -1; // the stack pointer's move callee
+    int ret_ = -1;  // the register ret jumps through
+    std::unordered_map<std::string, std::uint32_t> ram_base_;
+    std::unordered_map<std::string, std::uint32_t> code_ids_;
+    std::vector<std::pair<std::string, SourceLoc>> code_pads_; // [id - 1]: the label, first use
+    std::vector<SwitchTable> switches_;
     unsigned next_ = 0;
     std::array<unsigned, 2> depth_ = {0, 0};
 };

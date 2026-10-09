@@ -1,7 +1,7 @@
 #pragma once
 
 // Helpers shared by the HLA tests: compile a source held in memory, run it in the VM and read its
-// registers back.
+// registers and RAM back.
 
 #include <doctest/doctest.h>
 
@@ -88,6 +88,13 @@ inline std::uint32_t reg(const Compiled& c, const Ran& r, const std::string& nam
     const auto it = c.assembly.layout.labels.find("V_" + name);
     REQUIRE(it != c.assembly.layout.labels.end());
     const auto w = hla::word_value(r.vm->memory().read(it->second.addr));
+    REQUIRE(w.has_value());
+    return *w;
+}
+
+// The RAM word at byte address `addr` after the run.
+inline std::uint32_t ram_word(const Ran& r, std::uint32_t addr) {
+    const auto w = hla::word_value(r.vm->memory().read(hla::ram_record(addr)));
     REQUIRE(w.has_value());
     return *w;
 }

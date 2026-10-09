@@ -1,0 +1,15 @@
+; Rev: writes stdin backwards (at most 100 bytes). Every byte goes on the stack with a 1 above
+; it; a 0 marks the bottom.
+        stack 201
+        reg c, more
+        push 0
+read:   in c, write
+        push c
+        push 1
+        jmp read
+write:  pop more
+        bz more, done
+        pop c
+        out c
+        jmp write
+done:   halt

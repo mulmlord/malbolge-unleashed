@@ -168,4 +168,70 @@ Value in_index(int byte_or_eof) {
     return crz(a, in_seed());
 }
 
+Value switch_mask(std::uint32_t s) {
+    assert(s < kMaxSwitches);
+    // On the lane-0 index of tag 1: trit 0 (1) becomes 2, the trits 1..3 (0) stay 0, the byte's
+    // bits (0/1) become 0/2, the other lanes' bits (1) spell s, the rest (1) stays 1.
+    std::vector<unsigned> low(kWidth, 0);
+    low[0] = 2;
+    for (unsigned i = 1; i < 4; ++i) {
+        low[i] = 1;
+    }
+    for (unsigned i = 0; i < 8; ++i) {
+        low[kBit0 + i] = 2;
+    }
+    for (unsigned i = 0; i < 24; ++i) {
+        low[kBit0 + 8 + i] = (s >> i) & 1 ? 0 : 1;
+    }
+    return make_value(low, 0);
+}
+
+Value switch_index(std::uint32_t s, std::uint8_t b) {
+    return crz(switch_mask(s), lane_index(0, kSwitchTag, b));
+}
+
+namespace {
+
+// A record or frame: the trits 0..3 given, the bit i of `bits` as the trit 4 + i = 1 - bit, the
+// trit 36 = 0, the trit 37 and the head 1.
+Value record(std::array<unsigned, 4> low4, std::uint32_t bits) {
+    std::vector<unsigned> low(kWidth, 1);
+    for (unsigned i = 0; i < 4; ++i) {
+        low[i] = low4[i];
+    }
+    for (unsigned i = 0; i < kWordBits; ++i) {
+        low[kBit0 + i] = 1 - ((bits >> i) & 1);
+    }
+    low[kTableTrit] = 0;
+    return make_value(low, 1);
+}
+
+// A per-class constant: `bits` on the bit trits, `low` on the trits 0..3 and 36, `high` on the
+// trit 37 and the head.
+Value classes(unsigned bits, unsigned low, unsigned high) {
+    std::vector<unsigned> t(kWidth, high);
+    for (unsigned i = 0; i < kWidth - 1; ++i) {
+        t[i] = i >= kBit0 && i < kBit0 + kWordBits ? bits : low;
+    }
+    return make_value(t, high);
+}
+
+} // namespace
+
+Value ram_record(std::uint32_t addr) { return record({2, 0, 0, 0}, addr); }
+
+Value ram_pointer(std::uint32_t addr) { return Value::from_raw(ram_record(addr).raw() - 2); }
+
+// With X a word cell: A := crz(K, X) has the bits 0 -> 0, 1 -> 1, the low trits 1, the high 0;
+// crz(A, C1) maps them to 1 - bit, 0 and 1. R turns X' back into X.
+Value pointer_mask() { return classes(2, 0, 1); }
+Value pointer_restore() { return classes(2, 1, 1); }
+
+Value frame_record(std::uint32_t s) { return record({2, 0, 1, 0}, s); }
+
+Value code_address(std::uint32_t id) {
+    assert(id >= 1);
+    return Value::from_raw(word(id).raw() + 2 * pow3[kTableTrit]);
+}
+
 } // namespace malm::hla

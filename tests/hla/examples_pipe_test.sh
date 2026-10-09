@@ -1,6 +1,6 @@
 #!/bin/sh
-# The HLA examples through the real CLI and real pipes (issue #19): `malm hla` to a .malm, then
-# `malm run` with piped stdin, compared with the assembly examples; plus --check, --print and
+# The HLA examples through the real CLI and real pipes (issues #19, #20): `malm hla` to a .malm,
+# then `malm run` with piped stdin, compared with the assembly examples; plus --check, --print and
 # --text.
 # Usage: examples_pipe_test.sh <malm> <hla-examples-dir> <asm-examples-dir> <case>
 set -u
@@ -13,11 +13,11 @@ trap 'rm -rf "$tmp"' EXIT
 
 # Diagnostics, exit codes, and no output file after an error.
 if [ "$case_" = errors ]; then
-    printf 'reg a\n  mov b, a\n  jmp a\n' > "$tmp/bad.mhl"
+    printf 'reg a\n  mov b, a\n  bz a, a\n' > "$tmp/bad.mhl"
     "$malm" hla --check "$tmp/bad.mhl" 2> "$tmp/err"
     test $? = 1 || exit 1
     grep -q "bad.mhl:2:7: error: unknown register 'b'" "$tmp/err" || exit 1
-    grep -q "bad.mhl:3:7: error: 'a' is a register, not a label" "$tmp/err" || exit 1
+    grep -q "bad.mhl:3:9: error: 'a' is a register, not a label" "$tmp/err" || exit 1
     "$malm" hla "$tmp/bad.mhl" 2> /dev/null
     test $? = 2 || exit 1
     "$malm" hla "$tmp/bad.mhl" -o "$tmp/bad.malm" 2> /dev/null
@@ -69,6 +69,12 @@ exit42)
     "$malm" pack -o "$tmp/exe" "$tmp/p.malm" 2> /dev/null || exit 1
     "$tmp/exe" < /dev/null
     test $? = 42 || exit 1
+    ;;
+rev)
+    printf 'Hello, rev!' | "$malm" run "$tmp/p.malm" > "$tmp/out" || exit 1
+    printf '!ver ,olleH' | cmp - "$tmp/out" || exit 1
+    "$malm" run "$tmp/p.malm" < /dev/null > "$tmp/out" || exit 1
+    test ! -s "$tmp/out" || exit 1
     ;;
 *)
     echo "unknown case $case_" >&2
