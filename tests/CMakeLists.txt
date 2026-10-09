@@ -75,12 +75,17 @@ foreach(case hello cat halting_cat digital_root adder)
 endforeach()
 
 # The high-level assembler (issue #19).
-malm_add_test(NAME hla_word_test LABEL fast SOURCES hla/word_test.cpp LIBS malm_hla)
+malm_add_test(NAME hla_word_test LABEL fast SOURCES hla/word_test.cpp hla/arith_word_test.cpp
+    LIBS malm_hla)
 malm_add_test(NAME hla_lang_test LABEL fast SOURCES hla/lang_test.cpp LIBS malm_hla TIMEOUT 600)
 # Calls, the stack, switch, computed jumps and RAM (issue #20).
 malm_add_test(NAME hla_control_test LABEL fast SOURCES hla/control_test.cpp LIBS malm_hla
     TIMEOUT 600)
 malm_add_test(NAME hla_ram_test LABEL fast SOURCES hla/ram_test.cpp LIBS malm_hla TIMEOUT 600)
+# The arithmetic library (issue #21); its slow cases run on several threads.
+find_package(Threads REQUIRED)
+malm_add_test(NAME hla_arith_test LABEL fast SOURCES hla/arith_test.cpp
+    LIBS malm_hla Threads::Threads TIMEOUT 3000)
 malm_add_test(NAME hla_examples_test LABEL fast SOURCES hla/examples_test.cpp
     LIBS malm_hla TIMEOUT 600)
 target_compile_definitions(hla_examples_test PRIVATE

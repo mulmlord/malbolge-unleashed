@@ -242,6 +242,20 @@ TEST_CASE("diagnostics") {
         {"stack 65537\n", "t.mhl:1:7: error: the stack holds 1 to 65536 words\n"},
         {"stack 4\nstack 5\n", "t.mhl:2:1: error: the stack size is already declared\n"
                                "t.mhl:1:1: note: declared here\n"},
+        // Arithmetic (issue #21).
+        {"reg a\nadd a, a\n", "t.mhl:2:1: error: expected 'add <reg>, <reg>, <reg or value>'\n"},
+        {"reg a\nxor 1, a, a\n", "t.mhl:2:1: error: expected 'xor <reg>, <reg>, <reg or value>'\n"},
+        {"reg a\nslt a, 1, a\n", "t.mhl:2:1: error: expected 'slt <reg>, <reg>, <reg or value>'\n"},
+        {"reg a\nl: sub a, a, l\n", "t.mhl:2:14: error: 'l' is a label, not a register or a RAM "
+                                    "region\nt.mhl:2:1: note: defined here\n"},
+        {"reg a\nsll a, a, 32\n", "t.mhl:2:11: error: a shift amount must be 0..31\n"},
+        {"reg a\nsra a, a, -1\n", "t.mhl:2:11: error: a shift amount must be 0..31\n"},
+        {"ram m[1]\nreg a\nsrl a, a, m\n", "t.mhl:3:11: error: 'm' is a RAM region, not a "
+                                           "register\nt.mhl:1:5: note: defined here\n"},
+        {"reg a\nsextb a, a, a\n", "t.mhl:2:1: error: expected 'sextb <reg>, <reg>'\n"},
+        {"reg a\nsexth a, 1\n", "t.mhl:2:1: error: expected 'sexth <reg>, <reg>'\n"},
+        {"reg add\n", "t.mhl:1:5: error: 'add' is reserved and cannot be a register\n"},
+        {"or: halt\n", "t.mhl:1:1: error: 'or' is reserved and cannot be a label\n"},
         {"a: b: 7\n", "t.mhl:1:7: error: expected a statement, found number\n"},
         {std::string(65, 'x') + ":\n", "t.mhl:1:1: error: identifier longer than 64 characters\n"},
     };
@@ -253,6 +267,11 @@ TEST_CASE("diagnostics") {
                       "        push x\n        pop e\n        call e\n        call x\n"
                       "        switch e, x, x\n        load e, [m]\n        load e, [12]\n"
                       "        store [e], m\n        jmp e\n        ret\nx:      halt\n") == "");
+    CHECK(diagnostics("ram m[2]\nreg a, b\n        add a, b, m\n        sub a, a, -5\n"
+                      "        and a, b, 0xFF\n        or a, a, b\n        xor b, a, b\n"
+                      "        slt a, b, 'c'\n        sltu a, a, a\n        sll a, b, 31\n"
+                      "        srl a, b, 0\n        sra a, a, b\n        sextb a, b\n"
+                      "        sexth b, b\n") == "");
     CHECK(diagnostics("reg a = -2147483648, b = 0xFFFFFFFF, c = 0b101, d = '\\x41'\n"
                       "x: y: mov a, b ; comment\n"
                       "# comment\n"

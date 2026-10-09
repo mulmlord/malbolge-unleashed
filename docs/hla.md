@@ -1,15 +1,17 @@
 # malbolge-unleashed high-level assembly (`.mhl`)
 
-Status: language core (issue #19), calls, the stack, jump tables and RAM (issue #20). The
-arithmetic library (#21, #22) extends it.
+Status: language core (issue #19), calls, the stack, jump tables and RAM (issue #20), the
+arithmetic library (issue #21). Multiplication and division (#22) extend it.
 Sources:
 - the assembly language it lowers to: `docs/asm.md`
-- the word representation: `docs/adr/0001-hla-word-representation.md`
+- the word representation: `docs/adr/0001-hla-word-representation.md`; the arithmetic:
+  `docs/adr/0002-hla-arithmetic.md`
 - the implementation: `src/hla/` (`parser`, `word`, `lower`); the command: `malm hla` (docs/cli.md)
 
 HLA is a small register language. A program declares 32-bit registers and RAM and runs statements
-on them: moves, jumps, branches on zero, byte I/O, calls and returns, a stack, jump tables, and
-loads and stores through address registers. `malm hla` lowers it to an assembly program
+on them: moves, jumps, branches on zero, byte I/O, calls and returns, a stack, jump tables, loads
+and stores through address registers, and the RV32I arithmetic: add, subtract, compare, bitwise
+operations, shifts and sign extension. `malm hla` lowers it to an assembly program
 (`.mua`, an AST of `src/asm`), which the assembler lays out and turns into a pure `.malm` with the
 `EXIT_A` flag set.
 
@@ -40,8 +42,11 @@ done:   halt
   halts with exit code 255. The stack is not RAM: it has no addresses.
 - **Code addresses.** A label used as a value (`mov r, L`, `push L`, a RAM word `= L`) is its code
   address, a word that `jmp r` and `call r` continue at. Code addresses can be copied, pushed and
-  stored like any word, but they are not numbers: arithmetic on them (#21) is meaningless, and
-  jumping through a register that holds anything else is undefined.
+  stored like any word, but they are not numbers: a label is no operand of arithmetic, arithmetic
+  on a register that holds a code address is undefined, and so is jumping through a register that
+  holds anything else.
+- **Arithmetic** is that of RV32I on 32-bit words: wrap-around `add` and `sub`, signed and unsigned
+  compares, bitwise operations, shifts by the low 5 bits of the amount, sign extension.
 - **Halting** sets `A` to the exit code and executes `Hlt`. `malm hla` always sets the container
   flag `EXIT_A`, so the process exits with that code (spec 7, docs/malm-format.md). Running off the
   end of the program is `halt` (code 0).
@@ -55,7 +60,8 @@ done:   halt
   declaration (`reg`, `ram`, `stack`). Labels may stand on lines of their own; they name the next
   statement (or the end of the program).
 - **Identifiers:** `[A-Za-z_][A-Za-z0-9_]*`, at most 64 characters. Registers, labels and RAM
-  regions share one namespace; every name is defined once. The mnemonics, `reg`, `ram` and
+  regions share one namespace; every name is defined once. The mnemonics (including `add`, `sub`,
+  `and`, `or`, `xor`, `slt`, `sltu`, `sll`, `srl`, `sra`, `sextb`, `sexth`), `reg`, `ram` and
   `stack` are reserved.
 - **Numbers** are 32-bit words: decimal (`42`, `-1` = `0xFFFFFFFF`), hexadecimal (`0x2A`) or binary
   (`0b101010`), from `-2^31` to `2^32 - 1`. A character literal `'c'` is the byte's value. Escapes,
@@ -106,9 +112,25 @@ number 0..255), `m` a RAM region, `[a]` an address (`[r]`, `[k]` or `[m]`, secti
 | `halt` | stop with exit code 0 |
 | `halt b` | stop with exit code `b` |
 | `halt r` | stop with the low byte of `r` as exit code |
+| `add d, r, s`, `add d, r, k` | `d := r + s` (or `+ k`), modulo `2^32` |
+| `sub d, r, s`, `sub d, r, k` | `d := r - s`, modulo `2^32` |
+| `and d, r, s`, `or ...`, `xor ...` | `d := r & s`, `r \| s`, `r ^ s` (or with `k`) |
+| `slt d, r, s`, `slt d, r, k` | `d := 1` if `r < s` as signed words, else 0 |
+| `sltu d, r, s`, `sltu d, r, k` | `d := 1` if `r < s` as unsigned words, else 0 |
+| `sll d, r, s`, `sll d, r, n` | `d := r << (s & 31)` (or `<< n`, `n` 0..31) |
+| `srl d, r, s`, `srl d, r, n` | `d := r >> (s & 31)`, zeros shifted in |
+| `sra d, r, s`, `sra d, r, n` | `d := r >> (s & 31)`, copies of bit 31 shifted in |
+| `sextb d, r`, `sexth d, r` | `d :=` the low 8 or 16 bits of `r`, sign-extended |
 
 The exit code needs `EXIT_A`: a `.malm` from `malm hla` has it; Malbolge text (`--text`) cannot carry
 it, so run text with `malm run --exit-a`.
+
+In arithmetic statements `d`, `r` and `s` may be the same registers (`add x, x, x`); the constant
+`k` is a number or a RAM region (its base address), and `n` a number. There is no separate
+immediate-load statement: `mov r, k` loads any 32-bit constant in one statement (RV32I's
+`lui rd, imm` is `mov rd, k` with `k = imm * 4096`). `sub d, r, k` is `add d, r, -k`; `not` is
+`xor d, r, -1`, `neg` is `sub d, z, r` with `z` a zero register, `zext` is `and d, r, 0xFF`
+(`0xFFFF`).
 
 `switch` looks at the low byte only, like `out r` and `halt r`: `switch r, a, b` goes to `b` for
 `r = 0x101`. An address that is not a multiple of 4 inside a declared region, in a register, is
@@ -126,8 +148,9 @@ The lowering is the contract between HLA and the assembler; the generated progra
 - User names get a prefix: label `x` becomes `L_x`, register `x` the data label `V_x` (its value
   cell) with the entry `V_x__O`. Generated names start with `_`.
 - **Code units** (only those the program uses): `_MOVED`, `_ROT`, `_OPR`, `_INP`, `_OUTP`, `_MD`,
-  `_GO`, `_MB` (each `X/Nop` + `Jmp`), `_HALT` (`Hlt`), the RAM access `_RA` (4.5), and the flags
-  `_AFk`, `_SFk` and `_DIR` (`Nop/MovD` + `Jmp`).
+  `_GO`, `_MB` (each `X/Nop` + `Jmp`), `_HALT` (`Hlt`), the RAM access `_RA` (4.5), the flags
+  `_AFk`, `_SFk`, `_DIR`, `_Pk`, `_FC`, `_FN` and `_FSL` (`Nop/MovD` + `Jmp`), and the counter `_K9`
+  (`Nop`×8 / `MovD` + `Jmp`, 4.6).
 - **The main stream** is the data block `ENTRY`, one line per primitive below. Every HLA label is a
   landing pad `L_x: R__MOVED`; a statement that can fall through into a label first jumps to it
   (`_MOVED L_x`), so the pad always finds `_MOVED` used.
@@ -230,7 +253,63 @@ that no two of them, nor the tables of 4.4, share a cell.
   the return point is a landing pad `R__MOVED`. `ret`: down, load the word into the scratch
   register `_R`, `_MOVED _R__M`. `jmp r`: `_MOVED V_r__M`.
 
-### 4.6 Costs
+### 4.6 Arithmetic
+
+ADR 0002 has the design and its measurements; src/hla/word.hpp has the sequences (`Sequence`: loads
+and accesses on numbered cells) and the table layouts, `tests/hla/arith_word_test.cpp` simulates
+them.
+
+- **Register paths.** A register may have extra entries besides `__O`, each a callee with its own
+  return tree: path `p` is chosen by the flag `_Pp`, which the caller sets with the call. After the
+  value, the register's block tests `_P1`, `_P2`, ... and falls through to the program's path. The
+  routines below access their cells on such paths, so a program's many call sites do not deepen
+  the routines' returns. A `Rot` path (entry `__R`, `U__ROT <register>`) loops: after `Rot` it
+  advances the 9-cycle counter `_K9` (`Nop`×8 / `MovD`) and rotates again until it fires.
+- **Bitwise operations with a register** run a fixed sequence on `r`, `s` and `d` (`and`, `xor`: 11
+  and 10 steps of loads and accesses; `or`: 13), reading `r` and `s` with `A = C1` or restoring
+  them. If `d` is `r` or `s` the result goes to the scratch register `_T` first.
+- **Transforms.** With a constant, `and`/`or`/`xor` copy `r` to `d` and transform `d` in place:
+  per bit keep, clear, fill (2) or flip, by two constants and three accesses (two loads and two
+  accesses if only keep and clear).
+- **Column sums.** `add`, `sub`, `slt`, `sltu` write the digits `x_i + y_i` (`add`) or
+  `x_i + 1 - y_i` (the others, with a carry-in of 1) into the ALU's cell `_AS`, as `sigma(digit)`
+  (`sigma` = 1, 2, 0) and 1 on the other trits: 5 loads and 7 accesses, `r` and `s` only read. With
+  a constant `k` the digit of bit `i` is `x_i + e_i` for `e` = `k`, `-k` (`sub`) or `~k` (the
+  compares): 3 loads, 4 accesses. `slt` compares `r ^ 0x80000000` with `s ^ 0x80000000` unsigned:
+  it flips bit 31 of `r` around the sums (a transform each), or with a constant uses the top digit
+  `1 - x_31 + k_31`.
+- **The ALU routine** `_ALU` (exits: no carry, carry; flags `_SFk`): `_AZ := C1`; per nibble `k`
+  (bits `4k .. 4k + 3`): the mask builds the nibble's index in `_AJk` from `_AS` (one load and
+  access, one access to `_AS` that swaps its digits 1 ↔ 2, so odd nibbles see them swapped, one
+  more access), tests the carry flag `_FC`, finishes the index with the carry's constant and moves
+  `D` through `_AJk` into the **nibble table**. The entry at `nibble_index(k, cin, digits) + 1` is
+  `_GO _as<k>_<t>`, `t` the digits' total `d_0 + 2 d_1 + 4 d_2 + 8 d_3 + cin`; that stream loads
+  the merge constant `word((t & 15) << 4k)`, sets `_FC` if `t >= 16` and continues at `_AC<k>`,
+  which merges it into `_AZ` (`crz` with `_AZ`'s 1s: a set bit becomes 2, the rest stays 1) and
+  resets `_AJk`. After the last nibble `_AS := C1` and the routine exits by `_FC`.
+- `add`, `sub`: the sums, the call (with `_FC` set for `x + ~y + 1`), then `mov d, _AZ` (the first
+  access with `A = C1` turns the 1/2 form into the word). `sltu`, `slt`: the sums, `d` reset, the
+  call with the carry set; the exits load 1 (no carry: `r < s`) or 0. `sub d, r, r`,
+  `slt d, r, r` and `sltu d, r, r` are `mov d, 0`.
+- **Shifts.** `mov _H, r`, then the shift routine (flags `_SFk`), then `mov d, _H`. A constant
+  amount `n` calls the entry `_SR<n>` (right) or `_SL<n>` (left); a register amount builds a switch
+  index from its low byte (4.4) into a switch table of its own, whose 256 entries go to `_SV<b & 31>`,
+  which tests `_FSL` (set by `sll`) and goes on to the entry. An entry rotates `_H` right `n` times
+  (`38 - n` for a left shift): calls of 9 rotations through the `Rot` path, the first one shortened
+  by advancing `_K9` first; then `_SH_TAIL` clears the trits that are not bits of the result (a
+  two-access transform whose first constant the entry loaded). `sra` first tests the sign of `_H`;
+  a negative word is flipped (`~`), sets `_FN`, and the tail flips it back after the shift.
+- **Sign tables** (one per byte lane in use): lane indices with the trit 36 = 0 and the tag of the
+  lane's zero table (word.hpp `sign_index`), 256 entries `_GO _SGN<l>` (top bit set) or
+  `_GO _SGP<l>`. `sextb`, `sexth`: `mov d, r`, the sign test of lane 0 or 1, then a transform that
+  keeps the low 8 or 16 bits and fills or clears the others.
+
+Program text (and startup steps), on top of the program's own: the ALU (routine, 1296 table
+entries, 256 streams) about 1.2 M characters, paid once by a program that uses `add`, `sub`, `slt`
+or `sltu`; a constant shift amount about 30 K per amount in use; computed shift amounts 0.9 M (the
+switch and all 63 entries); a sign table 130 K.
+
+### 4.7 Costs
 
 VM steps per statement, measured with `--trace` in a small program (few call sites; every return
 tree level adds about 2.5 steps):
@@ -255,6 +334,20 @@ tree level adds about 2.5 steps):
 | `store [x], s` | 260 |
 | `store [k], k` | 185 |
 | `switch` | 145 |
+| `add d, r, s` / `add d, r, k` | 1810 / 1750 |
+| `sub d, r, s` | 1800 |
+| `sltu d, r, s` / `slt d, r, s` / `slt d, r, k` | 1775 / 1930 / 1715 |
+| `and`, `xor d, r, s` / `or d, r, s` | 117 / 165 |
+| `and`, `or`, `xor d, r, k` | 135 to 165 |
+| `srl d, r, n` (`n` = 1, 8, 31) | 295, 365, 680 |
+| `sll d, r, n` (`n` = 1, 8, 31) | 775, 670, 355 |
+| `sra d, r, n` (`n` = 1, 31; negative `r`) | 615, 1000 |
+| `sll` / `srl` / `sra d, r, s` | 610 / 815 / 1165 (`s` = 0x7B) |
+| `sextb`, `sexth` | 300 |
+
+These are the benchmark baseline of the arithmetic library (M2). `tests/hla/arith_test.cpp`
+reports every statement form's cost in its harness program, where every register has about a
+hundred call sites; there they cost about 10% more (about 2020 for `add`).
 
 Program size (release build): `hello.mhl` 2.5 KB `.malm`; `cat.mhl` 36 KB `.malm` (1.2 M
 characters of Malbolge text, 1.2 M startup steps); a program using `bz`, the byte table and the input
@@ -271,6 +364,7 @@ Errors have the assembler's form, `file:line:col: error: message` plus notes (do
 - RAM regions of 0 words or more than 2^20 words in total, more initial values than words, a
   constant address that is not a word of a region, a stack size outside 1..65536 or declared twice,
   a switch with more than 256 labels;
+- a label as an operand of arithmetic, a constant shift amount outside 0..31;
 - errors the assembler finds in the generated program, at the HLA statement that produced it.
 
 ## 6. Examples
@@ -287,3 +381,13 @@ EOF), that `exit42.mhl` exits with 42 and that `rev.mhl` reverses its input;
 that dispatches with `switch` and calls handlers through a jump table in RAM, checked against a
 C++ model. `tests/hla/ram_test.cpp` runs random load/store sequences against a C++ model of the
 memory.
+
+`tests/hla/arith_test.cpp` checks the arithmetic of issue #21 against C++ reference functions. Its
+harness program has every statement form (each operation with registers, with `d` the same as an
+operand, with `r = s`, with constants) as a case of a `switch`; the test's I/O hook pokes the
+operands into the registers before each case and reads the results back after it. The fast case
+runs every form on edge values and random words (a debug build: the core forms) and reports the
+steps per form; the slow cases (label `slow`) run every operation exhaustively on 8-bit operands
+(sign-extended, so every byte lane sees both signs; shift amounts all 256 bytes) and on 10 000
+random 32-bit cases, on several threads. `tests/hla/arith_word_test.cpp` checks the sequences and
+tables by simulation, the whole ALU exhaustively on 8-bit operands.

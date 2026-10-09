@@ -222,6 +222,16 @@ TEST_CASE("records, frames, switch entries and code pads never share a cell") {
         claim(lane_index(0, 0, byte), 1, 26, 1);
         for (unsigned lane = 0; lane < kLanes; ++lane) {
             claim(lane_index(lane, 8 | (lane & 1) << 1 | (lane >> 1) << 2, byte), 1, 2, 1);
+            claim(sign_index(lane, byte), 1, 2, 1); // the sign tables (#21)
+        }
+    }
+    // The nibble tables of the add (#21): two cells per entry.
+    for (unsigned k = 0; k < kNibbles; ++k) {
+        for (unsigned cin = 0; cin < 2; ++cin) {
+            for (unsigned code = 0; code < 81; ++code) {
+                claim(nibble_index(k, cin, {code % 3, code / 3 % 3, code / 9 % 3, code / 27}), 1, 2,
+                      1);
+            }
         }
     }
     // The input table: its entries and their Y words, within 256 cells after the last entry.

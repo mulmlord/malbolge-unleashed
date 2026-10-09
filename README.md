@@ -65,7 +65,9 @@ labels from `malm asm --map` or recovered from the control flow; see [docs/asm.m
 [docs/cli.md](docs/cli.md) and the GitHub milestones.
 M2 (HLA) has started: `malm hla` compiles `.mhl` programs with 32-bit registers, moves, jumps,
 branches on zero, byte I/O, `halt <code>`, calls and returns with a stack, `switch` jump tables,
-computed jumps and RAM with `load`/`store` through address registers ([docs/hla.md](docs/hla.md));
+computed jumps, RAM with `load`/`store` through address registers, and the RV32I arithmetic (`add`,
+`sub`, `slt`/`sltu`, `and`/`or`/`xor`, shifts, sign extension; design and step counts in
+[docs/adr/0002-hla-arithmetic.md](docs/adr/0002-hla-arithmetic.md)) ([docs/hla.md](docs/hla.md));
 `malm hla examples/hla/cat.mhl -o cat.malm`, then `echo hi | malm run cat.malm`.
 
 ## License

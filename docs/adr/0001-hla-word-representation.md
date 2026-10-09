@@ -2,6 +2,7 @@
 
 Date: 2026-10-08
 Status: accepted (spike, issue #18). Input for the HLA tickets #19–#22 and rv-emu (#25).
+Decision 3 is amended by [ADR 0002](0002-hla-arithmetic.md): the add uses nibble tables.
 Prototypes: [`prototypes/word32/`](../../prototypes/word32/README.md) (throwaway).
 
 ## Context

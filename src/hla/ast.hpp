@@ -41,7 +41,20 @@ enum class Op {
     Pop,
     Switch,
     Load,
-    Store
+    Store,
+    // Arithmetic (#21): `op d, x, y` with y a register or a value; sextb/sexth `op d, x`.
+    Add,
+    Sub,
+    And,
+    Or,
+    Xor,
+    Slt,
+    Sltu,
+    Sll,
+    Srl,
+    Sra,
+    Sextb,
+    Sexth
 };
 
 // One statement, or a label definition (Op::Label, `name` set, no operands).
@@ -80,6 +93,8 @@ struct Program {
     std::optional<StackDecl> stack;
     std::vector<Stmt> stmts;
 };
+
+inline bool is_shift(Op op) { return op == Op::Sll || op == Op::Srl || op == Op::Sra; }
 
 // The 32-bit word an immediate stands for (two's complement for negative values).
 inline std::uint32_t imm_word(std::int64_t imm) { return static_cast<std::uint32_t>(imm); }
