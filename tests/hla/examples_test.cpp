@@ -1,5 +1,6 @@
-// The HLA examples of examples/hla (issue #19): hello and cat produce exactly the output of their
-// assembly counterparts in examples/asm, and `halt 42` exits with 42 through EXIT_A.
+// The HLA examples of examples/hla (issues #19, #20): hello and cat produce exactly the output of
+// their assembly counterparts in examples/asm, `halt 42` exits with 42 through EXIT_A, and rev
+// writes its input backwards.
 
 #include <doctest/doctest.h>
 
@@ -78,4 +79,21 @@ TEST_CASE("cat.mhl copies like halting_cat.mua, and like cat.mua up to EOF") {
         REQUIRE(io.out.size() > in.size());
         CHECK(io.out.substr(0, in.size()) == r.out);
     }
+}
+
+TEST_CASE("rev.mhl writes its input backwards") {
+    const assembler::Assembly rev = hla_example("rev.mhl");
+    std::string all;
+    for (int i = 0; i < 100; ++i) {
+        all += static_cast<char>(i * 37 + 11);
+    }
+    for (const std::string& in : {std::string(), std::string("a"), std::string("Hello, rev!\n"),
+                                  std::string("\0\xff\x01", 3), all}) {
+        CAPTURE(in);
+        const Ran r = run(rev, in);
+        CHECK(r.out == std::string(in.rbegin(), in.rend()));
+        CHECK(r.status == 0);
+    }
+    // 101 bytes overflow the stack.
+    CHECK(run(rev, all + "x").status == 255);
 }

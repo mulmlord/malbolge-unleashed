@@ -47,7 +47,7 @@ Binaries land in `build/<preset>/src/driver/malm`. CMake options: `MALM_WERROR`,
 | `rv/emu` | RV32IM emulator written in HLA |
 | `rv/runtime` | RISC-V runtime (crt0, syscalls, libc) |
 | `examples/asm` | assembly examples: hello world, cat, halting cat, adder, digital root |
-| `examples/hla` | high-level assembly examples: hello world, cat, exit status |
+| `examples/hla` | high-level assembly examples: hello world, cat, exit status, reverse (stack) |
 | `tests/` | doctest suites (labels `fast`, `slow`) |
 | `docs/` | spec, CLI reference, research and design decisions (`docs/adr`) |
 | `prototypes/` | throwaway spike code behind the ADRs; not built or tested |
@@ -64,8 +64,9 @@ turns an assembled program back into a `.mua` that re-assembles to the same prog
 labels from `malm asm --map` or recovered from the control flow; see [docs/asm.md](docs/asm.md),
 [docs/cli.md](docs/cli.md) and the GitHub milestones.
 M2 (HLA) has started: `malm hla` compiles `.mhl` programs with 32-bit registers, moves, jumps,
-branches on zero, byte I/O and `halt <code>` ([docs/hla.md](docs/hla.md)); `malm hla
-examples/hla/cat.mhl -o cat.malm`, then `echo hi | malm run cat.malm`.
+branches on zero, byte I/O, `halt <code>`, calls and returns with a stack, `switch` jump tables,
+computed jumps and RAM with `load`/`store` through address registers ([docs/hla.md](docs/hla.md));
+`malm hla examples/hla/cat.mhl -o cat.malm`, then `echo hi | malm run cat.malm`.
 
 ## License
 

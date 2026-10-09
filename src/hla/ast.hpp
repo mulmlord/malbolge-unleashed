@@ -4,6 +4,7 @@
 // diagnostics are the assembler's, so diagnostics of both languages look the same.
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -19,12 +20,29 @@ struct Operand {
 
     Kind kind = Kind::Imm;
     SourceLoc loc;
-    std::string name;     // Name: a register or a label
+    std::string name;     // Name: a register, a label or a RAM region
     std::int64_t imm = 0; // Imm: as written, -2^31 .. 2^32 - 1
     std::string text;     // String: the bytes
+    bool mem = false;     // written in brackets: a RAM address (Name or Imm)
 };
 
-enum class Op { Label, Mov, Jmp, Bz, Bnz, In, Out, Halt };
+enum class Op {
+    Label,
+    Mov,
+    Jmp,
+    Bz,
+    Bnz,
+    In,
+    Out,
+    Halt,
+    Call,
+    Ret,
+    Push,
+    Pop,
+    Switch,
+    Load,
+    Store
+};
 
 // One statement, or a label definition (Op::Label, `name` set, no operands).
 struct Stmt {
@@ -36,13 +54,30 @@ struct Stmt {
 
 struct RegDecl {
     std::string name;
-    std::uint32_t init = 0;
+    Operand init; // a value (docs/hla.md 3); Imm 0 if not written
+    SourceLoc loc;
+};
+
+// `ram name[size] = v, ...`: `size` words from the byte address `base`, the first ones set to
+// `init`, the others 0.
+struct RamDecl {
+    std::string name;
+    std::uint32_t size = 0;
+    std::uint32_t base = 0;
+    std::vector<Operand> init;
+    SourceLoc loc;
+};
+
+struct StackDecl {
+    std::uint32_t size = 0;
     SourceLoc loc;
 };
 
 struct Program {
     std::vector<SourceFile> files; // one file: HLA has no includes
     std::vector<RegDecl> regs;
+    std::vector<RamDecl> rams;
+    std::optional<StackDecl> stack;
     std::vector<Stmt> stmts;
 };
 

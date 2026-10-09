@@ -160,8 +160,8 @@ TEST_CASE("diagnostics") {
     const std::vector<std::pair<std::string, std::string>> cases = {
         {"foo a\n", "t.mhl:1:1: error: unknown instruction 'foo'\n"},
         {"mov a, 1\n", "t.mhl:1:5: error: unknown register 'a'\n"},
-        {"reg a\njmp a\n", "t.mhl:2:5: error: 'a' is a register, not a label\n"
-                           "t.mhl:1:5: note: defined here\n"},
+        {"reg a\nbz a, a\n", "t.mhl:2:7: error: 'a' is a register, not a label\n"
+                             "t.mhl:1:5: note: defined here\n"},
         {"l:\nout l\n", "t.mhl:2:5: error: 'l' is a label, not a register\n"
                         "t.mhl:1:1: note: defined here\n"},
         {"reg a\na: halt\n", "t.mhl:2:1: error: 'a' is already defined\n"
@@ -171,10 +171,14 @@ TEST_CASE("diagnostics") {
         {"reg a\nbz a, nowhere\n", "t.mhl:2:7: error: unknown label 'nowhere'\n"},
         {"out 300\n", "t.mhl:1:5: error: a byte must be 0..255\n"},
         {"halt -1\n", "t.mhl:1:6: error: a byte must be 0..255\n"},
-        {"mov 1, 2\n", "t.mhl:1:1: error: expected 'mov <reg>, <reg or number>'\n"},
-        {"jmp\n", "t.mhl:1:1: error: expected 'jmp <label>'\n"},
+        {"mov 1, 2\n", "t.mhl:1:1: error: expected 'mov <reg>, <reg or value>'\n"},
+        {"jmp\n", "t.mhl:1:1: error: expected 'jmp <label>' or 'jmp <reg>'\n"},
         {"in\n", "t.mhl:1:1: error: expected 'in <reg>' or 'in <reg>, <label>'\n"},
-        {"reg x = y\n", "t.mhl:1:9: error: a register's initial value must be a number\n"},
+        {"reg x = y\n", "t.mhl:1:9: error: unknown name 'y'\n"},
+        {"reg x = \"s\"\n", "t.mhl:1:9: error: a register's initial value must be a number, a "
+                            "label or a RAM region\n"},
+        {"reg x\nreg y = x\n", "t.mhl:2:9: error: 'x' is a register, not a label or a RAM region\n"
+                               "t.mhl:1:5: note: defined here\n"},
         {"reg\n", "t.mhl:1:4: error: expected a register name, found end of line\n"},
         {"out \"\"\n", "t.mhl:1:5: error: empty string\n"},
         {"out \"ab\n", "t.mhl:1:5: error: unterminated string\n"},
@@ -187,7 +191,57 @@ TEST_CASE("diagnostics") {
         {"halt @\n", "t.mhl:1:6: error: unexpected character '@'\n"},
         {"halt 1 2\n", "t.mhl:1:8: error: expected ',' or end of line, found number\n"},
         {"halt\nout 999\njmp\n", "t.mhl:2:5: error: a byte must be 0..255\n"
-                                 "t.mhl:3:1: error: expected 'jmp <label>'\n"},
+                                 "t.mhl:3:1: error: expected 'jmp <label>' or 'jmp <reg>'\n"},
+        // Calls, the stack, switch and RAM (issue #20).
+        {"call\n", "t.mhl:1:1: error: expected 'call <label>' or 'call <reg>'\n"},
+        {"call nowhere\n", "t.mhl:1:6: error: unknown label 'nowhere'\n"},
+        {"ret 1\n", "t.mhl:1:1: error: expected 'ret'\n"},
+        {"push \"a\"\n", "t.mhl:1:1: error: expected 'push <reg or value>'\n"},
+        {"pop 1\n", "t.mhl:1:1: error: expected 'pop <reg>'\n"},
+        {"reg a\nswitch a\n", "t.mhl:2:1: error: expected 'switch <reg>, <label>, ...'\n"},
+        {"reg a\nswitch a, 3\n", "t.mhl:2:1: error: expected 'switch <reg>, <label>, ...'\n"},
+        {"reg a\nswitch a, a\n", "t.mhl:2:11: error: 'a' is a register, not a label\n"
+                                 "t.mhl:1:5: note: defined here\n"},
+        {"reg a\nl: switch a" +
+             [] {
+                 std::string s;
+                 for (int i = 0; i < 257; ++i) {
+                     s += ", l";
+                 }
+                 return s;
+             }() +
+             "\n",
+         "t.mhl:2:782: error: a switch has at most 256 labels\n"},
+        {"reg a\nload a, 4\n", "t.mhl:2:1: error: expected 'load <reg>, [<address>]'\n"},
+        {"reg a\nload [a], a\n", "t.mhl:2:1: error: expected 'load <reg>, [<address>]'\n"},
+        {"reg a\nstore a, a\n", "t.mhl:2:1: error: expected 'store [<address>], <reg or value>'\n"},
+        {"reg a\nload a, [b\n", "t.mhl:2:11: error: expected ']', found end of line\n"},
+        {"reg a\nload a, [[a]]\n",
+         "t.mhl:2:10: error: expected a register, a RAM region or an address, found '['\n"},
+        {"ram m[2]\nreg a\nload a, [8]\n",
+         "t.mhl:3:9: error: the address 8 is not a word of a RAM region (a multiple of 4 "
+         "inside a 'ram' declaration)\n"},
+        {"ram m[2]\nreg a\nstore [2], 1\n",
+         "t.mhl:3:7: error: the address 2 is not a word of a RAM region (a multiple of 4 "
+         "inside a 'ram' declaration)\n"},
+        {"reg a\nl: load a, [l]\n", "t.mhl:2:12: error: 'l' is a label, not a register or a RAM "
+                                    "region\nt.mhl:2:1: note: defined here\n"},
+        {"ram m[2]\nmov m, 1\n", "t.mhl:2:5: error: 'm' is a RAM region, not a register\n"
+                                 "t.mhl:1:5: note: defined here\n"},
+        {"ram m\n", "t.mhl:1:6: error: expected '[', found end of line\n"},
+        {"ram m[0]\n", "t.mhl:1:7: error: RAM regions hold 1 to 1048576 words in total\n"},
+        {"ram m[1048576]\nram n[1]\n",
+         "t.mhl:2:7: error: RAM regions hold 1 to 1048576 words in total\n"},
+        {"ram m[1] = 1, 2\n", "t.mhl:1:15: error: more initial values than words in 'm'\n"},
+        {"ram m[1] = [1]\n", "t.mhl:1:12: error: a RAM word's initial value must be a number, "
+                             "a label or a RAM region\n"},
+        {"ram m[2]\nram m[1]\n", "t.mhl:2:5: error: 'm' is already defined\n"
+                                 "t.mhl:1:5: note: first defined here\n"},
+        {"ram ret[1]\n", "t.mhl:1:5: error: 'ret' is reserved and cannot be a RAM region\n"},
+        {"stack 0\n", "t.mhl:1:7: error: the stack holds 1 to 65536 words\n"},
+        {"stack 65537\n", "t.mhl:1:7: error: the stack holds 1 to 65536 words\n"},
+        {"stack 4\nstack 5\n", "t.mhl:2:1: error: the stack size is already declared\n"
+                               "t.mhl:1:1: note: declared here\n"},
         {"a: b: 7\n", "t.mhl:1:7: error: expected a statement, found number\n"},
         {std::string(65, 'x') + ":\n", "t.mhl:1:1: error: identifier longer than 64 characters\n"},
     };
@@ -195,6 +249,10 @@ TEST_CASE("diagnostics") {
         CAPTURE(src);
         CHECK(diagnostics(src) == want);
     }
+    CHECK(diagnostics("ram m[4] = 1, x, m\nstack 1\nreg e = m, f = x\n"
+                      "        push x\n        pop e\n        call e\n        call x\n"
+                      "        switch e, x, x\n        load e, [m]\n        load e, [12]\n"
+                      "        store [e], m\n        jmp e\n        ret\nx:      halt\n") == "");
     CHECK(diagnostics("reg a = -2147483648, b = 0xFFFFFFFF, c = 0b101, d = '\\x41'\n"
                       "x: y: mov a, b ; comment\n"
                       "# comment\n"
