@@ -1,0 +1,2 @@
+; Exits with status 42: `halt` puts its code into A, and `malm hla` sets EXIT_A.
+        halt 42

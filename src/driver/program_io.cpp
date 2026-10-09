@@ -26,6 +26,42 @@ bool same_file(std::string_view a, std::string_view b) {
                                                  std::filesystem::path(std::string(b)), ec);
 }
 
+bool write_output(std::string_view path, const std::vector<std::uint8_t>& bytes, std::ostream& out,
+                  std::ostream& err) {
+    if (path == "-") {
+        out.write(reinterpret_cast<const char*>(bytes.data()),
+                  static_cast<std::streamsize>(bytes.size()));
+        out.flush();
+        if (!out) {
+            err << "malm: E_IO: cannot write to stdout\n";
+            return false;
+        }
+        return true;
+    }
+    std::ofstream file{std::string(path), std::ios::binary | std::ios::trunc};
+    if (file) {
+        file.write(reinterpret_cast<const char*>(bytes.data()),
+                   static_cast<std::streamsize>(bytes.size()));
+        file.close();
+    }
+    if (!file) {
+        err << "malm: cannot write '" << path << "': " << std::strerror(errno) << '\n';
+        return false;
+    }
+    return true;
+}
+
+bool is_pure(const std::vector<std::uint8_t>& text, const std::vector<std::uint8_t>& malm,
+             bool exit_a) {
+    const auto loaded = core::load_text(text, core::kUnleashedMaxCells);
+    if (!loaded || loaded.value() != text) {
+        return false;
+    }
+    const auto read = container::read_malm(malm, container::Limits{core::kUnleashedMaxCells});
+    return read && read->cells == text && read->mode == container::Mode::Unleashed &&
+           read->exit_a == exit_a;
+}
+
 bool read_file(std::string_view path, std::vector<std::uint8_t>& bytes, std::ostream& err) {
     const std::filesystem::path fs_path{std::string(path)};
     std::error_code ec;

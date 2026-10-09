@@ -1,0 +1,7 @@
+; Cat: copies stdin to stdout byte for byte and halts at end of input, like
+; examples/asm/halting_cat.mua.
+        reg c
+loop:   in c, done          ; c := the next byte; at EOF go to done
+        out c
+        jmp loop
+done:   halt

@@ -201,7 +201,7 @@ struct Failure : std::runtime_error {
 class Generator {
   public:
     Generator(const Layout& l, Raw base, unsigned n0)
-        : l_(l), base_(base), width_(l.width), n_(n0), d_(nat(1)) {}
+        : l_(l), base_(base), width_(l.width), n0_(n0), n_(n0), d_(nat(1)) {}
 
     Startup run() {
         if (n_ > width_) {
@@ -227,6 +227,7 @@ class Generator {
     const Layout& l_;
     Raw base_;
     unsigned width_; // the program width N
+    unsigned n0_;    // the initial n the code assumes
     unsigned n_;     // the current n
     Value a_;
     Value d_;
@@ -373,12 +374,13 @@ class Generator {
         expect(kC0, Value(), "C0");
     }
 
-    // Rot at the first fill cell from D whose trit 0 differs from its head (rotr then has width n),
-    // then back to the work area.
+    // Rot at the first fill cell from D that holds y (head 0, trit 0 is 1, so rotr has width n),
+    // then back to the work area. Not ~y: swap01 of its rotation would have head 0 and could land
+    // in the program text, which the model does not know; from y the pointer has head 1.
     void rotate_fill() {
         for (int tries = 0; tries < 16; ++tries) {
             const auto v = read(d_);
-            if (v && v->trit(0) != v->head() && v->fits_width(n_)) {
+            if (v && v->head() == 0 && v->trit(0) != 0 && v->fits_width(n_)) {
                 emit(Op::Rot);
                 escape();
                 return;
@@ -685,10 +687,13 @@ class Generator {
         for (std::size_t i = 0; i < code_.size(); ++i) {
             s.text.push_back(core::denormalize(kCodeStart + i, code_[i]));
         }
-        // The two last cells: some 0/1-trit character x, then y, at an odd length.
+        // The two last cells: some 0/1-trit character x, then y, at an odd length. A text too
+        // short for the initial n the code assumes is padded up to it: otherwise a code that
+        // forces one step less could give a text that needs one step more, and back.
         static constexpr std::uint8_t kZeroOne[] = {36, 37, 39,  40,  81,  82,  84,  85,  90,  91,
                                                     93, 94, 108, 109, 111, 112, 117, 118, 120, 121};
-        for (Raw len = s.text.size() + 2;; ++len) {
+        const Raw min_len = n0_ > 10 ? core::pow3[n0_ - 2] + 1 : 0;
+        for (Raw len = std::max<Raw>(s.text.size() + 2, min_len);; ++len) {
             if (len % 2 == 0 || !loadable(len - 1, kFillY)) {
                 continue;
             }

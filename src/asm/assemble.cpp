@@ -14,12 +14,18 @@ std::optional<Assembly> assemble(const Program& program, Diagnostics& diags) {
             return std::nullopt;
         }
         // The initial n the code assumes must be the one its text gives.
+        // The text is padded up to the n0 it was generated for, so n0 only grows here.
         unsigned n0 = initial_width(options.base);
         std::optional<Startup> startup;
         std::string error;
-        for (int tries = 0; tries < 8; ++tries) {
+        for (int tries = 0;; ++tries) {
             startup = generate_startup(*layout, options.base, n0, error);
             if (!startup || initial_width(startup->text.size()) == n0) {
+                break;
+            }
+            if (tries == 8) {
+                startup.reset();
+                error = "the initial n of the text does not converge";
                 break;
             }
             n0 = initial_width(startup->text.size());

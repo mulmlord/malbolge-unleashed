@@ -7,7 +7,8 @@ CLI binary, `malm`. See the [design spec](docs/superpowers/specs/2026-10-01-malb
 and the [Malbolge research notes](docs/research/malbolge-research.md).
 The normative language reference is [docs/spec.md](docs/spec.md).
 The assembly language (`.mua`) is specified in [docs/asm.md](docs/asm.md).
-The command line (`run`, `asm`, `export`, `pack`, `--trace`, `--stats`) is documented in [docs/cli.md](docs/cli.md).
+The high-level assembly language (`.mhl`) is specified in [docs/hla.md](docs/hla.md).
+The command line (`run`, `asm`, `hla`, `export`, `pack`, `--trace`, `--stats`) is documented in [docs/cli.md](docs/cli.md).
 
 ## Prerequisites
 
@@ -46,6 +47,7 @@ Binaries land in `build/<preset>/src/driver/malm`. CMake options: `MALM_WERROR`,
 | `rv/emu` | RV32IM emulator written in HLA |
 | `rv/runtime` | RISC-V runtime (crt0, syscalls, libc) |
 | `examples/asm` | assembly examples: hello world, cat, halting cat, adder, digital root |
+| `examples/hla` | high-level assembly examples: hello world, cat, exit status |
 | `tests/` | doctest suites (labels `fast`, `slow`) |
 | `docs/` | spec, CLI reference, research and design decisions (`docs/adr`) |
 | `prototypes/` | throwaway spike code behind the ADRs; not built or tested |
@@ -61,6 +63,9 @@ adder.malm`) run in unleashed mode, which is the M1 exit criterion. The disassem
 turns an assembled program back into a `.mua` that re-assembles to the same program, with
 labels from `malm asm --map` or recovered from the control flow; see [docs/asm.md](docs/asm.md),
 [docs/cli.md](docs/cli.md) and the GitHub milestones.
+M2 (HLA) has started: `malm hla` compiles `.mhl` programs with 32-bit registers, moves, jumps,
+branches on zero, byte I/O and `halt <code>` ([docs/hla.md](docs/hla.md)); `malm hla
+examples/hla/cat.mhl -o cat.malm`, then `echo hi | malm run cat.malm`.
 
 ## License
 
