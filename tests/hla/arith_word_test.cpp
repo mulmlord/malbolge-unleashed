@@ -417,3 +417,149 @@ TEST_CASE("sign tables: the lane index sequence with sign_mask builds sign_index
         }
     }
 }
+
+namespace {
+
+// The multiply and divide routines of src/hla/lower.cpp on cells (issue #22): bit tests through the
+// bit index, the transforms and rotations as the routines run them, the ALU as above.
+
+// Bit i of a cell, through the bit index sequence; the cell must be kept.
+bool test_bit(Value c, unsigned i) {
+    const Value c0 = c;
+    Value ix = kC1;
+    Value a = c = crz(kC1, c);
+    a = ix = crz(a, ix);
+    a = bit_mask(i);
+    a = ix = crz(a, ix);
+    a = ix = crz(a, ix);
+    const bool set = ix == bit_index(i, 1);
+    if (c != c0 || (!set && ix != bit_index(i, 0))) {
+        CHECK(c == c0);
+        REQUIRE((ix == bit_index(i, 0) || set));
+    }
+    return set;
+}
+
+// Keep every trit but the ones given.
+TritMap trit_map(std::initializer_list<std::pair<unsigned, Trit>> changes) {
+    TritMap m;
+    m.fill(Trit::Keep);
+    for (const auto& [t, op] : changes) {
+        m[t] = op;
+    }
+    return m;
+}
+
+constexpr unsigned kTop = kBit0 + kWordBits; // the trit above bit 31
+
+// The ALU on the column sums `seq` of the cells a and b (kept); the sum and the carry-out.
+std::pair<std::uint32_t, unsigned> alu_cells(Value& a, Value& b, const Sequence& seq,
+                                             unsigned cin) {
+    const Value a0 = a;
+    const Value b0 = b;
+    Value s = kC1;
+    simulate(seq, {&a, &b, &s});
+    if (a != a0 || b != b0) {
+        CHECK(a == a0);
+        CHECK(b == b0);
+    }
+    return alu().run(s, cin);
+}
+
+std::uint32_t word_of(Value c) {
+    const auto w = word_value(c);
+    REQUIRE(w.has_value());
+    return *w;
+}
+
+// The multiply loop: the product's high and low words.
+std::pair<std::uint32_t, std::uint32_t> mul_cells(std::uint32_t x, std::uint32_t y) {
+    Value mx = word(x);
+    Value my = word(y);
+    Value mp = word(0);
+    for (int pass = 0; pass < 32; ++pass) {
+        if (test_bit(my, 0)) {
+            const auto [sum, carry] = alu_cells(mp, mx, add_sums(), 0);
+            mp = word(sum);
+            if (carry) {
+                simulate(transform(trit_map({{kTop, Trit::Fill}})), {&mp});
+            }
+        }
+        const bool low = test_bit(mp, 0);
+        simulate(transform(trit_map({{kBit0, Trit::Clear}, {kTop, low ? Trit::Fill : Trit::Keep}})),
+                 {&my});
+        if (low) {
+            simulate(transform(trit_map({{kBit0, Trit::Clear}})), {&mp});
+        }
+        mp = core::rotr(mp, kWidth);
+        my = core::rotr(my, kWidth);
+    }
+    CHECK(mx == word(x));
+    return {word_of(mp), word_of(my)};
+}
+
+// The divide loop: the quotient and the remainder.
+std::pair<std::uint32_t, std::uint32_t> div_cells(std::uint32_t x, std::uint32_t y) {
+    const unsigned b31 = bit_trit(kWordBits - 1);
+    Value dx = word(x);
+    Value dy = word(y);
+    Value dr = word(0);
+    for (int pass = 0; pass < 32; ++pass) {
+        const bool over = test_bit(dr, kWordBits - 1);
+        if (over) {
+            simulate(transform(trit_map({{b31, Trit::Clear}})), {&dr});
+        }
+        if (test_bit(dx, kWordBits - 1)) {
+            simulate(transform(trit_map({{kBit0 - 1, Trit::Fill}})), {&dr});
+            simulate(transform(trit_map({{b31, Trit::Clear}})), {&dx});
+        }
+        for (unsigned r = 0; r < kWidth - 1; ++r) {
+            dr = core::rotr(dr, kWidth);
+            dx = core::rotr(dx, kWidth);
+        }
+        const auto [diff, carry] = alu_cells(dr, dy, sub_sums(), 1);
+        if (over || carry) {
+            dr = word(diff);
+            simulate(transform(trit_map({{kBit0, Trit::Fill}})), {&dx});
+        }
+    }
+    CHECK(dy == word(y));
+    return {word_of(dx), word_of(dr)};
+}
+
+} // namespace
+
+TEST_CASE("the multiply and divide loops on cells: unsigned products, quotients, remainders") {
+    std::mt19937 rng(22);
+    std::vector<std::pair<std::uint32_t, std::uint32_t>> cases = {
+        {0, 0},
+        {1, 0},
+        {0xFFFFFFFF, 0},
+        {0, 0xFFFFFFFF},
+        {0xFFFFFFFF, 0xFFFFFFFF},
+        {0x80000000, 0xFFFFFFFF},
+        {0x80000000, 1},
+        {0x80000000, 2},
+        {7, 3},
+        {0xFFFFFFFE, 0xFFFFFFFF},
+        {0x12345678, 0x9ABCDEF0},
+        {1000, 7},
+    };
+    for (int i = 0; i < 300; ++i) {
+        const auto x = static_cast<std::uint32_t>(rng());
+        // Small divisors too: they make long quotients.
+        const auto y = static_cast<std::uint32_t>(rng()) >> (rng() % 32);
+        cases.emplace_back(x, y);
+    }
+    for (const auto& [x, y] : cases) {
+        CAPTURE(x);
+        CAPTURE(y);
+        const std::uint64_t p = std::uint64_t{x} * y;
+        const auto [hi, lo] = mul_cells(x, y);
+        CHECK(hi == static_cast<std::uint32_t>(p >> 32));
+        CHECK(lo == static_cast<std::uint32_t>(p));
+        const auto [q, r] = div_cells(x, y);
+        CHECK(q == (y == 0 ? 0xFFFFFFFF : x / y));
+        CHECK(r == (y == 0 ? x : x % y));
+    }
+}

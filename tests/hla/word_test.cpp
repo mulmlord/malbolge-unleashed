@@ -128,6 +128,35 @@ TEST_CASE("lane indices: the tables of the lowering do not overlap, in the head-
     }
 }
 
+TEST_CASE("bit tables: the index sequence with bit_mask reads one bit of a cell with stray trits") {
+    std::mt19937_64 rng(22);
+    for (int n = 0; n < 2000; ++n) {
+        // Any 0s and 2s in the trits 0..36 (a word in the middle of a shift), the trit 37 and
+        // the head 0.
+        std::vector<unsigned> low(kWidth);
+        for (unsigned t = 0; t + 1 < kWidth; ++t) {
+            low[t] = rng() % 2 ? 2 : 0;
+        }
+        const Value x0 = make_value(low, 0);
+        const unsigned i = static_cast<unsigned>(rng() % kWordBits);
+        Value x = x0;
+        Value ix = random_value(rng);
+        Value a = kC1;
+        a = ix = crz(a, ix);
+        a = ix = crz(a, ix);
+        a = x = crz(a, x);
+        a = ix = crz(a, ix);
+        a = bit_mask(i);
+        a = ix = crz(a, ix);
+        a = ix = crz(a, ix);
+        CHECK(x == x0);
+        CHECK(ix == bit_index(i, low[bit_trit(i)] / 2));
+        CHECK(ix.head() == 0);
+        CHECK(ix.fits_width(kWidth - 1));
+        CHECK(ix.trit(36) == 1); // code addresses have 2 there
+    }
+}
+
 TEST_CASE("the input table: bytes on 729 consecutive head-1 cells, EOF in head 0") {
     std::set<std::uint64_t> seen;
     const std::uint64_t base = in_index(0).raw() / 729 * 729;
@@ -243,4 +272,10 @@ TEST_CASE("records, frames, switch entries and code pads never share a cell") {
     }
     claim(Value::from_raw(lo), 1, hi - lo + 1 + 256, 1);
     claim(in_index(-1), 1, 6, 0);
+    // The bit tables (#22), in head 0: an entry per bit, one for every set bit; two cells each.
+    for (unsigned i = 0; i < kWordBits; ++i) {
+        claim(bit_index(i, 0), 1, 2, 0);
+    }
+    claim(bit_index(0, 1), 1, 2, 0);
+    CHECK(bit_index(0, 1) == bit_index(kWordBits - 1, 1));
 }

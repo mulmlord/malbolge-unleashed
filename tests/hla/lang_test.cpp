@@ -254,6 +254,14 @@ TEST_CASE("diagnostics") {
                                            "register\nt.mhl:1:5: note: defined here\n"},
         {"reg a\nsextb a, a, a\n", "t.mhl:2:1: error: expected 'sextb <reg>, <reg>'\n"},
         {"reg a\nsexth a, 1\n", "t.mhl:2:1: error: expected 'sexth <reg>, <reg>'\n"},
+        // Multiplication and division (issue #22).
+        {"reg a\nmul a, a\n", "t.mhl:2:1: error: expected 'mul <reg>, <reg>, <reg or value>'\n"},
+        {"reg a\nmulhsu a, 2, a\n",
+         "t.mhl:2:1: error: expected 'mulhsu <reg>, <reg>, <reg or value>'\n"},
+        {"reg a\nl: divu a, a, l\n", "t.mhl:2:15: error: 'l' is a label, not a register or a "
+                                     "RAM region\nt.mhl:2:1: note: defined here\n"},
+        {"reg rem\n", "t.mhl:1:5: error: 'rem' is reserved and cannot be a register\n"},
+        {"div: halt\n", "t.mhl:1:1: error: 'div' is reserved and cannot be a label\n"},
         {"reg add\n", "t.mhl:1:5: error: 'add' is reserved and cannot be a register\n"},
         {"or: halt\n", "t.mhl:1:1: error: 'or' is reserved and cannot be a label\n"},
         {"a: b: 7\n", "t.mhl:1:7: error: expected a statement, found number\n"},
@@ -272,6 +280,10 @@ TEST_CASE("diagnostics") {
                       "        slt a, b, 'c'\n        sltu a, a, a\n        sll a, b, 31\n"
                       "        srl a, b, 0\n        sra a, a, b\n        sextb a, b\n"
                       "        sexth b, b\n") == "");
+    CHECK(diagnostics("ram m[2]\nreg a, b\n        mul a, b, m\n        mulh a, a, -5\n"
+                      "        mulhsu a, b, b\n        mulhu b, a, 0xFFFFFFFF\n"
+                      "        div a, b, 0\n        divu a, a, b\n        rem a, b, 'c'\n"
+                      "        remu b, b, a\n") == "");
     CHECK(diagnostics("reg a = -2147483648, b = 0xFFFFFFFF, c = 0b101, d = '\\x41'\n"
                       "x: y: mov a, b ; comment\n"
                       "# comment\n"

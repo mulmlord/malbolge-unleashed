@@ -35,6 +35,10 @@
 //    trit 36 = 2, which nothing else in head 1 has;
 //  * sign tables: lane indices with the trit 36 = 0 (like records, which have a 2 in the trits
 //    0..3, where these have a tag of 0s and 1s).
+//
+// Multiplication and division (docs/adr/0003-hla-muldiv.md) add bit tables in head 0: the trit of
+// the tested bit is the bit (0 or 1), the trit 37 and the head 0, every other trit 1. That is far
+// above the program text, and code addresses have the trit 36 = 2.
 
 #include <array>
 #include <cstdint>
@@ -181,5 +185,11 @@ TritMap shift_map(bool left, unsigned k);
 // lane index sequence with sign_mask(l) (instead of lane_mask) builds it.
 Value sign_index(unsigned lane, std::uint8_t byte);
 Value sign_mask(unsigned lane);
+
+// Bit tables: the index of bit i (0 or 1) of a cell; the lane index sequence with bit_mask(i)
+// builds it. Only the trit of bit i is read, so the cell's trits 0..36 may hold any 0s and 2s (a
+// word in the middle of a shift); its trit 37 and head are 0. Every set bit has the same index.
+Value bit_index(unsigned i, unsigned bit);
+Value bit_mask(unsigned i);
 
 } // namespace malm::hla
