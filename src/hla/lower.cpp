@@ -33,11 +33,15 @@ const std::string kMoved = "_MOVED";
 const std::string kIn = "_INP";
 const std::string kOut = "_OUTP";
 const std::string kHalt = "_HALT";
-const std::string kMd = "_MD";   // MovD through a dispatch register
-const std::string kGo = "_GO";   // MovD through the next word: a goto out of a table
-const std::string kRa = "_RA";   // RAM access: MovD through a pointer register, then Opr the word
-const std::string kMb = "_MB";   // MovD out of a record to _BACK
-const std::string kDir = "_DIR"; // flag: the stack pointer moves up
+const std::string kMd = "_MD";    // MovD through a dispatch register
+const std::string kGo = "_GO";    // MovD through the next word: a goto out of a table
+const std::string kRa = "_RA";    // RAM access: MovD through a pointer register, then Opr the word
+const std::string kMb = "_MB";    // MovD out of a record to _BACK
+const std::string kDir = "_DIR";  // flag: the stack pointer moves up
+const std::string kCarry = "_FC"; // flag: the ALU's carry
+const std::string kNeg = "_FN";   // flag: sra of a negative word (flip around the shift)
+const std::string kLeft = "_FSL"; // flag: a computed shift goes left
+const std::string kK9 = "_K9";    // counter: every 9th pass ends a rotation loop
 
 // Lane-table tags (word.hpp): bit i is the trit i of the index.
 constexpr unsigned kByteTag = 0;
@@ -138,9 +142,15 @@ struct Reg {
     std::string name; // the value cell's label
     Value init;
     bool dispatch = false; // also a `U_MD` entry for MovD through it
-    int callee = -1;
-    bool ram = false; // also a `U_RA` entry: a pointer register
+    int callee = -1;       // path 0: the accesses of the program
+    bool ram = false;      // also a `U_RA` entry: a pointer register
+    // Paths 1, 2, ...: callees of their own, chosen by the flags _P1, _P2, ... that the caller
+    // sets, so a routine's accesses do not deepen the tree of the program's (docs/hla.md 4.6).
+    std::vector<int> paths;
+    int rot = 0; // the path that is a Rot access, looped until _K9 fires; 0 if none
 };
+
+std::string path_flag(int path) { return "_P" + std::to_string(path); }
 
 // A switch statement's table: the target of every byte.
 struct SwitchTable {
@@ -199,20 +209,32 @@ class Lowerer {
         case Op::Mov: {
             const int dst = reg_of(s.args[0]);
             if (!is_reg(s.args[1])) {
-                reset(main_, dst, s.loc);
-                load(main_, *crz_operand(make_value({}, 1), value_of(s.args[1])), s.loc);
-                access(main_, dst, s.loc);
-            } else if (const int src = reg_of(s.args[1]); src != dst) {
-                // dst := C1; A := src; dst := crz(src, C1) (0 -> 1, 2 -> 2); with A = C1 the 1s
-                // become 0.
-                reset(main_, dst, s.loc);
-                access(main_, src, s.loc);
-                access(main_, dst, s.loc);
-                load(main_, make_value({}, 1), s.loc);
-                access(main_, dst, s.loc);
+                mov_value(main_, dst, value_of(s.args[1]), s.loc);
+            } else {
+                mov_reg(main_, dst, reg_of(s.args[1]), s.loc);
             }
             return true;
         }
+        case Op::Add:
+        case Op::Sub:
+        case Op::Slt:
+        case Op::Sltu:
+            alu_op(s);
+            return true;
+        case Op::And:
+        case Op::Or:
+        case Op::Xor:
+            bitwise(s);
+            return true;
+        case Op::Sll:
+        case Op::Srl:
+        case Op::Sra:
+            shift(s);
+            return true;
+        case Op::Sextb:
+        case Op::Sexth:
+            sext(reg_of(s.args[0]), reg_of(s.args[1]), s.op == Op::Sextb ? 8 : 16, s.loc);
+            return true;
         case Op::Jmp:
             go(s.args[0], s.loc);
             return false;
@@ -505,6 +527,263 @@ class Lowerer {
         main_.line({w.restore(kMoved)});
     }
 
+    // Arithmetic (docs/hla.md 4.6, docs/adr/0002-hla-arithmetic.md).
+
+    // The word of a constant operand: a number or a RAM region's base (labels are rejected).
+    std::uint32_t const_of(const Operand& o) const {
+        return o.kind == Operand::Kind::Imm ? imm_word(o.imm) : ram_base_.at(o.name);
+    }
+
+    // add, sub, sltu, slt: column sums into _AS, then the ALU routine runs the nibbles with the
+    // carry (in: _FC) and leaves the sum in _AZ and the carry-out in its exit.
+    void alu_op(const Stmt& st) {
+        const Words w{st.loc};
+        const int d = reg_of(st.args[0]);
+        const int x = reg_of(st.args[1]);
+        const bool yreg = is_reg(st.args[2]);
+        const int y = yreg ? reg_of(st.args[2]) : -1;
+        if (yreg && y == x && st.op != Op::Add) {
+            mov_value(main_, d, Value{}, st.loc); // x - x, x < x
+            return;
+        }
+        // The carry-in: 1 for x + ~y + 1 (sub of a register, the compares).
+        const bool cin = st.op != Op::Add && (yreg || st.op != Op::Sub);
+        const int sr = sum_reg(st.loc);
+        if (yreg) {
+            Digits g;
+            g.fill(st.op == Op::Add ? Digit::Add : Digit::Sub);
+            if (st.op != Op::Slt) {
+                run(main_, sum_sequence(g), {{x, 0}, {y, 0}, {sr, 0}}, st.loc);
+            } else {
+                // x ^ 0x80000000 and y ^ 0x80000000 compared unsigned: with x's bit 31 flipped
+                // the top digit is (1 - x31) + y31, an Add digit.
+                g[kWordBits - 1] = Digit::Add;
+                const Sequence flip = transform(bit_map(
+                    [](unsigned i) { return i == kWordBits - 1 ? Trit::Flip : Trit::Keep; }));
+                run(main_, flip, {{x, 0}}, st.loc);
+                run(main_, sum_sequence(g), {{x, 0}, {y, 0}, {sr, 0}}, st.loc);
+                run(main_, flip, {{x, 0}}, st.loc);
+            }
+        } else {
+            // x + k; x - k = x + -k; sltu: x + ~k + 1; slt: the same with the top digit of
+            // (x ^ 0x80000000) + ~(k ^ 0x80000000), that is (1 - x31) + k31.
+            const std::uint32_t k = const_of(st.args[2]);
+            const std::uint32_t e = st.op == Op::Add ? k : st.op == Op::Sub ? 0 - k : ~k;
+            Digits g;
+            for (unsigned i = 0; i < kWordBits; ++i) {
+                g[i] = (e >> i) & 1 ? Digit::XPlus1 : Digit::X;
+            }
+            if (st.op == Op::Slt) {
+                g[kWordBits - 1] = (k >> 31) & 1 ? Digit::NotXPlus1 : Digit::NotX;
+            }
+            run(main_, sum_sequence_imm(g), {{x, 0}, {sr, 0}}, st.loc);
+        }
+        if (st.op == Op::Add || st.op == Op::Sub) {
+            const std::string ret = fresh();
+            alu_call(cin, ret, ret, st.loc);
+            main_.label(ret, st.loc);
+            main_.line({w.restore(kMoved)});
+            mov_reg(main_, d, z_reg(st.loc), st.loc);
+            return;
+        }
+        // A compare: the carry-out is 1 iff x >= y.
+        reset(main_, d, st.loc);
+        const std::string lt = fresh();
+        const std::string ge = fresh();
+        const std::string end = fresh();
+        alu_call(true, lt, ge, st.loc);
+        main_.label(lt, st.loc);
+        main_.line({w.restore(kMoved)});
+        load(main_, *crz_operand(make_value({}, 1), word(1)), st.loc);
+        access(main_, d, st.loc);
+        main_.line({w.ref(kMoved), w.ref(end)});
+        main_.label(ge, st.loc);
+        main_.line({w.restore(kMoved)});
+        load(main_, *crz_operand(make_value({}, 1), word(0)), st.loc);
+        access(main_, d, st.loc);
+        main_.line({w.ref(kMoved), w.ref(end)});
+        main_.label(end, st.loc);
+        main_.line({w.restore(kMoved)});
+    }
+
+    // Calls the ALU routine with the carry-in; it returns to `no_carry` or `carry`.
+    void alu_call(bool cin, const std::string& no_carry, const std::string& carry, SourceLoc loc) {
+        const Words w{loc};
+        if (alu_ < 0) {
+            alu_ = new_callee(true, loc, 2);
+        }
+        std::vector<Cell> cells;
+        if (cin) {
+            cells.push_back(w.restore(kCarry));
+        }
+        cells.push_back(w.ref(kMoved));
+        cells.push_back(w.ref("_ALU"));
+        main_.line(std::move(cells), alu_, add_site(alu_, {no_carry, carry}));
+        use(kMoved);
+        use(kCarry);
+    }
+
+    // and, or, xor: with a register, a sequence into the destination (or a scratch register if the
+    // destination is an operand); with a constant, a transform of the destination.
+    void bitwise(const Stmt& st) {
+        const int d = reg_of(st.args[0]);
+        const int x = reg_of(st.args[1]);
+        if (!is_reg(st.args[2])) {
+            const std::uint32_t k = const_of(st.args[2]);
+            const TritMap m = bit_map([&](unsigned i) {
+                const bool b = (k >> i) & 1;
+                switch (st.op) {
+                case Op::And:
+                    return b ? Trit::Keep : Trit::Clear;
+                case Op::Or:
+                    return b ? Trit::Fill : Trit::Keep;
+                default:
+                    return b ? Trit::Flip : Trit::Keep;
+                }
+            });
+            mov_reg(main_, d, x, st.loc);
+            bool any = false;
+            for (const Trit t : m) {
+                any = any || t != Trit::Keep;
+            }
+            if (any) {
+                run(main_, transform(m), {{d, 0}}, st.loc);
+            }
+            return;
+        }
+        const int y = reg_of(st.args[2]);
+        if (x == y) {
+            if (st.op == Op::Xor) {
+                mov_value(main_, d, Value{}, st.loc);
+            } else {
+                mov_reg(main_, d, x, st.loc);
+            }
+            return;
+        }
+        const int z = d == x || d == y ? scratch_reg(st.loc) : d;
+        const Sequence seq = st.op == Op::And  ? and_sequence()
+                             : st.op == Op::Or ? or_sequence()
+                                               : xor_sequence();
+        run(main_, seq, {{x, 0}, {y, 0}, {z, 0}}, st.loc);
+        mov_reg(main_, d, z, st.loc);
+    }
+
+    // sll, srl, sra: the shift register _H := x, the shift routine rotates it (at the entry of a
+    // constant amount, or through a switch table on the amount's low byte), d := _H. sra of a
+    // negative word shifts its complement and flips back (the routine sees _FN).
+    void shift(const Stmt& st) {
+        const Words w{st.loc};
+        const int d = reg_of(st.args[0]);
+        const int x = reg_of(st.args[1]);
+        const bool yreg = is_reg(st.args[2]);
+        const bool left = st.op == Op::Sll;
+        if (!yreg && st.args[2].imm == 0) {
+            mov_reg(main_, d, x, st.loc);
+            return;
+        }
+        const int h = shift_reg(st.loc);
+        mov_reg(main_, h, x, st.loc);
+        if (st.op == Op::Sra) {
+            const std::string neg = fresh();
+            const std::string join = fresh();
+            sign_test(h, kLanes - 1, join, neg, st.loc);
+            main_.label(neg, st.loc);
+            main_.line({w.restore(kMoved)});
+            run(main_, flip_all(), {{h, 0}}, st.loc);
+            main_.line({w.restore(kNeg), w.ref(kMoved), w.ref(join)});
+            main_.label(join, st.loc);
+            main_.line({w.restore(kMoved)});
+            use(kNeg);
+        }
+        if (shift_ < 0) {
+            shift_ = new_callee(true, st.loc, 1);
+        }
+        const std::string ret = fresh();
+        if (!yreg) {
+            const auto k = static_cast<unsigned>(st.args[2].imm);
+            shift_entries_.insert({left, k});
+            main_.line({w.ref(kMoved), w.ref(shift_entry(left, k))}, shift_,
+                       add_site(shift_, {ret}));
+        } else {
+            // The amount's low byte through a switch table of its own: entry b goes to _SV<b & 31>,
+            // which tests _FSL.
+            if (shift_switch_ < 0) {
+                shift_switch_ = static_cast<int>(switches_.size());
+                SwitchTable t{st.loc, std::vector<std::string>(256)};
+                for (unsigned b = 0; b < 256; ++b) {
+                    t.targets[b] = "_SV" + std::to_string(b % kWordBits);
+                }
+                switches_.push_back(std::move(t));
+                for (unsigned k = 0; k < kWordBits; ++k) {
+                    shift_entries_.insert({false, k});
+                    if (k > 0) {
+                        shift_entries_.insert({true, k});
+                    }
+                }
+            }
+            const int ix = index_reg(st.loc);
+            lane_index(main_, reg_of(st.args[2]), 0, kSwitchTag, st.loc);
+            load(main_, switch_mask(static_cast<std::uint32_t>(shift_switch_)), st.loc);
+            access(main_, ix, st.loc);
+            std::vector<Cell> cells;
+            if (left) {
+                cells.push_back(w.restore(kLeft));
+                use(kLeft);
+            }
+            cells.push_back(w.ref(kMoved));
+            cells.push_back(w.ref(reg_at(ix).name + "__M"));
+            main_.line(std::move(cells), shift_, add_site(shift_, {ret}));
+            use(kMd);
+        }
+        main_.label(ret, st.loc);
+        main_.line({w.restore(kMoved)});
+        mov_reg(main_, d, h, st.loc);
+    }
+
+    static std::string shift_entry(bool left, unsigned k) {
+        return (left ? "_SL" : "_SR") + std::to_string(k);
+    }
+
+    static Sequence flip_all() {
+        return transform(bit_map([](unsigned) { return Trit::Flip; }));
+    }
+
+    // sextb, sexth: d := x, then the bits from `bits` up cleared or filled by the sign.
+    void sext(int d, int x, unsigned bits, SourceLoc loc) {
+        const Words w{loc};
+        mov_reg(main_, d, x, loc);
+        const std::string pos = fresh();
+        const std::string neg = fresh();
+        const std::string end = fresh();
+        sign_test(d, bits / 8 - 1, pos, neg, loc);
+        for (const bool negative : {true, false}) {
+            main_.label(negative ? neg : pos, loc);
+            main_.line({w.restore(kMoved)});
+            run(main_, transform(bit_map([&](unsigned i) {
+                    return i < bits ? Trit::Keep : negative ? Trit::Fill : Trit::Clear;
+                })),
+                {{d, 0}}, loc);
+            main_.line({w.ref(kMoved), w.ref(end)});
+        }
+        main_.label(end, loc);
+        main_.line({w.restore(kMoved)});
+    }
+
+    // Continues at the landing pad `pos` or `neg` by the top bit of reg's byte lane, through the
+    // lane's sign table. Nothing follows the dispatch line.
+    void sign_test(int reg, unsigned lane, const std::string& pos, const std::string& neg,
+                   SourceLoc loc) {
+        const Words w{loc};
+        const int ix = index_reg(loc);
+        index_sequence(main_, reg, sign_mask(lane), loc);
+        if (sign_[lane] < 0) {
+            sign_[lane] = new_callee(true, loc, 2);
+        }
+        main_.line({w.ref(kMoved), w.ref(reg_at(ix).name + "__M")}, sign_[lane],
+                   add_site(sign_[lane], {pos, neg}));
+        use(kMd);
+    }
+
     // Primitives (docs/hla.md 4.2).
 
     // A := v, cells unchanged.
@@ -519,32 +798,79 @@ class Lowerer {
         }
     }
 
-    // A := reg := crz(A, reg).
-    void access(Stream& s, int reg_ix, SourceLoc loc) {
+    // A := reg := crz(A, reg), through one of the register's paths; through its Rot path:
+    // reg := rotr(reg) until _K9 fires (9 times from a fresh counter).
+    void access(Stream& s, int reg_ix, SourceLoc loc, int path = 0) {
         const Words w{loc};
         const std::string ret = fresh();
-        const int c = reg_at(reg_ix).callee;
-        s.line({w.ref(kMoved), w.ref(reg_at(reg_ix).name + "__O")}, c, add_site(c, {ret}));
+        const Reg& r = reg_at(reg_ix);
+        const int c = path == 0 ? r.callee : r.paths[static_cast<std::size_t>(path - 1)];
+        std::vector<Cell> cells;
+        if (path > 0) {
+            cells.push_back(w.restore(path_flag(path)));
+            max_path_ = std::max(max_path_, path);
+        }
+        cells.push_back(w.ref(kMoved));
+        cells.push_back(w.ref(r.name + (path > 0 && path == r.rot ? "__R" : "__O")));
+        s.line(std::move(cells), c, add_site(c, {ret}));
         s.label(ret, loc);
         s.line({w.restore(kMoved)});
         use(kMoved);
-        use(kOpr);
+        use(path > 0 && path == r.rot ? kRot : kOpr);
     }
 
     // reg := C1 whatever it held, and A = C1.
-    void reset(Stream& s, int reg, SourceLoc loc) {
+    void reset(Stream& s, int reg, SourceLoc loc, int path = 0) {
         load(s, make_value({}, 1), loc);
-        access(s, reg, loc);
-        access(s, reg, loc);
+        access(s, reg, loc, path);
+        access(s, reg, loc, path);
+    }
+
+    // dst := the word v.
+    void mov_value(Stream& s, int dst, Value v, SourceLoc loc) {
+        reset(s, dst, loc);
+        load(s, *crz_operand(make_value({}, 1), v), loc);
+        access(s, dst, loc);
+    }
+
+    // dst := src. dst := C1; A := src; dst := crz(src, C1) (0 -> 1, 2 -> 2); with A = C1 the 1s
+    // become 0. src may also hold its word as 1/2 instead of 0/2 (the ALU's result): the first
+    // access with A = C1 turns it into 0/2.
+    void mov_reg(Stream& s, int dst, int src, SourceLoc loc) {
+        if (src == dst) {
+            return;
+        }
+        reset(s, dst, loc);
+        access(s, src, loc);
+        access(s, dst, loc);
+        load(s, make_value({}, 1), loc);
+        access(s, dst, loc);
+    }
+
+    // A sequence of word.hpp; cells[i] is the register (and its path) of the sequence's cell i.
+    void run(Stream& s, const Sequence& seq, const std::vector<std::pair<int, int>>& cells,
+             SourceLoc loc) {
+        for (const Step& st : seq) {
+            if (st.cell < 0) {
+                load(s, st.k, loc);
+            } else {
+                const auto& [reg, path] = cells[static_cast<std::size_t>(st.cell)];
+                access(s, reg, loc, path);
+            }
+        }
     }
 
     // The index register := the index of reg's byte lane in the table `tag` (word.hpp).
     void lane_index(Stream& s, int reg, unsigned lane, unsigned tag, SourceLoc loc) {
+        index_sequence(s, reg, lane_mask(lane, tag), loc);
+    }
+    // The lane index sequence with the constant `mask` (lane_mask, sign_mask).
+    void index_sequence(Stream& s, int reg, Value mask, SourceLoc loc) {
         const int ix = index_reg(loc);
         reset(s, ix, loc);
         access(s, reg, loc);
         access(s, ix, loc);
-        load(s, lane_mask(lane, tag), loc);
+        load(s, mask, loc);
         access(s, ix, loc);
         access(s, ix, loc);
     }
@@ -552,7 +878,13 @@ class Lowerer {
     // Registers and callees.
 
     int add_reg(const std::string& name, Value init, bool dispatch, SourceLoc loc) {
-        regs_.push_back(Reg{name, init, dispatch, new_callee(false, loc, 1)});
+        assert(!reg_by_name_.contains(name));
+        Reg r;
+        r.name = name;
+        r.init = init;
+        r.dispatch = dispatch;
+        r.callee = new_callee(false, loc, 1);
+        regs_.push_back(std::move(r));
         reg_by_name_[name] = static_cast<int>(regs_.size() - 1);
         return static_cast<int>(regs_.size() - 1);
     }
@@ -587,6 +919,45 @@ class Lowerer {
             ret_ = add_reg("_R", make_value({}, 1), true, loc);
         }
         return ret_;
+    }
+
+    // The ALU's registers: the column sums _AS and the result _AZ (both C1 between uses; the
+    // ALU's own accesses on path 1), and the nibble index registers _AJ0 .. _AJ7.
+    int sum_reg(SourceLoc loc) {
+        if (sum_ < 0) {
+            sum_ = add_reg("_AS", make_value({}, 1), false, loc);
+            add_path(sum_, loc);
+            z_ = add_reg("_AZ", make_value({}, 1), false, loc);
+            add_path(z_, loc);
+            for (unsigned k = 0; k < kNibbles; ++k) {
+                nib_[k] = add_reg("_AJ" + std::to_string(k), make_value({}, 1), true, loc);
+            }
+        }
+        return sum_;
+    }
+    int z_reg(SourceLoc loc) {
+        sum_reg(loc);
+        return z_;
+    }
+    // The destination of and/or/xor when it is also an operand.
+    int scratch_reg(SourceLoc loc) {
+        if (scratch_ < 0) {
+            scratch_ = add_reg("_T", Value{}, false, loc);
+        }
+        return scratch_;
+    }
+    // The shift register: path 1 rotates it, path 2 is the shift routine's.
+    int shift_reg(SourceLoc loc) {
+        if (h_ < 0) {
+            h_ = add_reg("_H", Value{}, false, loc);
+            reg_mut(h_).rot = add_path(h_, loc);
+            add_path(h_, loc);
+        }
+        return h_;
+    }
+    int add_path(int reg, SourceLoc loc) {
+        reg_mut(reg).paths.push_back(new_callee(false, loc, 1));
+        return static_cast<int>(reg_at(reg).paths.size());
     }
 
     int new_callee(bool sub, SourceLoc loc, std::size_t exits) {
@@ -918,10 +1289,172 @@ class Lowerer {
         }
     }
 
+    // The ALU routine (docs/hla.md 4.6): _AZ := C1; per nibble k the mask from _AS into _AJ<k>,
+    // whose last constant the carry chooses, and a dispatch into the nibble table; the entry's
+    // stream loads the merge constant of the result nibble, sets _FC on a carry-out and continues
+    // at _AC<k>, which merges it into _AZ and resets _AJ<k>. Then _AS := C1 and the exit by the
+    // carry.
+    void alu_routine(Stream& s) {
+        const SourceLoc loc = callees_[static_cast<std::size_t>(alu_)].loc;
+        const Words w{loc};
+        s.label("_ALU", loc);
+        s.line({w.restore(kMoved)});
+        reset(s, z_, loc, 1);
+        for (unsigned k = 0; k < kNibbles; ++k) {
+            const int j = nib_[k];
+            run(s, mask_prefix(k), {{sum_, 1}, {j, 0}}, loc);
+            const std::string c1 = fresh();
+            s.line({w.ref(kCarry), w.ref(c1), w.restore(kCarry)});
+            for (const unsigned cin : {0U, 1U}) {
+                if (cin == 1) {
+                    s.label(c1, loc);
+                }
+                run(s, mask_last(k, cin), {{sum_, 1}, {j, 0}}, loc);
+                s.line({w.ref(kMoved), w.ref(reg_at(j).name + "__M")});
+            }
+            s.label("_AC" + std::to_string(k), loc);
+            s.line({w.restore(kMoved)});
+            access(s, z_, loc, 1);
+            reset(s, j, loc);
+        }
+        reset(s, sum_, loc, 1);
+        const std::string carry = fresh();
+        s.line({w.ref(kCarry), w.ref(carry), w.restore(kCarry)});
+        tree(s, alu_, 0);
+        s.label(carry, loc);
+        tree(s, alu_, 1);
+        use(kMd);
+        use(kGo);
+    }
+
+    // The nibble tables: an entry `_GO stream` per (nibble, carry-in, digits), a stream per
+    // (nibble, digits' total + carry-in).
+    void alu_tables() {
+        const Words w{callees_[static_cast<std::size_t>(alu_)].loc};
+        const auto stream = [](unsigned k, unsigned total) {
+            return "_as" + std::to_string(k) + "_" + std::to_string(total);
+        };
+        for (unsigned k = 0; k < kNibbles; ++k) {
+            for (unsigned total = 0; total < 2 << kNibbleBits; ++total) {
+                Stream s;
+                s.label(stream(k, total), w.loc);
+                s.line({w.restore(kMd), w.restore(kGo), w.restore(kMoved)});
+                load(s, word((total & 15) << (kNibbleBits * k)), w.loc);
+                std::vector<Cell> cells;
+                if (total >> kNibbleBits) {
+                    cells.push_back(w.restore(kCarry));
+                }
+                cells.push_back(w.ref(kMoved));
+                cells.push_back(w.ref("_AC" + std::to_string(k)));
+                s.line(std::move(cells));
+                block(s);
+            }
+            for (unsigned cin = 0; cin < 2; ++cin) {
+                for (unsigned code = 0; code < 81; ++code) {
+                    const std::array<unsigned, kNibbleBits> d = {code % 3, code / 3 % 3,
+                                                                 code / 9 % 3, code / 27};
+                    const unsigned total = d[0] + 2 * d[1] + 4 * d[2] + 8 * d[3] + cin;
+                    Stream e;
+                    e.label("_an" + std::to_string(k) + "_" + std::to_string(cin) + "_" +
+                                std::to_string(code),
+                            w.loc);
+                    e.line({w.ref(kGo), w.ref(stream(k, total))});
+                    block(e, Value::from_raw(nibble_index(k, cin, d).raw() + 1));
+                }
+            }
+        }
+    }
+
+    // _H rotated right m times: loops of 9 rotations (the counter _K9 fires on every 9th pass and
+    // is back at its start then), the first one shortened by advancing the counter first.
+    void rotate(Stream& s, unsigned m, SourceLoc loc) {
+        const Words w{loc};
+        const int rot = reg_at(h_).rot;
+        if (m % 9 != 0) {
+            for (unsigned i = 0; i < 9 - m % 9; ++i) {
+                const std::string next = fresh();
+                s.line({w.ref(kK9), w.ref(next)});
+                s.label(next, loc);
+            }
+            access(s, h_, loc, rot);
+        }
+        for (unsigned i = 0; i < m / 9; ++i) {
+            access(s, h_, loc, rot);
+        }
+        use(kK9);
+    }
+
+    // The shift routine: for a computed amount _SV<k> (entered from the shift switch) tests _FSL;
+    // the entry of (direction, k) rotates _H and loads the first constant of the shift map's
+    // transform; _SH_TAIL finishes the transform, flips back after an sra of a negative word, and
+    // returns.
+    void shift_routine(std::vector<Stream>& out) {
+        const SourceLoc loc = callees_[static_cast<std::size_t>(shift_)].loc;
+        const Words w{loc};
+        if (shift_switch_ >= 0) {
+            for (unsigned k = 0; k < kWordBits; ++k) {
+                Stream s;
+                s.label("_SV" + std::to_string(k), loc);
+                s.line({w.restore(kMoved)});
+                const std::string l = fresh();
+                s.line({w.ref(kLeft), w.ref(l), w.restore(kLeft)});
+                s.line({w.ref(kMoved), w.ref(shift_entry(false, k))});
+                s.label(l, loc);
+                s.line({w.ref(kMoved), w.ref(shift_entry(k > 0, k))});
+                out.push_back(std::move(s));
+            }
+            use(kLeft);
+        }
+        const Sequence tail = transform(shift_map(false, 0));
+        for (const auto& [left, k] : shift_entries_) {
+            Stream s;
+            s.label(shift_entry(left, k), loc);
+            s.line({w.restore(kMoved)});
+            rotate(s, rotations(left, k), loc);
+            const Sequence m = transform(shift_map(left, k));
+            assert(m.size() == 4 && m[0].cell < 0 && m[2].k == tail[2].k); // the short form
+            load(s, m[0].k, loc);
+            s.line({w.ref(kMoved), w.ref("_SH_TAIL")});
+            out.push_back(std::move(s));
+        }
+        Stream t;
+        t.label("_SH_TAIL", loc);
+        t.line({w.restore(kMoved)});
+        run(t, Sequence(tail.begin() + 1, tail.end()), {{h_, 2}}, loc);
+        const std::string neg = fresh();
+        t.line({w.ref(kNeg), w.ref(neg), w.restore(kNeg)});
+        tree(t, shift_, 0);
+        t.label(neg, loc);
+        run(t, flip_all(), {{h_, 2}}, loc);
+        tree(t, shift_, 0);
+        out.push_back(std::move(t));
+        use(kNeg);
+    }
+
+    void sign_tables(unsigned lane) {
+        const Words w{callees_[static_cast<std::size_t>(sign_[lane])].loc};
+        const std::string l = std::to_string(lane);
+        for (unsigned b = 0; b < 256; ++b) {
+            Stream s;
+            s.label("_sg" + l + "_" + std::to_string(b), w.loc);
+            s.line({w.ref(kGo), w.ref((b & 0x80 ? "_SGN" : "_SGP") + l)});
+            block(s, Value::from_raw(sign_index(lane, static_cast<std::uint8_t>(b)).raw() + 1));
+        }
+        use(kGo);
+    }
+
     void finish() {
         Stream in_routine;
         if (in_ >= 0) {
             input_routine(in_routine);
+        }
+        std::vector<Stream> routines;
+        if (alu_ >= 0) {
+            routines.emplace_back();
+            alu_routine(routines.back());
+        }
+        if (shift_ >= 0) {
+            shift_routine(routines);
         }
         std::vector<Stream> exits;
         const auto exit = [&](const std::string& name, int callee, std::size_t e,
@@ -950,6 +1483,12 @@ class Lowerer {
             exit("_IN_B", in_, 0, {kMoved, kMd});
             exit("_IN_E", in_, 1, {kMoved, kMd});
         }
+        for (unsigned lane = 0; lane < kLanes; ++lane) {
+            if (sign_[lane] >= 0) {
+                exit("_SGP" + std::to_string(lane), sign_[lane], 0, {kMd, kGo, kMoved});
+                exit("_SGN" + std::to_string(lane), sign_[lane], 1, {kMd, kGo, kMoved});
+            }
+        }
         if (ram_ >= 0) {
             exits.push_back(ram_back());
         }
@@ -959,7 +1498,16 @@ class Lowerer {
         std::vector<Stream> reg_blocks;
         for (const Reg& r : regs_) {
             const Callee& c = callees_[static_cast<std::size_t>(r.callee)];
-            if (c.exits[0].empty() && !r.dispatch && !r.ram) {
+            const auto path_used = [&](int p) {
+                return !callees_[static_cast<std::size_t>(r.paths[static_cast<std::size_t>(p - 1)])]
+                            .exits[0]
+                            .empty();
+            };
+            bool used = !c.exits[0].empty() || r.dispatch || r.ram;
+            for (int p = 1; p <= static_cast<int>(r.paths.size()); ++p) {
+                used = used || path_used(p);
+            }
+            if (!used) {
                 continue;
             }
             const Words w{c.loc};
@@ -975,13 +1523,44 @@ class Lowerer {
                 s.line({w.use(kMd, r.name)});
                 use(kMd);
             }
+            if (r.rot > 0 && path_used(r.rot)) {
+                s.label(r.name + "__R", c.loc);
+                s.line({w.use(kRot, r.name)});
+                use(kRot);
+            }
+            // After the value, the path flags choose the continuation (docs/hla.md 4.6).
             s.label(r.name + "__O", c.loc);
-            s.line(
-                {w.ref(kOpr), labeled(w.lit(r.init), r.name), w.restore(kOpr), w.restore(kMoved)});
+            std::vector<Cell> cells = {w.ref(kOpr), labeled(w.lit(r.init), r.name)};
+            std::vector<std::pair<int, std::string>> paths;
+            for (int p = 1; p <= static_cast<int>(r.paths.size()); ++p) {
+                if (path_used(p)) {
+                    paths.emplace_back(p, fresh());
+                    cells.push_back(w.ref(path_flag(p)));
+                    cells.push_back(w.ref(paths.back().second));
+                    cells.push_back(w.restore(path_flag(p)));
+                }
+            }
+            cells.push_back(w.restore(kOpr));
+            cells.push_back(w.restore(kMoved));
+            s.line(std::move(cells));
             use(kOpr);
             use(kMoved);
             if (!c.exits[0].empty()) {
                 tree(s, r.callee, 0);
+            }
+            for (const auto& [p, l] : paths) {
+                const int callee = r.paths[static_cast<std::size_t>(p - 1)];
+                s.label(l, c.loc);
+                if (p == r.rot) {
+                    // Rotate again until _K9 fires.
+                    const std::string done = fresh();
+                    s.line({w.restore(kRot), w.restore(kMoved), w.ref(kK9), w.ref(done),
+                            w.restore(path_flag(p)), w.ref(kMoved), w.ref(r.name + "__R")});
+                    s.label(done, c.loc);
+                } else {
+                    s.line({w.restore(kOpr), w.restore(kMoved)});
+                }
+                tree(s, callee, 0);
             }
             reg_blocks.push_back(std::move(s));
         }
@@ -989,6 +1568,9 @@ class Lowerer {
         block(main_);
         if (in_ >= 0) {
             block(in_routine);
+        }
+        for (Stream& r : routines) {
+            block(r);
         }
         for (Stream& s : exits) {
             block(s);
@@ -1006,6 +1588,14 @@ class Lowerer {
         }
         if (in_ >= 0) {
             input_tables();
+        }
+        if (alu_ >= 0) {
+            alu_tables();
+        }
+        for (unsigned lane = 0; lane < kLanes; ++lane) {
+            if (sign_[lane] >= 0) {
+                sign_tables(lane);
+            }
         }
         if (ram_ >= 0) {
             ram_records();
@@ -1048,8 +1638,18 @@ class Lowerer {
         if (units_.contains(kRa)) {
             ram_unit();
         }
-        if (units_.contains(kDir)) {
-            code(kDir, {CoreOp::Nop, CoreOp::MovD});
+        for (const std::string* flag : {&kDir, &kCarry, &kNeg, &kLeft}) {
+            if (units_.contains(*flag)) {
+                code(*flag, {CoreOp::Nop, CoreOp::MovD});
+            }
+        }
+        if (units_.contains(kK9)) {
+            std::vector<CoreOp> ops(8, CoreOp::Nop);
+            ops.push_back(CoreOp::MovD);
+            code(kK9, std::move(ops));
+        }
+        for (int p = 1; p <= max_path_; ++p) {
+            code(path_flag(p), {CoreOp::Nop, CoreOp::MovD});
         }
         for (const bool sub : {false, true}) {
             for (unsigned d = 0; d < depth_[sub]; ++d) {
@@ -1079,6 +1679,17 @@ class Lowerer {
     int sp_ = -1;   // the stack pointer
     int move_ = -1; // the stack pointer's move callee
     int ret_ = -1;  // the register ret jumps through
+    int sum_ = -1;  // the ALU's column sums (also _AZ, _AJ0 .. _AJ7)
+    int z_ = -1;
+    std::array<int, kNibbles> nib_{};
+    int alu_ = -1; // the ALU routine
+    int scratch_ = -1;
+    int h_ = -1;     // the shift register
+    int shift_ = -1; // the shift routine
+    int shift_switch_ = -1;
+    std::set<std::pair<bool, unsigned>> shift_entries_; // (left, amount) entries in use
+    std::array<int, kLanes> sign_ = {-1, -1, -1, -1};
+    int max_path_ = 0;
     std::unordered_map<std::string, std::uint32_t> ram_base_;
     std::unordered_map<std::string, std::uint32_t> code_ids_;
     std::vector<std::pair<std::string, SourceLoc>> code_pads_; // [id - 1]: the label, first use

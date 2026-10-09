@@ -58,10 +58,31 @@ std::string show_char(char c) {
     return buf;
 }
 
-constexpr std::array<std::string_view, 17> kMnemonics = {
-    "mov",  "jmp", "bz",     "bnz",  "in",    "out", "halt", "call",  "ret",
-    "push", "pop", "switch", "load", "store", "reg", "ram",  "stack",
+constexpr std::array<std::string_view, 29> kMnemonics = {
+    "mov", "jmp",    "bz",   "bnz",   "in",  "out", "halt",  "call",  "ret",   "push",
+    "pop", "switch", "load", "store", "reg", "ram", "stack", "add",   "sub",   "and",
+    "or",  "xor",    "slt",  "sltu",  "sll", "srl", "sra",   "sextb", "sexth",
 };
+
+// The statements' mnemonics.
+constexpr std::array<std::pair<std::string_view, Op>, 26> kOps = {{
+    {"mov", Op::Mov},     {"jmp", Op::Jmp},     {"bz", Op::Bz},     {"bnz", Op::Bnz},
+    {"in", Op::In},       {"out", Op::Out},     {"halt", Op::Halt}, {"call", Op::Call},
+    {"ret", Op::Ret},     {"push", Op::Push},   {"pop", Op::Pop},   {"switch", Op::Switch},
+    {"load", Op::Load},   {"store", Op::Store}, {"add", Op::Add},   {"sub", Op::Sub},
+    {"and", Op::And},     {"or", Op::Or},       {"xor", Op::Xor},   {"slt", Op::Slt},
+    {"sltu", Op::Sltu},   {"sll", Op::Sll},     {"srl", Op::Srl},   {"sra", Op::Sra},
+    {"sextb", Op::Sextb}, {"sexth", Op::Sexth},
+}};
+
+std::string_view mnemonic(Op op) {
+    for (const auto& [m, o] : kOps) {
+        if (o == op) {
+            return m;
+        }
+    }
+    return "?";
+}
 
 bool reserved(std::string_view s) {
     for (const auto m : kMnemonics) {
@@ -391,12 +412,7 @@ class Parser {
             stack(p, m);
             return;
         }
-        static const std::unordered_map<std::string_view, Op> ops = {
-            {"mov", Op::Mov},   {"jmp", Op::Jmp},     {"bz", Op::Bz},     {"bnz", Op::Bnz},
-            {"in", Op::In},     {"out", Op::Out},     {"halt", Op::Halt}, {"call", Op::Call},
-            {"ret", Op::Ret},   {"push", Op::Push},   {"pop", Op::Pop},   {"switch", Op::Switch},
-            {"load", Op::Load}, {"store", Op::Store},
-        };
+        static const std::unordered_map<std::string_view, Op> ops(kOps.begin(), kOps.end());
         const auto it = ops.find(m.text);
         if (it == ops.end()) {
             fail(m.loc, "unknown instruction '" + m.text + "'");
@@ -621,6 +637,26 @@ class Parser {
         case Op::Halt:
             want(n == 0 || (n == 1 && val(0)), "'halt', 'halt <byte>' or 'halt <reg>'");
             break;
+        case Op::Add:
+        case Op::Sub:
+        case Op::And:
+        case Op::Or:
+        case Op::Xor:
+        case Op::Slt:
+        case Op::Sltu:
+        case Op::Sll:
+        case Op::Srl:
+        case Op::Sra:
+            want(n == 3 && reg(0) && reg(1) && val(2),
+                 "'" + std::string(mnemonic(s.op)) + " <reg>, <reg>, <reg or value>'");
+            if (is_shift(s.op) && kind(2) == K::Imm && (s.args[2].imm < 0 || s.args[2].imm > 31)) {
+                fail(s.args[2].loc, "a shift amount must be 0..31");
+            }
+            break;
+        case Op::Sextb:
+        case Op::Sexth:
+            want(n == 2 && reg(0) && reg(1), "'" + std::string(mnemonic(s.op)) + " <reg>, <reg>'");
+            break;
         case Op::Label:
             break;
         }
@@ -690,6 +726,15 @@ unsigned allowed(const Stmt& s, std::size_t i) {
         return i == 0 ? kReg : kReg | kRam;
     case Op::Store:
         return i == 0 ? kReg | kRam : kReg | kLabel | kRam;
+    case Op::Add:
+    case Op::Sub:
+    case Op::And:
+    case Op::Or:
+    case Op::Xor:
+    case Op::Slt:
+    case Op::Sltu:
+        // A code address is not a number (docs/hla.md 1): no labels.
+        return i < 2 ? kReg : kReg | kRam;
     default:
         return kReg;
     }

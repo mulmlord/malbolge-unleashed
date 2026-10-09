@@ -3,8 +3,9 @@
 // Lowering of a checked HLA program to an assembly program (docs/hla.md 4).
 //
 // The result is an assembler AST: `.WIDTH 38`, the code units the program needs, the main data
-// stream (ENTRY), one data block per register, the return trees, the dispatch and switch tables,
-// and the pinned records of RAM, stack frames and code addresses. Every
+// stream (ENTRY), the ALU and shift routines, one data block per register, the return trees, the
+// dispatch, switch, nibble and sign tables, and the pinned records of RAM, stack frames and code
+// addresses. Every
 // cell generated for a statement carries the statement's source location, and every support cell
 // the location of the declaration or first use it serves, so the assembler's diagnostics point
 // into the .mhl file (Program::files is the HLA program's file table).
