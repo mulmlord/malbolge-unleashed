@@ -79,7 +79,8 @@ TEST_CASE("unknown command") {
 
 TEST_CASE("known subcommands are not implemented yet") {
     for (std::string_view sub : kSubcommands) {
-        if (sub == "run" || sub == "export" || sub == "pack" || sub == "asm" || sub == "disasm") {
+        if (sub == "run" || sub == "export" || sub == "pack" || sub == "asm" || sub == "disasm" ||
+            sub == "hla") {
             continue;
         }
         const Result r = run({sub, "x"});

@@ -62,6 +62,24 @@ TEST_CASE("the default width: the program width is forced from the initial n") {
     start(a);
 }
 
+TEST_CASE("width forcing never lands between the text and the base") {
+    // Texts just below 3^9 cells with a base above 3^9: a forcing pointer built from the fill
+    // cell ~y would have head 0 and land there, where the startup model knows no cells. These
+    // sizes failed with "width forcing: no fill cell to rotate" before the forcing used y only.
+    for (const unsigned width : {12U, 16U}) {
+        for (unsigned n = 176; n <= 232; n += 8) {
+            CAPTURE(width);
+            CAPTURE(n);
+            std::string src = ".WIDTH " + std::to_string(width) +
+                              "\n.CODE\nHALT: Hlt\n\n.DATA\nENTRY: HALT\n{\nD:";
+            for (unsigned i = 0; i < n; ++i) {
+                src += " " + std::to_string(1000 + 7 * i);
+            }
+            start(assembled(src + "\n}\n"));
+        }
+    }
+}
+
 TEST_CASE("head-1 blocks, code blocks written at run time, and determinism") {
     const std::string src = ".CODE\nX: Rot/Nop\n   Jmp\n\nHALT: Hlt\n\n"
                             ".DATA\n@1t0 {V: 5 1t2 'q'}\n"

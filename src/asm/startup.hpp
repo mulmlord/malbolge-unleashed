@@ -7,7 +7,8 @@
 // Program text. Cell 0 is the Jmp `b`, which continues at cell 99 with D = 1. Cells 1..98 hold the
 // constants and pointers of a small work area (the "low area"), cells 99.. the startup code, then
 // filler up to the last two cells. Those are two characters whose trits are all 0 or 1, the last
-// one y = 85, at an odd length L. The fill (spec 2.4) then alternates: a never-written cell holds
+// one y = 85, at an odd length L, at least as long as the initial n the code assumes needs
+// (the filler pads up to it). The fill (spec 2.4) then alternates: a never-written cell holds
 // y at an even remainder mod 6 and ~y (0 and 1 trits swapped, head 1) at an odd one. Every user
 // block lies at or above `base` >= L (layout.hpp), so every image cell starts out as fill.
 //
@@ -41,8 +42,8 @@
 //
 // Bootstrap. A starts at 0, so one Opr turns a 0/1-trit character into ...111 (C1) and the next
 // one, with A = C1, another into 0 (C0). Width forcing (docs/asm.md 7): while n < N, F1/F2 take a
-// pointer swap01(rotr(f)) of width n, built from a rotated fill cell f, and a MovD through it grows
-// n by exactly one. Then Z1 is built at the final width by adding the 2 of a rotating Q = 54 (one
+// pointer swap01(rotr(f)) of width n, built from a rotated fill cell f = y (head 0, so the pointer
+// has head 1 and never lands in the program text), and a MovD through it grows n by exactly one. Then Z1 is built at the final width by adding the 2 of a rotating Q = 54 (one
 // trit 2, otherwise 0) once per position, and Z0 and SEED are derived from Z1 and Q.
 
 #include <cstdint>

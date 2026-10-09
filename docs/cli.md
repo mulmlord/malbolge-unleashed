@@ -14,7 +14,8 @@ usage: malm <command> [args...]
 | `pack` | implemented | pack a program into a native executable |
 | `asm` | implemented | assemble a `.mua` file into a `.malm` or Malbolge text; check and pretty-print it |
 | `disasm` | implemented | turn a program back into readable assembly, or list it cell by cell |
-| `hla`, `build` | not implemented yet | exit 2 with `malm <cmd>: not implemented` |
+| `hla` | implemented | compile a high-level `.mhl` file into a `.malm` or Malbolge text; check it and print the generated assembly |
+| `build` | not implemented yet | exit 2 with `malm build: not implemented` |
 
 The program file of `run`, `export`, `pack` and `disasm` is a `.malm` container ([malm-format.md](malm-format.md))
 or Malbolge text (spec 4); the two are told apart by the first four bytes. For a `.malm` the header
@@ -227,6 +228,28 @@ there are diagnostics.
 `--print` flattens `.INCLUDE`s (the output holds the blocks of the included files inline), drops
 comments and keeps the source's grouping of cells into lines; it is a fixed point: printing the
 printed output gives the same text.
+
+## `malm hla`
+
+```
+usage: malm hla [--text] [--map <file>] -o <out> [--] <file.mhl>
+       malm hla (--check | --print) [--] <file.mhl>
+```
+
+The high-level assembler ([hla.md](hla.md)): parses the file, lowers it to an assembly program
+and assembles that like `malm asm`. Implementation: `src/hla/` and `src/driver/hla_cmd.cpp`;
+tests: `tests/hla/`. Examples: `examples/hla/`.
+
+| option | meaning |
+|---|---|
+| `-o <out>` | write the compiled program, a `.malm` (zstd) with the `EXIT_A` flag, so `halt <code>` sets the exit status; `-o -` writes it to stdout |
+| `--text` | write Malbolge text instead; text cannot carry `EXIT_A`, so a warning on stderr says to run it with `malm run --exit-a` |
+| `--map <file>` | also write the label map of the generated assembly (as `malm asm --map`) |
+| `--check` | parse, check and lower the file and run the assembler's static checks on the result; prints nothing on success |
+| `--print` | after the same checks, print the generated assembly in canonical form on stdout; `malm asm` assembles it to the same program text |
+
+Diagnostics, exit codes, purity check and determinism are those of `malm asm`; diagnostics point at
+the `.mhl` file, also for errors the assembler finds in the generated program.
 
 ## `malm disasm`
 

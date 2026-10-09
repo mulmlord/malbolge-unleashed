@@ -1,4 +1,4 @@
-// Shared by `malm run` and `malm export`: reading a program file (.malm or Malbolge text).
+// Shared by the subcommands: reading a program file (.malm or Malbolge text), writing outputs.
 #pragma once
 
 #include <cstddef>
@@ -27,6 +27,16 @@ bool read_file(std::string_view path, std::vector<std::uint8_t>& bytes, std::ost
 // True if both paths name the same existing file, or are spelled the same; "-" (stdout) is never
 // the same file.
 bool same_file(std::string_view a, std::string_view b);
+
+// Writes `bytes` to `path`, or to `out` for "-". On failure prints a diagnostic and returns false.
+bool write_output(std::string_view path, const std::vector<std::uint8_t>& bytes, std::ostream& out,
+                  std::ostream& err);
+
+// Purity check of an assembled program (spec 4): the program text passes the strict loader
+// unchanged, and the .malm holds exactly these cells, unleashed, with the given EXIT_A flag, and
+// nothing else. A failure is an assembler bug.
+bool is_pure(const std::vector<std::uint8_t>& text, const std::vector<std::uint8_t>& malm,
+             bool exit_a);
 
 // Parses a --max-cells value: a positive decimal integer. Returns nullopt otherwise.
 std::optional<std::size_t> parse_max_cells(std::string_view text);

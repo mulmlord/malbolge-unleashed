@@ -1,0 +1,2 @@
+; Hello world: the HLA version of examples/asm/hello.mua.
+        out "Hello, world!\n"

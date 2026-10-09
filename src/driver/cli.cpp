@@ -8,6 +8,7 @@
 #include "driver/asm_cmd.hpp"
 #include "driver/disasm_cmd.hpp"
 #include "driver/export_cmd.hpp"
+#include "driver/hla_cmd.hpp"
 #include "driver/pack_cmd.hpp"
 #include "driver/run_cmd.hpp"
 #include "version.hpp"
@@ -28,7 +29,7 @@ struct Command {
 constexpr auto kCommands = std::to_array<Command>({
     {"run", "Run a .malm or Malbolge text program", run_command},
     {"asm", "Assemble a low-level .mua file into a .malm", asm_command},
-    {"hla", "Compile a high-level .mhl file to .malm", nullptr},
+    {"hla", "Compile a high-level .mhl file to .malm", hla_command},
     {"disasm", "Disassemble a .malm or Malbolge text file", disasm_command},
     {"build", "Build a C/C++/Rust/Zig source to .malm or an executable", nullptr},
     {"pack", "Pack a .malm into a native executable", pack_command},

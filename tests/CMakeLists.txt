@@ -73,3 +73,19 @@ foreach(case hello cat halting_cat digital_root adder)
                 $<TARGET_FILE:malm> ${PROJECT_SOURCE_DIR}/examples/asm ${case})
     set_tests_properties(asm_example_${case} PROPERTIES LABELS fast TIMEOUT 120)
 endforeach()
+
+# The high-level assembler (issue #19).
+malm_add_test(NAME hla_word_test LABEL fast SOURCES hla/word_test.cpp LIBS malm_hla)
+malm_add_test(NAME hla_lang_test LABEL fast SOURCES hla/lang_test.cpp LIBS malm_hla TIMEOUT 600)
+malm_add_test(NAME hla_examples_test LABEL fast SOURCES hla/examples_test.cpp
+    LIBS malm_hla TIMEOUT 600)
+target_compile_definitions(hla_examples_test PRIVATE
+    MALM_HLA_EXAMPLES_DIR="${PROJECT_SOURCE_DIR}/examples/hla"
+    MALM_ASM_EXAMPLES_DIR="${PROJECT_SOURCE_DIR}/examples/asm")
+foreach(case hello cat exit42 errors)
+    add_test(NAME hla_example_${case}
+        COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/hla/examples_pipe_test.sh
+                $<TARGET_FILE:malm> ${PROJECT_SOURCE_DIR}/examples/hla
+                ${PROJECT_SOURCE_DIR}/examples/asm ${case})
+    set_tests_properties(hla_example_${case} PROPERTIES LABELS fast TIMEOUT 300)
+endforeach()

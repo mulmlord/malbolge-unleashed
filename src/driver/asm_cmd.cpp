@@ -1,9 +1,6 @@
 #include "driver/asm_cmd.hpp"
 
-#include <cerrno>
 #include <cstdint>
-#include <cstring>
-#include <fstream>
 #include <ostream>
 #include <string>
 #include <vector>
@@ -14,7 +11,6 @@
 #include "asm/parser.hpp"
 #include "asm/printer.hpp"
 #include "container/container.hpp"
-#include "core/loader.hpp"
 #include "driver/program_io.hpp"
 
 namespace malm {
@@ -35,43 +31,6 @@ int usage_error(std::ostream& err, std::string_view msg) {
     }
     err << kUsage;
     return 2;
-}
-
-// Writes `bytes` to `path`, or to `out` for "-". On failure prints a diagnostic and returns false.
-bool write_output(std::string_view path, const std::vector<std::uint8_t>& bytes, std::ostream& out,
-                  std::ostream& err) {
-    if (path == "-") {
-        out.write(reinterpret_cast<const char*>(bytes.data()),
-                  static_cast<std::streamsize>(bytes.size()));
-        out.flush();
-        if (!out) {
-            err << "malm: E_IO: cannot write to stdout\n";
-            return false;
-        }
-        return true;
-    }
-    std::ofstream file{std::string(path), std::ios::binary | std::ios::trunc};
-    if (file) {
-        file.write(reinterpret_cast<const char*>(bytes.data()),
-                   static_cast<std::streamsize>(bytes.size()));
-        file.close();
-    }
-    if (!file) {
-        err << "malm: cannot write '" << path << "': " << std::strerror(errno) << '\n';
-        return false;
-    }
-    return true;
-}
-
-// Purity check (spec 4): the program text passes the strict loader unchanged, and the .malm holds
-// exactly these cells and nothing else. A failure is an assembler bug.
-bool is_pure(const std::vector<std::uint8_t>& text, const std::vector<std::uint8_t>& malm) {
-    const auto loaded = core::load_text(text, core::kUnleashedMaxCells);
-    if (!loaded || loaded.value() != text) {
-        return false;
-    }
-    const auto read = container::read_malm(malm, container::Limits{core::kUnleashedMaxCells});
-    return read && read->cells == text && read->mode == container::Mode::Unleashed && !read->exit_a;
 }
 
 } // namespace
@@ -161,7 +120,7 @@ int asm_command(std::span<const std::string_view> args, std::istream&, std::ostr
 
     const std::vector<std::uint8_t>& cells = assembly->startup.text;
     const std::vector<std::uint8_t> malm = container::write_malm({cells});
-    if (!is_pure(cells, malm)) {
+    if (!is_pure(cells, malm, false)) {
         err << "malm asm: internal error: the assembled program fails the purity check\n";
         return 1;
     }
