@@ -1,8 +1,8 @@
-# The RISC-V loader and reference emulator (issue #23) and runtime (issue #24), docs/rv.md. Unit
-# tests need no RISC-V toolchain; the riscv-tests suite and the C test programs are built with clang
-# (riscv32 target) and ld.lld when they are found (MALM_RV_TESTS).
+# The RISC-V loader and reference emulator (issue #23), runtime (issue #24) and `malm build`
+# (issue #26), docs/rv.md. Unit tests need no RISC-V toolchain; the riscv-tests suite and the C test
+# programs are built with clang (riscv32 target) and ld.lld when they are found (MALM_RV_TESTS).
 malm_add_test(NAME rv_test LABEL fast SOURCES elf_test.cpp machine_test.cpp rvref_test.cpp
-    LIBS malm_rv malm_driver)
+    build_test.cpp LIBS malm_rv malm_driver)
 # rv-emu (issue #25): single instructions against the reference emulator. A debug build spends
 # about 3 minutes compiling the emulator, so there its cases are slow.
 malm_add_test(NAME rv_emu_test LABEL fast SOURCES emu_test.cpp LIBS malm_rv malm_hla TIMEOUT 1800)
@@ -162,7 +162,7 @@ foreach(case hello cat trace regs example_hello example_cat fizzbuzz runtime run
     set_tests_properties(rvref_program_${case} PROPERTIES LABELS fast TIMEOUT 60)
 endforeach()
 
-# rv-emu end to end through `malm rvemu`, `malm hla` and `malm run` (issue #25); slow: each case
+# rv-emu end to end through `malm build` and `malm run` (issues #25, #26); slow: each case
 # compiles an emulator. Only where emu.malm is built (not in the debug preset, which would need
 # about 4 minutes per case).
 if(NOT MALM_BUILD_EMU)

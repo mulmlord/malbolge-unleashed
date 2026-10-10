@@ -171,6 +171,9 @@ on `malm rvref`, and C programs through real pipes with their output and exit st
 state), and on the runtime the examples in `examples/c` (hello, cat, fizzbuzz) and
 `tests/rv/programs/runtime_test.c`, a self-check of crt0 and the library.
 `rv_emu_test` runs rv-emu against the reference emulator one instruction at a time (section 8).
+`rv_test` also builds a hand-assembled ELF with `malm build` and runs it, without the RISC-V
+toolchain; the slow `rvemu_program_*` tests build the C programs with `malm build` and compare
+them with the reference emulator through real pipes.
 
 riscv-tests is fetched at configure time (pinned commit) and built with clang and ld.lld, without
 its `env` submodule: `tests/rv/env/riscv_test.h` replaces the machine-mode environment with one
@@ -189,9 +192,25 @@ rv-emu is the RV32IM emulator written in HLA ([hla.md](hla.md)), the core of emu
 generated rather than written by hand: `src/rv/emu.cpp` writes its HLA program (`malm rvemu`,
 [cli.md](cli.md)), and the build compiles that with `malm hla` into `emu.malm`
 (`rv/emu/CMakeLists.txt`; guest RAM `MALM_EMU_RAM`, default `1M`; `MALM_BUILD_EMU=OFF` skips it,
-as the debug preset does). The emu-mode image builder (issue #26) will put a guest program in its
-RAM; until then `malm rvemu prog.elf` writes the emulator with the program's segments as the
-initial values of its RAM, which `malm hla` turns into startup code.
+as the debug preset does). That `emu.malm` has no guest program; `malm build` makes one that has.
+
+### Building a program
+
+`malm build prog.elf -o prog.malm` ([cli.md](cli.md); `build_emu` in `src/driver/build_cmd.hpp`)
+is the emu-mode image builder: one pure `.malm` (spec 4) with the `EXIT_A` flag that runs the
+program in rv-emu. It loads the ELF like the reference emulator (section 1) and writes the
+emulator's HLA program with the guest's initial state as initial values: `pc` the entry, `x2` the
+RAM size, `brk` and `brkmin` the end of the image, and RAM the segments' bytes as little-endian
+words. HLA's lowering and the assembler's startup code (asm.md 7) turn them into straight-line code
+that writes guest RAM and the registers before the emulator's first `fetch`, so nothing is
+preloaded. The result passes the purity check of `malm hla`.
+
+The guest RAM size (`--ram`, default `1M`, at most `4M`) is fixed per program; `n` is HLA's 38 for
+every size. The builder compiles the whole emulator for each program rather than adding to a
+prebuilt `emu.malm`: the startup code is the entire program text and sets the layout's base, and it
+writes every word of guest RAM anyway (each a record of its own, ADR 0001), so a guest image only
+changes the values written. Building takes about 25 seconds with 1 MiB of guest RAM and 4 with
+64 KiB (release build), about 70% of it generating the startup code.
 
 ### State
 

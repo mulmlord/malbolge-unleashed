@@ -7,7 +7,6 @@
 
 #include "driver/program_io.hpp"
 #include "driver/rvref_cmd.hpp"
-#include "hla/parser.hpp"
 #include "rv/elf.hpp"
 #include "rv/emu.hpp"
 
@@ -20,9 +19,6 @@ constexpr std::string_view kUsage =
     "  --harness     stops continue at the fetch instead of halting (for tests)\n"
     "  -o <out.mhl>  write the HLA program there (default: stdout)\n"
     "  <prog.elf>    a guest program to put in RAM (default: none, pc = 0)\n";
-
-// HLA's RAM holds at most this many bytes (kMaxRamWords words).
-constexpr std::uint32_t kMaxEmuRam = hla::kMaxRamWords * 4;
 
 int usage_error(std::ostream& err, std::string_view msg) {
     err << "malm rvemu: " << msg << '\n' << kUsage;
