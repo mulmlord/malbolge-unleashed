@@ -11,6 +11,7 @@
 #include "driver/hla_cmd.hpp"
 #include "driver/pack_cmd.hpp"
 #include "driver/run_cmd.hpp"
+#include "driver/rvref_cmd.hpp"
 #include "version.hpp"
 
 namespace malm {
@@ -22,7 +23,8 @@ using Handler = int (*)(std::span<const std::string_view> args, std::istream& in
 struct Command {
     std::string_view name;
     std::string_view description;
-    Handler handler; // nullptr: not implemented yet
+    Handler handler;     // nullptr: not implemented yet
+    bool hidden = false; // a debugging tool, left out of --help
 };
 
 // Single table of subcommands; later tickets plug in handlers here.
@@ -34,6 +36,7 @@ constexpr auto kCommands = std::to_array<Command>({
     {"build", "Build a C/C++/Rust/Zig source to .malm or an executable", nullptr},
     {"pack", "Pack a .malm into a native executable", pack_command},
     {"export", "Convert between .malm and plain Malbolge text (--text | --malm)", export_command},
+    {"rvref", "Run an RV32IM ELF on the C++ reference emulator", rvref_command, true},
 });
 
 void print_usage(std::ostream& os) {
@@ -42,9 +45,12 @@ void print_usage(std::ostream& os) {
           "commands:\n";
     std::size_t width = 0;
     for (const Command& c : kCommands) {
-        width = std::max(width, c.name.size());
+        width = std::max(width, c.hidden ? 0 : c.name.size());
     }
     for (const Command& c : kCommands) {
+        if (c.hidden) {
+            continue;
+        }
         os << "  " << c.name;
         for (std::size_t i = c.name.size(); i < width + 2; ++i) {
             os << ' ';

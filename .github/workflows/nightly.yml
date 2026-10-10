@@ -20,9 +20,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Install tools
-        run: sudo apt-get update && sudo apt-get install -y ninja-build
+        run: sudo apt-get update && sudo apt-get install -y ninja-build lld-18
       - name: Configure
-        run: cmake --preset ${{ matrix.preset }}
+        run: cmake --preset ${{ matrix.preset }} -DMALM_RV_TESTS=ON
       - name: Build
         run: cmake --build --preset ${{ matrix.preset }}
       # ctest exits 0 when no tests match the label, so this is safe before any slow tests exist.

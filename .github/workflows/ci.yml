@@ -27,7 +27,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Install tools
-        run: sudo apt-get update && sudo apt-get install -y ninja-build ccache
+        run: sudo apt-get update && sudo apt-get install -y ninja-build ccache lld-18
       # One compiler cache per job; every run saves its own entry and restores the newest one.
       - uses: actions/cache@v6
         with:
@@ -37,13 +37,13 @@ jobs:
       - name: Reset ccache statistics
         run: ccache --zero-stats
       - name: Configure
-        run: cmake --preset debug
+        run: cmake --preset debug -DMALM_RV_TESTS=ON
       - name: Build
         run: cmake --build --preset debug
       - name: Test
         run: ctest --preset debug -L fast --no-tests=error
       - name: Configure (release)
-        run: cmake --preset release
+        run: cmake --preset release -DMALM_RV_TESTS=ON
       - name: Build (release)
         run: cmake --build --preset release
       - name: Test (release)
