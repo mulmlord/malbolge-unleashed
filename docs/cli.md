@@ -16,6 +16,7 @@ usage: malm <command> [args...]
 | `disasm` | implemented | turn a program back into readable assembly, or list it cell by cell |
 | `hla` | implemented | compile a high-level `.mhl` file into a `.malm` or Malbolge text; check it and print the generated assembly |
 | `build` | not implemented yet | exit 2 with `malm build: not implemented` |
+| `rvref` | implemented, hidden | run an RV32IM ELF on the C++ reference emulator (a debugging tool; not listed by `--help`) |
 
 The program file of `run`, `export`, `pack` and `disasm` is a `.malm` container ([malm-format.md](malm-format.md))
 or Malbolge text (spec 4); the two are told apart by the first four bytes. For a `.malm` the header
@@ -295,3 +296,41 @@ one line per cell with its address, position, character, normalized instruction 
 Exit codes: 0 on success (also with a warning), 1 for a file that cannot be read or written and
 for a label map that is malformed or does not belong to the program, 2 for a usage error.
 `malm disasm` refuses to write over its input file or the label map.
+
+## `malm rvref`
+
+```
+usage: malm rvref [--ram <size>] [--trace] [--regs] [--] <prog.elf>
+```
+
+Runs an RV32IM ELF on the C++ reference emulator, the oracle for emu and aot mode, with the
+guest's stdin and stdout on the process's (binary-safe). The guest contract (loader rules, RAM,
+system calls, faults) is [rv.md](rv.md). Implementation: `src/rv/` and
+`src/driver/rvref_cmd.cpp`; tests: `tests/rv/`. A debugging tool, so `malm --help` does not list
+it.
+
+| option | meaning |
+|---|---|
+| `--ram <size>` | guest RAM in bytes, or with a `K` (KiB) or `M` (MiB) suffix; a multiple of 16 up to `1024M`; default `1M` |
+| `--trace` | one line per instruction on stderr (below) |
+| `--regs` | after the run, the final `pc`, the step count and the 32 registers on stderr |
+
+Exit codes: the guest's `exit` status (`code & 255`); 1 for a fault, an ELF the loader rejects
+or a file that cannot be read, each with a diagnostic on stderr; 2 for a usage error. A fault
+prints `malm rvref: <reason> at pc=0x... (step S)` (rv.md section 5).
+
+The trace has one line per executed instruction, the faulting one and the final `exit` ecall
+included: `step=S pc=0x... insn=0x...`, followed by ` <reg>=0x...` (ABI name) for each register
+the instruction changed. Lines are buffered and written before every `read` and at the end, so
+they come before a fault diagnostic and before the `--regs` block:
+
+```
+$ malm rvref --trace --regs hello.elf 2>&1 >/dev/null | head -3
+step=1 pc=0x00001000 insn=0x000015b7 a1=0x00001000
+step=2 pc=0x00001004 insn=0x02c58593 a1=0x0000102c
+step=3 pc=0x00001008 insn=0x00e00613 a2=0x0000000e
+```
+
+The `--regs` block is `pc   0x...`, `steps N` (instructions completed; the `exit` ecall counts, a
+faulting instruction does not), then one line per register, `x<i> <abi name>` padded to 9
+columns followed by the value: `x2 sp    0x00100000`.

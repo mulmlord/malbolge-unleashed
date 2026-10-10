@@ -45,6 +45,7 @@ foreach(case halting_cat loop_cat epipe debug_halting_cat debug_hello debug_epip
 endforeach()
 add_subdirectory(corpus)
 add_subdirectory(reference)
+add_subdirectory(rv)
 
 malm_add_test(NAME cycles_test LABEL fast SOURCES asm/cycles_test.cpp LIBS malm_asm)
 

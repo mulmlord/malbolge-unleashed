@@ -18,6 +18,7 @@ with the distribution, e.g. by shipping `third_party/LICENSE-zstd.txt` alongside
 | Component | Licence | Location |
 |---|---|---|
 | [doctest](https://github.com/doctest/doctest) 2.5.3 | MIT | fetched at configure time (`cmake/MalmTests.cmake`) |
+| [riscv-tests](https://github.com/riscv-software-src/riscv-tests) (commit 7b68f7b) | BSD-3-Clause | fetched at configure time (`tests/rv/CMakeLists.txt`) |
 | Ben Olmstead's reference interpreter `malbolge.c` | public domain (stated in its header) | `tests/reference/olmstead/` |
 | Malbolge20 sample `hello20.mb` (Nagoya Univ.) | MIT | `tests/corpus/`, licence text in `tests/corpus/LICENSE-malbolge20.txt` |
 | Malbolge programs from the esolangs.org wiki | CC0 (Esolang:Copyrights) | `tests/programs/`, `tests/corpus/` |

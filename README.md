@@ -13,7 +13,8 @@ The command line (`run`, `asm`, `hla`, `export`, `pack`, `--trace`, `--stats`) i
 ## Prerequisites
 
 - C++23 compiler (GCC 14+ or Clang 18+), CMake 3.28+, Ninja
-- Later, for `malm build`: clang with the riscv32 target and lld
+- For the RISC-V tests (and later `malm build`): clang with the riscv32 target and lld; without
+  them those tests are skipped with a configure warning (`MALM_RV_TESTS`, [docs/rv.md](docs/rv.md))
 
 Arch: `sudo pacman -S --needed cmake ninja clang lld`
 
@@ -44,6 +45,7 @@ Binaries land in `build/<preset>/src/driver/malm`. CMake options: `MALM_WERROR`,
 | `src/aot` | RV32IM ELF to HLA ahead-of-time translator |
 | `src/driver` | `malm` CLI |
 | `src/pack` | native executable packer |
+| `src/rv` | RV32IM ELF loader and the C++ reference emulator (`malm rvref`, [docs/rv.md](docs/rv.md)) |
 | `rv/emu` | RV32IM emulator written in HLA |
 | `rv/runtime` | RISC-V runtime (crt0, syscalls, libc) |
 | `examples/asm` | assembly examples: hello world, cat, halting cat, adder, digital root |
@@ -71,6 +73,10 @@ step counts in [docs/adr/0002-hla-arithmetic.md](docs/adr/0002-hla-arithmetic.md
 [docs/adr/0003-hla-muldiv.md](docs/adr/0003-hla-muldiv.md)) ([docs/hla.md](docs/hla.md));
 `malm hla examples/hla/cat.mhl -o cat.malm`, then `echo hi | malm run cat.malm`. The arithmetic
 suite (`tests/hla/arith_test.cpp`, with its slow cases) passes, which is the M2 exit criterion.
+
+M3 (RISC-V emu mode), in progress: the RV32IM ELF loader and a C++ reference emulator, the test
+oracle for emu and aot mode, which passes riscv-tests `rv32ui-p-*` and `rv32um-p-*`; run an ELF
+with the hidden debugging command `malm rvref prog.elf` ([docs/rv.md](docs/rv.md)).
 
 ## License
 
