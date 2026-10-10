@@ -174,3 +174,17 @@ foreach(case hello cat fizzbuzz)
             "${rv_elf_dir}" "${PROJECT_SOURCE_DIR}/tests/programs" ${case})
     set_tests_properties(rvemu_program_${case} PROPERTIES LABELS slow TIMEOUT 1800)
 endforeach()
+
+# riscv-tests on rv-emu (issue #27): each test built with `malm build` (8K of guest RAM) and run;
+# a few seconds per test in a release build. A subset is fast, the rest slow (nightly).
+set(rv_emu_fast_tests rv32ui-p-add rv32ui-p-beq rv32ui-p-lw rv32ui-p-sw)
+foreach(name IN LISTS rv_suite_tests)
+    set(label slow)
+    if(name IN_LIST rv_emu_fast_tests)
+        set(label fast)
+    endif()
+    add_test(NAME rvemu_${name}
+        COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/rvemu_suite_test.sh" $<TARGET_FILE:malm>
+            "${rv_elf_dir}/${name}.elf")
+    set_tests_properties(rvemu_${name} PROPERTIES LABELS ${label} TIMEOUT 600)
+endforeach()
