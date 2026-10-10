@@ -1,6 +1,6 @@
-# The RISC-V loader and reference emulator (issue #23, docs/rv.md). Unit tests need no RISC-V
-# toolchain; the riscv-tests suite and the C test programs are built with clang (riscv32 target)
-# and ld.lld when they are found (MALM_RV_TESTS).
+# The RISC-V loader and reference emulator (issue #23) and runtime (issue #24), docs/rv.md. Unit
+# tests need no RISC-V toolchain; the riscv-tests suite and the C test programs are built with clang
+# (riscv32 target) and ld.lld when they are found (MALM_RV_TESTS).
 malm_add_test(NAME rv_test LABEL fast SOURCES elf_test.cpp machine_test.cpp rvref_test.cpp
     LIBS malm_rv malm_driver)
 
@@ -52,19 +52,54 @@ FetchContent_Declare(riscv_tests
     DOWNLOAD_EXTRACT_TIMESTAMP ON)
 FetchContent_MakeAvailable(riscv_tests)
 
-set(rv_ld_script "${CMAKE_CURRENT_SOURCE_DIR}/link.ld")
+set(rt_dir "${PROJECT_SOURCE_DIR}/rv/runtime")
+set(rv_ld_script "${rt_dir}/link.ld")
 set(rv_elf_dir "${CMAKE_CURRENT_BINARY_DIR}/elf")
-file(MAKE_DIRECTORY "${rv_elf_dir}")
+file(MAKE_DIRECTORY "${rv_elf_dir}/runtime")
 set(rv_elfs "")
 
-# rv_elf(<name> <source> [DEPENDS <files>...] [FLAGS <flags>...]): compile and link one test ELF.
+# The runtime: crt0 and one object per libc source, linked as a lazy library (--start-lib) so that
+# a program pulls in only the members it uses, and with --gc-sections only the functions.
+file(GLOB rt_headers CONFIGURE_DEPENDS "${rt_dir}/include/*.h")
+file(GLOB rt_sources CONFIGURE_DEPENDS "${rt_dir}/src/*.c")
+set(rt_cflags -O2 -nostdlibinc -isystem "${rt_dir}/include" -ffunction-sections -fdata-sections)
+set(rt_crt0 "${rv_elf_dir}/runtime/crt0.o")
+add_custom_command(OUTPUT "${rt_crt0}"
+    COMMAND "${MALM_RV_CC}" ${rv_flags} -c "${rt_dir}/crt0.S" -o "${rt_crt0}"
+    DEPENDS "${rt_dir}/crt0.S"
+    COMMENT "Building RISC-V runtime crt0"
+    VERBATIM)
+set(rt_libc "")
+foreach(src IN LISTS rt_sources)
+    cmake_path(GET src STEM stem)
+    set(obj "${rv_elf_dir}/runtime/${stem}.o")
+    add_custom_command(OUTPUT "${obj}"
+        COMMAND "${MALM_RV_CC}" ${rv_flags} ${rt_cflags} -ffreestanding -std=c11
+            -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wsign-conversion -Werror
+            -c "${src}" -o "${obj}"
+        DEPENDS "${src}" ${rt_headers}
+        COMMENT "Building RISC-V runtime ${stem}"
+        VERBATIM)
+    list(APPEND rt_libc "${obj}")
+endforeach()
+
+# rv_elf(<name> <source> [RUNTIME] [DEPENDS <files>...] [FLAGS <flags>...]): compile and link one
+# test ELF; RUNTIME builds it against the runtime's headers and links crt0 and the libc.
 function(rv_elf name src)
-    cmake_parse_arguments(ARG "" "" "DEPENDS;FLAGS" ${ARGN})
+    cmake_parse_arguments(ARG "RUNTIME" "" "DEPENDS;FLAGS" ${ARGN})
     set(obj "${rv_elf_dir}/${name}.o")
     set(elf "${rv_elf_dir}/${name}.elf")
+    set(inputs "${obj}")
+    set(ld_flags "")
+    if(ARG_RUNTIME)
+        list(PREPEND ARG_FLAGS ${rt_cflags})
+        list(APPEND ARG_DEPENDS ${rt_headers} "${rt_crt0}" ${rt_libc})
+        set(inputs "${rt_crt0}" "${obj}" --start-lib ${rt_libc} --end-lib)
+        set(ld_flags --gc-sections)
+    endif()
     add_custom_command(OUTPUT "${elf}"
         COMMAND "${MALM_RV_CC}" ${rv_flags} ${ARG_FLAGS} -c "${src}" -o "${obj}"
-        COMMAND "${MALM_RV_LD}" -T "${rv_ld_script}" "${obj}" -o "${elf}"
+        COMMAND "${MALM_RV_LD}" -T "${rv_ld_script}" ${ld_flags} ${inputs} -o "${elf}"
         DEPENDS "${src}" "${rv_ld_script}" ${ARG_DEPENDS}
         COMMENT "Building RISC-V test ${name}"
         VERBATIM)
@@ -87,12 +122,20 @@ foreach(suite rv32ui rv32um)
     endforeach()
 endforeach()
 
-# Freestanding C programs (no runtime yet).
+# Bare C programs without the runtime (sys.h), for the emulator's initial and final state.
 foreach(prog hello cat)
     rv_elf(${prog} "${CMAKE_CURRENT_SOURCE_DIR}/programs/${prog}.c"
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/programs/sys.h"
         FLAGS -O2 -ffreestanding -Wall -Wextra -Werror)
 endforeach()
+
+# Programs on the runtime: the C examples and the runtime's self-check.
+foreach(prog hello cat fizzbuzz)
+    rv_elf(example_${prog} "${PROJECT_SOURCE_DIR}/examples/c/${prog}.c" RUNTIME
+        FLAGS -Wall -Wextra -Werror)
+endforeach()
+rv_elf(runtime_test "${CMAKE_CURRENT_SOURCE_DIR}/programs/runtime_test.c" RUNTIME
+    FLAGS -Wall -Wextra -Werror)
 
 add_custom_target(rv_test_elfs ALL DEPENDS ${rv_elfs})
 
@@ -101,7 +144,7 @@ foreach(name IN LISTS rv_suite_tests)
     set_tests_properties(rvref_${name} PROPERTIES LABELS fast TIMEOUT 60)
 endforeach()
 
-foreach(case hello cat trace regs)
+foreach(case hello cat trace regs example_hello example_cat fizzbuzz runtime runtime_assert)
     add_test(NAME rvref_program_${case}
         COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/rvref_pipe_test.sh" $<TARGET_FILE:malm>
             "${rv_elf_dir}" "${PROJECT_SOURCE_DIR}/tests/programs" ${case})
