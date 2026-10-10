@@ -13,8 +13,9 @@ The command line (`run`, `asm`, `hla`, `export`, `pack`, `--trace`, `--stats`) i
 ## Prerequisites
 
 - C++23 compiler (GCC 14+ or Clang 18+), CMake 3.28+, Ninja
-- For the RISC-V tests (and later `malm build`): clang with the riscv32 target and lld; without
-  them those tests are skipped with a configure warning (`MALM_RV_TESTS`, [docs/rv.md](docs/rv.md))
+- For the RISC-V runtime and tests (and later `malm build`): clang with the riscv32 target and lld
+  (`ld.lld`); without them those tests are skipped with a configure warning (`MALM_RV_TESTS`,
+  [docs/rv.md](docs/rv.md))
 
 Arch: `sudo pacman -S --needed cmake ninja clang lld`
 
@@ -47,9 +48,10 @@ Binaries land in `build/<preset>/src/driver/malm`. CMake options: `MALM_WERROR`,
 | `src/pack` | native executable packer |
 | `src/rv` | RV32IM ELF loader and the C++ reference emulator (`malm rvref`, [docs/rv.md](docs/rv.md)) |
 | `rv/emu` | RV32IM emulator written in HLA |
-| `rv/runtime` | RISC-V runtime (crt0, syscalls, libc) |
+| `rv/runtime` | RISC-V runtime: crt0, linker script, syscalls, minimal libc ([docs/rv.md](docs/rv.md)) |
 | `examples/asm` | assembly examples: hello world, cat, halting cat, adder, digital root |
 | `examples/hla` | high-level assembly examples: hello world, cat, exit status, reverse (stack) |
+| `examples/c` | C examples for the RISC-V runtime: hello world, cat, fizzbuzz |
 | `tests/` | doctest suites (labels `fast`, `slow`) |
 | `docs/` | spec, CLI reference, research and design decisions (`docs/adr`) |
 | `prototypes/` | throwaway spike code behind the ADRs; not built or tested |
@@ -76,7 +78,10 @@ suite (`tests/hla/arith_test.cpp`, with its slow cases) passes, which is the M2 
 
 M3 (RISC-V emu mode), in progress: the RV32IM ELF loader and a C++ reference emulator, the test
 oracle for emu and aot mode, which passes riscv-tests `rv32ui-p-*` and `rv32um-p-*`; run an ELF
-with the hidden debugging command `malm rvref prog.elf` ([docs/rv.md](docs/rv.md)).
+with the hidden debugging command `malm rvref prog.elf` ([docs/rv.md](docs/rv.md)). The RISC-V
+runtime (crt0, linker script, system calls and a minimal libc with malloc and printf) runs the C
+programs in `examples/c` on the reference emulator; how to compile and link against it by hand is
+in [docs/rv.md](docs/rv.md) section 6, until `malm build` does it.
 
 ## License
 

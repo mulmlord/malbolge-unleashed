@@ -77,17 +77,105 @@ instructions from 1, the faulting one included. Reasons:
 - `instruction fetch outside guest RAM`
 - `E_IO: cannot write to stdout`, `E_IO: cannot read from stdin`
 
-## 6. Tests
+## 6. Runtime
+
+`rv/runtime` is what a C program needs to run as a guest: the entry point (`crt0.S`), the linker
+script (`link.ld`), the system call wrappers and a minimal C library (`include/`, `src/`).
+
+### Toolchain and linking
+
+The runtime needs clang with the riscv32 target and `ld.lld` (Arch: `clang lld`; Ubuntu:
+`clang-18 lld-18`), nothing else: no GCC toolchain, sysroot, compiler-rt or `llvm-ar`. Until
+`malm build` does it, a program is built like this (the CMake build in `tests/rv` does the same):
+
+```sh
+target="--target=riscv32-unknown-elf -march=rv32im -mabi=ilp32"
+inc="-nostdlibinc -isystem rv/runtime/include -ffunction-sections -fdata-sections"
+clang $target -c rv/runtime/crt0.S -o crt0.o
+for f in rv/runtime/src/*.c; do clang $target $inc -O2 -ffreestanding -c "$f"; done  # the libc
+clang $target $inc -O2 -c prog.c -o prog.o
+ld.lld -T rv/runtime/link.ld --gc-sections crt0.o prog.o \
+    --start-lib assert.o ctype.o divdi3.o exit.o malloc.o printf.o stdio.o stdlib.o string.o \
+    syscalls.o --end-lib -o prog.elf
+malm rvref prog.elf
+```
+
+- `-nostdlibinc` drops the host's headers but keeps clang's own freestanding ones (`stddef.h`,
+  `stdint.h`, `stdarg.h`, `stdbool.h`, `limits.h`, ...), which complete the runtime's.
+- The library is compiled with `-ffreestanding`, so clang does not turn its loops into calls to the
+  functions they implement. Programs are compiled hosted: clang may replace `printf("hi\n")` with
+  `puts("hi")` and the like, which the library provides.
+- `--start-lib ... --end-lib` gives the library objects archive semantics without `llvm-ar`: an
+  object is linked only if it defines a symbol the program needs; `--gc-sections` then drops the
+  unused functions. A hello world is about 1 KB of code.
+- Floating-point arithmetic needs soft-float routines (`__addsf3`, ...) that the runtime does not
+  have: such a program fails to link.
+
+### Memory layout
+
+| addresses | contents |
+|---|---|
+| `[0, 0x1000)` | unused; nothing faults there, a null pointer reads zeros |
+| `0x1000` up | `.text` (`_start` first), `.rodata`, `.init_array`, `.data`, `.bss`, up to `_end` |
+| `_end` up | the heap, grown through `brk` |
+| below `ram_size` | the stack, growing down from the initial `sp` |
+
+`sbrk` and `brk` keep the heap at least `__stack_size` bytes below the initial `sp` (default 64 KiB,
+`ld.lld --defsym=__stack_size=N` to change it) and fail with `ENOMEM` beyond that, so `malloc`
+returns NULL instead of handing out the stack. Nothing stops a stack deeper than `__stack_size`
+from running into the heap.
+
+### crt0
+
+`_start` clears `.bss` (the loaders already zero it; this keeps the runtime independent of that),
+aligns `sp` to 16 and records it for the heap limit, runs the `.init_array` constructors, and calls
+`main(0, argv, envp)` with `argv` and `envp` pointing to empty (NULL-terminated) vectors, then
+`exit` with main's result. The exit status is that value `& 255`.
+
+### Library
+
+| header | contents |
+|---|---|
+| `unistd.h` | `read`, `write`, `_exit`, `brk`, `sbrk`: the system calls of section 4; an error sets `errno` and returns -1 |
+| `errno.h` | `errno` and the Linux error numbers |
+| `stdlib.h` | `malloc`, `calloc`, `realloc`, `free` (first-fit, address-ordered free list with merging, on `sbrk`; blocks 16-aligned); `exit`, `atexit` (32 functions), `abort`; `abs`, `labs`, `atoi`, `atol`, `strtol`, `strtoul`; `qsort` (heapsort) |
+| `string.h` | `memcpy`, `memmove`, `memset`, `memcmp`, `memchr`, `strlen`, `strnlen`, `strcmp`, `strncmp`, `strcpy`, `strncpy`, `strcat`, `strncat`, `strchr`, `strrchr`, `strstr`, `strdup` |
+| `stdio.h` | `stdin`, `stdout`, `stderr`; `fputc`, `putc`, `putchar`, `fputs`, `puts`, `fwrite`, `fflush`; `fgetc`, `getc`, `getchar`, `ungetc` (one byte), `fgets`, `fread`; `feof`, `ferror`, `clearerr`; `printf`, `fprintf`, `sprintf`, `snprintf` and their `v` forms |
+| `ctype.h` | the `is...` classes and `tolower`, `toupper` of the "C" locale (ASCII) |
+| `assert.h` | `assert` (a failure prints ``file:line: function: Assertion `expr' failed.`` on stderr and aborts), `static_assert` |
+| (none) | `__udivdi3`, `__umoddi3`, `__divdi3`, `__moddi3`: the 64-bit division clang calls for `long long` |
+
+- **Streams.** `stdout` is line-buffered (1024 bytes): it is written when the buffer is full, after
+  a newline, before a read from `stdin`, before a write to `stderr` (which also goes to stdout, so
+  the two stay in order) and by `exit`. `_exit`, `abort` and a fault lose what is buffered.
+  `stdin` is unbuffered: `read` blocks until it has every byte asked for (section 4), so reading
+  ahead would wait for input the program has not asked for yet. `getchar` reads one byte per
+  `read`, `fread` passes its whole request to one `read`.
+- **printf** knows the conversions `d i u o x X c s p %`, the flags `- + space # 0`, width and
+  precision (also `*`) and the length modifiers `hh h l ll j z t`. `%p` prints like `%#x`. A
+  floating-point conversion (`f e g a` in either case) is printed as written, `%f` for example, and
+  its argument skipped.
+- **exit** runs the `atexit` functions in reverse order, flushes `stdout` and ends the program with
+  `ecall` 93. `abort` ends it at once with status 134 (128 + SIGABRT, what a shell reports for a
+  real abort).
+
+Everything else in the C library (`scanf`, string to floating-point conversion, files, time,
+locales, wide characters, `setjmp`, signals) is missing; picolibc is planned for that.
+
+## 7. Tests
 
 `tests/rv/`: unit tests for the loader and every instruction class (`rv_test`), the official
 [riscv-tests](https://github.com/riscv-software-src/riscv-tests) `rv32ui-p-*` and `rv32um-p-*`
-on `malm rvref`, and freestanding C programs (`tests/rv/programs/`).
+on `malm rvref`, and C programs through real pipes with their output and exit status checked:
+`tests/rv/programs/hello.c` and `cat.c` without the runtime (for the initial and final machine
+state), and on the runtime the examples in `examples/c` (hello, cat, fizzbuzz) and
+`tests/rv/programs/runtime_test.c`, a self-check of crt0 and the library.
 
 riscv-tests is fetched at configure time (pinned commit) and built with clang and ld.lld, without
 its `env` submodule: `tests/rv/env/riscv_test.h` replaces the machine-mode environment with one
 that needs no CSRs or trap handler. A test starts at `_start` and exits through `ecall` 93 with
 status 0 on pass and the failing test number (mod 256, never 0) on fail. Every test ELF is linked
-with `tests/rv/link.ld` (one image from address `0x1000`).
+with `rv/runtime/link.ld`.
 
 The CMake cache variable `MALM_RV_TESTS` controls these toolchain-built tests: `AUTO` (default)
 builds them when clang with the riscv32 target and ld.lld are found and otherwise skips them with

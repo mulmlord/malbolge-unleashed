@@ -1,0 +1,29 @@
+/* Guest memory layout (docs/rv.md section 6): one image from 0x1000 up, then the heap growing up
+   from _end through brk, and the stack growing down from the top of guest RAM, where the machine
+   sets sp. sbrk keeps the heap __stack_size bytes below the initial sp (override it with
+   --defsym=__stack_size=...). Also used for riscv-tests and the bare test programs. */
+OUTPUT_ARCH(riscv)
+ENTRY(_start)
+PROVIDE(__stack_size = 64K);
+
+SECTIONS
+{
+    . = 0x1000;
+    .text : { KEEP(*(.text.init)) *(.text .text.*) }
+    .rodata : { *(.rodata .rodata.* .srodata .srodata.*) }
+    .init_array : {
+        PROVIDE_HIDDEN(__init_array_start = .);
+        KEEP(*(SORT_BY_INIT_PRIORITY(.init_array.*)))
+        KEEP(*(.init_array))
+        PROVIDE_HIDDEN(__init_array_end = .);
+    }
+    .data : { *(.data .data.* .sdata .sdata.*) }
+    .bss : {
+        . = ALIGN(16);
+        __bss_start = .;
+        *(.sbss .sbss.* .bss .bss.* COMMON)
+        . = ALIGN(16);
+        __bss_end = .;
+    }
+    _end = .;
+}
