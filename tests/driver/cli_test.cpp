@@ -77,19 +77,6 @@ TEST_CASE("unknown command") {
     CHECK(r.err.find("malm: unknown command 'frobnicate'") != std::string::npos);
 }
 
-TEST_CASE("known subcommands are not implemented yet") {
-    for (std::string_view sub : kSubcommands) {
-        if (sub == "run" || sub == "export" || sub == "pack" || sub == "asm" || sub == "disasm" ||
-            sub == "hla") {
-            continue;
-        }
-        const Result r = run({sub, "x"});
-        CHECK(r.code == 2);
-        CHECK(r.out.empty());
-        CHECK(r.err == "malm " + std::string(sub) + ": not implemented\n");
-    }
-}
-
 namespace {
 
 // Writes `content` to a fresh temp file and removes it on destruction.

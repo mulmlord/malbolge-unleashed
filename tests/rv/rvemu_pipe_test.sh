@@ -1,6 +1,6 @@
 #!/bin/sh
-# rv-emu end to end (issue #25): `malm rvemu` with a guest ELF, `malm hla`, then `malm run` through
-# real pipes; stdout and the exit status must be those of `malm rvref`.
+# rv-emu end to end (issues #25, #26): `malm build` with a guest ELF, then `malm run` through real
+# pipes; stdout and the exit status must be those of `malm rvref`.
 # Usage: rvemu_pipe_test.sh <malm> <elf-dir> <programs-dir> <case>
 set -u
 malm=$1
@@ -12,8 +12,7 @@ trap 'rm -rf "$tmp"' EXIT
 
 # same <elf> <input file>: the emulator (64K of guest RAM) agrees with the reference emulator.
 same() {
-    "$malm" rvemu --ram 64K -o "$tmp/emu.mhl" "$1" || exit 1
-    "$malm" hla -o "$tmp/emu.malm" "$tmp/emu.mhl" || exit 1
+    "$malm" build --ram 64K -o "$tmp/emu.malm" "$1" || exit 1
     "$malm" rvref --ram 64K "$1" < "$2" > "$tmp/ref.out"
     ref=$?
     "$malm" run "$tmp/emu.malm" < "$2" > "$tmp/emu.out"

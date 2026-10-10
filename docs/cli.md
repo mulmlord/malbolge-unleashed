@@ -15,7 +15,7 @@ usage: malm <command> [args...]
 | `asm` | implemented | assemble a `.mua` file into a `.malm` or Malbolge text; check and pretty-print it |
 | `disasm` | implemented | turn a program back into readable assembly, or list it cell by cell |
 | `hla` | implemented | compile a high-level `.mhl` file into a `.malm` or Malbolge text; check it and print the generated assembly |
-| `build` | not implemented yet | exit 2 with `malm build: not implemented` |
+| `build` | implemented for RV32IM ELF input (emu mode) | build a RISC-V program into a `.malm`; compiling C and other sources and `--exe` follow (issue #28) |
 | `rvref` | implemented, hidden | run an RV32IM ELF on the C++ reference emulator (a debugging tool; not listed by `--help`) |
 | `rvemu` | implemented, hidden | write the HLA program of rv-emu, the RV32IM emulator, optionally with a guest program in its RAM (a build and debugging tool; not listed by `--help`) |
 
@@ -253,6 +253,36 @@ tests: `tests/hla/`. Examples: `examples/hla/`.
 Diagnostics, exit codes, purity check and determinism are those of `malm asm`; diagnostics point at
 the `.mhl` file, also for errors the assembler finds in the generated program.
 
+## `malm build`
+
+```
+usage: malm build [--ram <size>] -o <out.malm> [--] <prog.elf>
+```
+
+Builds an RV32IM ELF executable into a pure `.malm` that runs it in emu mode: rv-emu with the
+program in its guest RAM ([rv.md](rv.md) section 8). The ELF is loaded like `malm rvref` loads it
+(rv.md section 1); the guest's stdin, stdout and exit status are the program's, through `malm run`
+or a packed executable (`malm pack`). Implementation: `src/driver/build_cmd.cpp`; tests:
+`tests/rv/build_test.cpp` and `tests/rv/rvemu_pipe_test.sh`.
+
+| option | meaning |
+|---|---|
+| `--ram <size>` | guest RAM in bytes, or with a `K` (KiB) or `M` (MiB) suffix; a multiple of 16 up to `4M` (HLA's RAM limit); default `1M` |
+| `-o <out.malm>` | where to write the program, a `.malm` (zstd) with the `EXIT_A` flag; `-o -` writes it to stdout |
+
+Exit codes: 0; 1 if the ELF loader rejects the file (`malm build: <file>: <reason>`), a file
+cannot be read or written, or the output would overwrite the input; 2 for a usage error. The
+output passes the purity check of `malm asm`, and the same ELF and options give the same bytes.
+
+Building compiles the whole emulator: about 25 seconds with the default 1 MiB of guest RAM and 4 with
+64 KiB (release build). Running needs about 5 GB of host memory with 1 MiB (rv.md section 8).
+
+```
+$ malm build --ram 64K hello.elf -o hello.malm
+$ malm run hello.malm
+Hello, world!
+```
+
 ## `malm disasm`
 
 ```
@@ -356,6 +386,9 @@ Implementation: `src/rv/emu.cpp`, `src/rv/semantics.cpp` and `src/driver/rvemu_c
 
 Exit codes: 0; 1 if the ELF loader rejects the file or a file cannot be read or written, with a
 diagnostic on stderr; 2 usage error.
+
+`malm build` does both steps in one; with `malm rvemu`, the generated program can be read or
+compiled with `malm hla --map`:
 
 ```
 $ malm rvemu --ram 64K hello.elf -o hello.mhl && malm hla -o hello.malm hello.mhl
