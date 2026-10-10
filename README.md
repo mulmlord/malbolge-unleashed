@@ -46,8 +46,8 @@ Binaries land in `build/<preset>/src/driver/malm`. CMake options: `MALM_WERROR`,
 | `src/aot` | RV32IM ELF to HLA ahead-of-time translator |
 | `src/driver` | `malm` CLI |
 | `src/pack` | native executable packer |
-| `src/rv` | RV32IM ELF loader and the C++ reference emulator (`malm rvref`, [docs/rv.md](docs/rv.md)) |
-| `rv/emu` | RV32IM emulator written in HLA |
+| `src/rv` | RV32IM ELF loader, the C++ reference emulator (`malm rvref`) and the generator of rv-emu with its instruction semantics (`malm rvemu`, [docs/rv.md](docs/rv.md)) |
+| `rv/emu` | builds `emu.malm`, the RV32IM emulator written in HLA |
 | `rv/runtime` | RISC-V runtime: crt0, linker script, syscalls, minimal libc ([docs/rv.md](docs/rv.md)) |
 | `examples/asm` | assembly examples: hello world, cat, halting cat, adder, digital root |
 | `examples/hla` | high-level assembly examples: hello world, cat, exit status, reverse (stack) |
@@ -81,7 +81,10 @@ oracle for emu and aot mode, which passes riscv-tests `rv32ui-p-*` and `rv32um-p
 with the hidden debugging command `malm rvref prog.elf` ([docs/rv.md](docs/rv.md)). The RISC-V
 runtime (crt0, linker script, system calls and a minimal libc with malloc and printf) runs the C
 programs in `examples/c` on the reference emulator; how to compile and link against it by hand is
-in [docs/rv.md](docs/rv.md) section 6, until `malm build` does it.
+in [docs/rv.md](docs/rv.md) section 6, until `malm build` does it. rv-emu, the RV32IM emulator
+written in HLA, is built into `emu.malm` with the toolchain and agrees with the reference emulator
+instruction by instruction; until the emu-mode image builder exists, `malm rvemu prog.elf -o
+prog.mhl` writes it with a program in its RAM for `malm hla` ([docs/rv.md](docs/rv.md) section 8).
 
 ## License
 

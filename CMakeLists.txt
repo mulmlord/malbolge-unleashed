@@ -38,6 +38,7 @@ add_subdirectory(src/container)
 add_subdirectory(src/pack)
 add_subdirectory(src/rv)
 add_subdirectory(src/driver)
+add_subdirectory(rv/emu)
 
 if(MALM_BUILD_TESTS)
     enable_testing()

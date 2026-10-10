@@ -11,6 +11,7 @@
 #include "driver/hla_cmd.hpp"
 #include "driver/pack_cmd.hpp"
 #include "driver/run_cmd.hpp"
+#include "driver/rvemu_cmd.hpp"
 #include "driver/rvref_cmd.hpp"
 #include "version.hpp"
 
@@ -37,6 +38,7 @@ constexpr auto kCommands = std::to_array<Command>({
     {"pack", "Pack a .malm into a native executable", pack_command},
     {"export", "Convert between .malm and plain Malbolge text (--text | --malm)", export_command},
     {"rvref", "Run an RV32IM ELF on the C++ reference emulator", rvref_command, true},
+    {"rvemu", "Write the HLA program of rv-emu, the RV32IM emulator", rvemu_command, true},
 });
 
 void print_usage(std::ostream& os) {

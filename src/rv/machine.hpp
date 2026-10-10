@@ -57,6 +57,9 @@ class Machine {
     // The 32-bit little-endian word at addr, or nullopt if it is not inside guest RAM.
     std::optional<std::uint32_t> peek32(std::uint32_t addr) const;
 
+    // For tests: overwrite a register (x0 stays 0), like the state after some instructions.
+    void set_reg(unsigned i, std::uint32_t value) { set(i, value); }
+
   private:
     bool in_ram(std::uint32_t addr, std::uint32_t size) const noexcept;
     std::uint32_t load(std::uint32_t addr, unsigned size) const;

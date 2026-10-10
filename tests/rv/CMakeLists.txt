@@ -3,6 +3,17 @@
 # (riscv32 target) and ld.lld when they are found (MALM_RV_TESTS).
 malm_add_test(NAME rv_test LABEL fast SOURCES elf_test.cpp machine_test.cpp rvref_test.cpp
     LIBS malm_rv malm_driver)
+# rv-emu (issue #25): single instructions against the reference emulator. A debug build spends
+# about 3 minutes compiling the emulator, so there its cases are slow.
+malm_add_test(NAME rv_emu_test LABEL fast SOURCES emu_test.cpp LIBS malm_rv malm_hla TIMEOUT 1800)
+# emu.malm as built (rv/emu): with zero RAM, the instruction at pc 0 is illegal, so it halts with 1.
+# With 1M of guest RAM its startup takes 220 M steps and about 5 GB of VM memory.
+if(TARGET emu)
+    add_test(NAME emu_malm_halts
+        COMMAND sh -c "\"$1\" run \"$2\" > /dev/null; test $? = 1" sh $<TARGET_FILE:malm>
+            "${PROJECT_BINARY_DIR}/rv/emu/emu.malm")
+    set_tests_properties(emu_malm_halts PROPERTIES LABELS fast TIMEOUT 600)
+endif()
 
 set(MALM_RV_TESTS AUTO CACHE STRING
     "Build and run riscv-tests and the RISC-V test programs: AUTO (if the toolchain is found), ON, OFF")
@@ -149,4 +160,17 @@ foreach(case hello cat trace regs example_hello example_cat fizzbuzz runtime run
         COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/rvref_pipe_test.sh" $<TARGET_FILE:malm>
             "${rv_elf_dir}" "${PROJECT_SOURCE_DIR}/tests/programs" ${case})
     set_tests_properties(rvref_program_${case} PROPERTIES LABELS fast TIMEOUT 60)
+endforeach()
+
+# rv-emu end to end through `malm rvemu`, `malm hla` and `malm run` (issue #25); slow: each case
+# compiles an emulator. Only where emu.malm is built (not in the debug preset, which would need
+# about 4 minutes per case).
+if(NOT MALM_BUILD_EMU)
+    return()
+endif()
+foreach(case hello cat fizzbuzz)
+    add_test(NAME rvemu_program_${case}
+        COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/rvemu_pipe_test.sh" $<TARGET_FILE:malm>
+            "${rv_elf_dir}" "${PROJECT_SOURCE_DIR}/tests/programs" ${case})
+    set_tests_properties(rvemu_program_${case} PROPERTIES LABELS slow TIMEOUT 1800)
 endforeach()

@@ -33,23 +33,6 @@ int usage_error(std::ostream& err, std::string_view msg) {
     return 2;
 }
 
-// Decimal bytes with an optional K (KiB) or M (MiB) suffix; a multiple of rv::kRamAlign up to
-// rv::kMaxRamSize.
-std::optional<std::uint32_t> parse_ram(std::string_view text) {
-    std::uint64_t unit = 1;
-    if (text.ends_with('K') || text.ends_with('M')) {
-        unit = text.back() == 'K' ? 1u << 10 : 1u << 20;
-        text.remove_suffix(1);
-    }
-    std::uint64_t v = 0;
-    const auto [end, ec] = std::from_chars(text.data(), text.data() + text.size(), v);
-    if (text.empty() || ec != std::errc{} || end != text.data() + text.size() || v == 0 ||
-        v > rv::kMaxRamSize / unit || v * unit % rv::kRamAlign != 0) {
-        return std::nullopt;
-    }
-    return static_cast<std::uint32_t>(v * unit);
-}
-
 std::string hex(std::uint32_t v) {
     char buf[11];
     std::snprintf(buf, sizeof buf, "0x%08x", v);
@@ -97,6 +80,21 @@ rv::Stop run_traced(rv::Machine& m, core::Io& io, std::ostream& err) {
 
 } // namespace
 
+std::optional<std::uint32_t> parse_ram_size(std::string_view text) {
+    std::uint64_t unit = 1;
+    if (text.ends_with('K') || text.ends_with('M')) {
+        unit = text.back() == 'K' ? 1u << 10 : 1u << 20;
+        text.remove_suffix(1);
+    }
+    std::uint64_t v = 0;
+    const auto [end, ec] = std::from_chars(text.data(), text.data() + text.size(), v);
+    if (text.empty() || ec != std::errc{} || end != text.data() + text.size() || v == 0 ||
+        v > rv::kMaxRamSize / unit || v * unit % rv::kRamAlign != 0) {
+        return std::nullopt;
+    }
+    return static_cast<std::uint32_t>(v * unit);
+}
+
 int rvref_command(std::span<const std::string_view> args, std::istream& in, std::ostream& out,
                   std::ostream& err) {
     std::string_view path;
@@ -113,7 +111,7 @@ int rvref_command(std::span<const std::string_view> args, std::istream& in, std:
         } else if (!options_done && arg == "--regs") {
             regs = true;
         } else if (!options_done && arg == "--ram") {
-            const auto v = i + 1 < args.size() ? parse_ram(args[i + 1]) : std::nullopt;
+            const auto v = i + 1 < args.size() ? parse_ram_size(args[i + 1]) : std::nullopt;
             if (!v) {
                 return usage_error(err, "--ram needs a positive size, a multiple of 16 bytes up "
                                         "to 1024M");

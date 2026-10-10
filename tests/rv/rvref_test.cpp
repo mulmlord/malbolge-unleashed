@@ -1,14 +1,19 @@
 #include <doctest/doctest.h>
 #include <unistd.h>
 
+#include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <sstream>
 #include <string>
 #include <string_view>
 #include <vector>
 
+#include "asm/diagnostics.hpp"
 #include "driver/cli.hpp"
+#include "hla/parser.hpp"
 #include "rv_test_util.hpp"
 
 using namespace rvtest;
@@ -146,4 +151,73 @@ TEST_CASE("rvref: usage errors exit 2") {
     }
     // The largest RAM is accepted (and then the missing file is the error).
     CHECK(run({"rvref", "--ram", "1024M", "/nonexistent/prog.elf"}).code == 1);
+}
+
+// malm rvemu (issue #25): the HLA program of rv-emu. Compiling and running it is emu_test's job;
+// here it only has to parse.
+
+bool parses(const std::string& src) {
+    malm::assembler::Diagnostics diags;
+    malm::hla::parse(src, "emu.mhl", diags);
+    return !diags.has_errors();
+}
+
+TEST_CASE("rvemu: hidden from --help, writes the emulator") {
+    CHECK(run({"--help"}).out.find("rvemu") == std::string::npos);
+    const Result r = run({"rvemu", "--ram", "4K"});
+    CHECK(r.code == 0);
+    CHECK(r.err.empty());
+    CHECK(r.out.starts_with("; rv-emu"));
+    CHECK(r.out.find("ram mem[1024]\n") != std::string::npos); // zero RAM: no initial values
+    CHECK(r.out.find("reg pc = 0x0,") != std::string::npos);
+    CHECK(r.out.find("x2 = 0x1000") != std::string::npos);
+    CHECK(r.out.find("halt 1") != std::string::npos);
+    CHECK(parses(r.out));
+
+    const Result h = run({"rvemu", "--harness", "--ram", "4K"});
+    CHECK(h.code == 0);
+    CHECK(h.out.find("halt 1") == std::string::npos); // stops continue at fetch
+    CHECK(parses(h.out));
+}
+
+TEST_CASE("rvemu: a guest program in RAM") {
+    const TempFile elf(echo_elf());
+    const TempFile mhl({}, "emu.mhl");
+    const Result r = run({"rvemu", "--ram", "64K", "-o", mhl.str(), "--", elf.str()});
+    CHECK(r.code == 0);
+    CHECK(r.out.empty());
+    std::ifstream f(mhl.path);
+    const std::string src((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    CHECK(src.find("reg pc = 0x1000,") != std::string::npos);
+    CHECK(src.find("reg brk = 0x2010, brkmin = 0x2010") != std::string::npos);
+    // Words 0 .. 0x3FF are zero, word 0x400 (address 0x1000) is the first instruction, the .bss
+    // segment at 0x2000 adds nothing.
+    const std::size_t at = src.find("ram mem[16384] = ");
+    REQUIRE(at != std::string::npos);
+    std::string zeros;
+    for (int i = 0; i < 0x400; ++i) {
+        zeros += "0x0, ";
+    }
+    CHECK(src.compare(at + 17, zeros.size(), zeros) == 0);
+    char first[16];
+    std::snprintf(first, sizeof first, "0x%X,", li(a0, 0));
+    CHECK(src.compare(at + 17 + zeros.size(), std::strlen(first), first) == 0);
+    CHECK(parses(src));
+}
+
+TEST_CASE("rvemu: errors") {
+    CHECK(run({"rvemu", "--ram", "8M"}).code == 2); // above HLA's RAM limit
+    CHECK(run({"rvemu", "--ram", "100"}).code == 2);
+    CHECK(run({"rvemu", "--ram"}).code == 2);
+    CHECK(run({"rvemu", "-o"}).code == 2);
+    CHECK(run({"rvemu", "--bogus"}).code == 2);
+    CHECK(run({"rvemu", "a.elf", "b.elf"}).code == 2);
+    const Result missing = run({"rvemu", "/nonexistent/prog.elf"});
+    CHECK(missing.code == 1);
+    const TempFile junk({'n', 'o', 't', ' ', 'e', 'l', 'f'});
+    const Result bad = run({"rvemu", junk.str()});
+    CHECK(bad.code == 1);
+    CHECK(bad.err.starts_with("malm rvemu: "));
+    const TempFile big(echo_elf());
+    CHECK(run({"rvemu", "--ram", "4K", big.str()}).code == 1); // the segments lie above 4K
 }
