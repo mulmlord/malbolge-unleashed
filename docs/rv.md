@@ -1,7 +1,7 @@
 # RISC-V guests
 
 The contract between a RISC-V guest program and the machines that run it: the C++ reference
-emulator (`src/rv/machine.hpp`, `malm rvref`), rv-emu (`rv/emu`, emu mode) and rv-aot
+emulator (`src/rv/machine.hpp`, `malm rvref`), rv-emu (section 8, emu mode) and rv-aot
 (`src/aot`). The reference emulator is the oracle; the other two must agree with it on stdout,
 exit status and, for the differential tests, the final registers. Design background:
 [the design spec](superpowers/specs/2026-10-01-malbolge-unleashed-design.md) sections 5.3, 5.4
@@ -170,6 +170,7 @@ on `malm rvref`, and C programs through real pipes with their output and exit st
 `tests/rv/programs/hello.c` and `cat.c` without the runtime (for the initial and final machine
 state), and on the runtime the examples in `examples/c` (hello, cat, fizzbuzz) and
 `tests/rv/programs/runtime_test.c`, a self-check of crt0 and the library.
+`rv_emu_test` runs rv-emu against the reference emulator one instruction at a time (section 8).
 
 riscv-tests is fetched at configure time (pinned commit) and built with clang and ld.lld, without
 its `env` submodule: `tests/rv/env/riscv_test.h` replaces the machine-mode environment with one
@@ -181,3 +182,100 @@ The CMake cache variable `MALM_RV_TESTS` controls these toolchain-built tests: `
 builds them when clang with the riscv32 target and ld.lld are found and otherwise skips them with
 a warning, `ON` makes a missing toolchain a configure error (CI), `OFF` skips them. The
 toolchain is found as `MALM_RV_CC` and `MALM_RV_LD`, which can also be set by hand.
+
+## 8. rv-emu
+
+rv-emu is the RV32IM emulator written in HLA ([hla.md](hla.md)), the core of emu mode. It is
+generated rather than written by hand: `src/rv/emu.cpp` writes its HLA program (`malm rvemu`,
+[cli.md](cli.md)), and the build compiles that with `malm hla` into `emu.malm`
+(`rv/emu/CMakeLists.txt`; guest RAM `MALM_EMU_RAM`, default `1M`; `MALM_BUILD_EMU=OFF` skips it,
+as the debug preset does). The emu-mode image builder (issue #26) will put a guest program in its
+RAM; until then `malm rvemu prog.elf` writes the emulator with the program's segments as the
+initial values of its RAM, which `malm hla` turns into startup code.
+
+### State
+
+| guest | HLA |
+|---|---|
+| `x1` .. `x31` | registers `x1` .. `x31` (`x2` starts at `ram_size`); `x0` is the constant 0 |
+| `pc` | register `pc` (the ELF entry) |
+| guest RAM `[0, ram_size)` | the RAM region `mem` at HLA address 0, so a guest address is an HLA byte address; at most 4 MiB (HLA's limit of 2^20 words) |
+| program break | registers `brk` and `brkmin` (the end of the image) |
+| why it stopped | register `stop` (`src/rv/semantics.hpp` `StopCode`: 0 running, 1 illegal instruction, 2 `ebreak`, 3 misaligned jump, 4 and 5 a load or store outside RAM, 6 a fetch outside RAM, 7 `exit`) |
+
+### The loop
+
+Each turn starts at the label `fetch`: `load insn, [pc]`, then a `switch` on the low byte of the
+instruction (the opcode; for branches bit 7 is bit 11 of the offset, so the switch also decodes
+it). An instruction reads its operands through two subroutines (`rs1`, `rs2`: a `switch` on the
+register field into 32 `mov`s), decodes `funct3` and `funct7` with `switch`es, builds its
+immediate with shifts and masks, runs its semantics, and writes `rd` through `wb` (another
+`switch`, `x0` skipped). `next` advances `pc`: inside a 256-byte block it flips the bits of the
+low byte with an `xor` (150 steps instead of the 1 750 of an `add`); the last word of a block, and
+the last word of RAM, take the `add` and the range check.
+
+The semantics are C++ functions that write HLA (`src/rv/semantics.hpp`), shared with rv-aot: an
+ALU instruction is one HLA statement (HLA's arithmetic is RV32IM's); branches are `xor`, `slt` or
+`sltu` and `bz`/`bnz`; loads and stores are subroutines that check the address, `switch` on its
+low two bits and assemble or merge bytes from one or two aligned HLA words (misaligned accesses
+work, as in section 3); `ecall` dispatches on `a7` with a `switch` (and checks its upper bits):
+`read` runs HLA's `in` (Malbolge `In`) once per byte, `write` `out` per byte, `exit` halts with `a0
+& 255` (`EXIT_A`), `brk` moves the break. Subroutines are entered by `mov link, L; jmp
+subroutine` and return by `jmp link` (60 steps, against 330 for HLA's `call` and `ret`).
+
+Faults (section 5) set `stop` and halt with exit status 1. Unlike the reference emulator, rv-emu
+has no stderr: the diagnostic is the register `stop` and `pc`, which names the faulting
+instruction (for a fetch fault, the address outside RAM), as in the reference emulator.
+A jump or branch to an aligned address outside RAM faults when `pc` is set rather than at the
+next fetch; the registers are the same either way.
+
+### Costs
+
+VM steps per guest instruction, from `rv_emu_test` (means over its cases; every instruction
+includes the fetch, the opcode switch and `next`, about 1 100 steps):
+
+| instruction | steps |
+|---|---|
+| `lui` / `auipc` | 2 200 / 4 250 |
+| `addi`, `andi`, `ori`, `xori` | 5 500 to 7 300 |
+| `add`, `sub`, `slt`, `sltu` (register) | 8 500 |
+| `and`, `or`, `xor` / shifts (register) | 6 800 / 7 500 to 8 300 |
+| branch not taken / taken | 5 300 to 7 800 / 11 400 to 14 000 |
+| `jal` / `jalr` | 11 600 / 10 800 |
+| `lw` / `lb`, `lbu`, `lh`, `lhu` (aligned) | 9 400 / 10 000 to 10 700 |
+| `sw` / `sb`, `sh` (aligned) | 10 800 / 12 400 to 12 700 |
+| misaligned `lh`, `lw` / `sh`, `sw` | 12 000 to 15 000 / 16 400 to 17 900 |
+| `mul` / `mulh`, `mulhsu`, `mulhu` | 50 000 / 57 500 |
+| `div`, `divu`, `rem`, `remu` | 125 000 to 130 000 |
+| `ecall` (`brk`, a few bytes of `read`/`write`) | 17 000 |
+
+`read` and `write` add about 5 500 steps per byte. The ALU instructions with a register operand
+(`add`: 2 000) and the operand reads (`rs1`, `rs2`: about 1 100 each, 640 of them the shift that
+extracts the field) dominate; loads and stores add the range check (`and`, `bnz`: 1 300) and the address
+`add`.
+
+Instructions per second, measured with `malm run --stats` (release build, one core of a desktop
+machine that was also running other programs, so the times are rough; the VM reaches about 40 M
+steps per second on that machine when it is idle; issue #37 will add proper benchmarks):
+
+| program, guest RAM | guest instructions | VM steps | time | instructions/s |
+|---|---|---|---|---|
+| `runtime_test.c` (the runtime's self-check), 1 MiB | 3 120 348 | 27.3 G (8 740 per instruction) | 1 224 s (22.3 M steps/s) | 2 550 |
+| `hello.c` (bare), 64 KiB | 11 | 36.6 M, nearly all startup | 0.9 s (40 M steps/s) | |
+
+A large guest RAM costs memory rather than speed. Every RAM word is a record in a VM page of its
+own group (ADR 0001, "VM memory"), so 1 MiB of guest RAM touches about 100 000 VM pages, about
+5 GB of host memory; the VM runs about 15% slower than with 64 KiB (measured back to back).
+Smaller pages are VM work (issue #37).
+
+Program size and startup (the startup code writes the registers, RAM and tables, spec 4):
+
+| guest RAM | `emu.malm` | Malbolge text and startup steps | startup time |
+|---|---|---|---|
+| 4 KiB | 0.8 MB | 26 M | under a second |
+| 64 KiB | 0.9 MB | 37 M | about a second |
+| 1 MiB (the default) | 2.6 MB | 223 M | 6 to 60 seconds (idle to busy machine) |
+
+The 26 `switch` tables (320 K characters each) and the arithmetic library make up the 26 M of the
+smallest; each word of guest RAM adds about 750 characters. `malm hla` compiles the 1 MiB
+emulator in about 25 seconds (release build).

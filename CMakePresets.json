@@ -14,7 +14,8 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
         "MALM_SANITIZE": "ON",
-        "MALM_WERROR": "ON"
+        "MALM_WERROR": "ON",
+        "MALM_BUILD_EMU": "OFF"
       }
     },
     {

@@ -17,6 +17,7 @@ usage: malm <command> [args...]
 | `hla` | implemented | compile a high-level `.mhl` file into a `.malm` or Malbolge text; check it and print the generated assembly |
 | `build` | not implemented yet | exit 2 with `malm build: not implemented` |
 | `rvref` | implemented, hidden | run an RV32IM ELF on the C++ reference emulator (a debugging tool; not listed by `--help`) |
+| `rvemu` | implemented, hidden | write the HLA program of rv-emu, the RV32IM emulator, optionally with a guest program in its RAM (a build and debugging tool; not listed by `--help`) |
 
 The program file of `run`, `export`, `pack` and `disasm` is a `.malm` container ([malm-format.md](malm-format.md))
 or Malbolge text (spec 4); the two are told apart by the first four bytes. For a `.malm` the header
@@ -334,3 +335,30 @@ step=3 pc=0x00001008 insn=0x00e00613 a2=0x0000000e
 The `--regs` block is `pc   0x...`, `steps N` (instructions completed; the `exit` ecall counts, a
 faulting instruction does not), then one line per register, `x<i> <abi name>` padded to 9
 columns followed by the value: `x2 sp    0x00100000`.
+
+## `malm rvemu`
+
+```
+usage: malm rvemu [--ram <size>] [--harness] [-o <out.mhl>] [--] [<prog.elf>]
+```
+
+Writes the HLA program of rv-emu, the RV32IM emulator written in HLA ([rv.md](rv.md) section 8),
+for `malm hla` to compile. The build makes `emu.malm` with it (`rv/emu/CMakeLists.txt`).
+Implementation: `src/rv/emu.cpp`, `src/rv/semantics.cpp` and `src/driver/rvemu_cmd.cpp`; tests:
+`tests/rv/`. A build and debugging tool, so `malm --help` does not list it.
+
+| option | meaning |
+|---|---|
+| `--ram <size>` | guest RAM in bytes, or with a `K` (KiB) or `M` (MiB) suffix; a multiple of 16 up to `4M` (HLA's RAM limit); default `1M` |
+| `--harness` | a stop (fault or `exit`) sets the register `stop` and continues at the label `fetch` instead of halting, so a test can run case after case in one VM |
+| `-o <out.mhl>` | where to write the program (`-` or no `-o`: stdout) |
+| `<prog.elf>` | a guest program (loaded like `malm rvref` loads it): its segments are the initial RAM, `pc` starts at its entry and the program break at its end; without one, RAM is zero and `pc` starts at 0 |
+
+Exit codes: 0; 1 if the ELF loader rejects the file or a file cannot be read or written, with a
+diagnostic on stderr; 2 usage error.
+
+```
+$ malm rvemu --ram 64K hello.elf -o hello.mhl && malm hla -o hello.malm hello.mhl
+$ malm run hello.malm
+Hello, world!
+```
