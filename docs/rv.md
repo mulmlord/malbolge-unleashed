@@ -174,6 +174,11 @@ state), and on the runtime the examples in `examples/c` (hello, cat, fizzbuzz) a
 `rv_test` also builds a hand-assembled ELF with `malm build` and runs it, without the RISC-V
 toolchain; the slow `rvemu_program_*` tests build the C programs with `malm build` and compare
 them with the reference emulator through real pipes.
+The same riscv-tests also run on rv-emu (`rvemu_rv32u*-p-*`, `tests/rv/rvemu_suite_test.sh`): each
+test is built with `malm build --ram 8K` (every test ends below `0x2000` and uses no stack) and run
+with `malm run`, about 4 seconds per test in a release build. `add`, `beq`, `lw` and `sw` are
+`fast`, the rest `slow` (nightly CI). Like the other rv-emu tests they need `MALM_BUILD_EMU`, so the
+debug preset leaves them out.
 
 riscv-tests is fetched at configure time (pinned commit) and built with clang and ld.lld, without
 its `env` submodule: `tests/rv/env/riscv_test.h` replaces the machine-mode environment with one

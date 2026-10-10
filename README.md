@@ -82,8 +82,8 @@ with the hidden debugging command `malm rvref prog.elf` ([docs/rv.md](docs/rv.md
 runtime (crt0, linker script, system calls and a minimal libc with malloc and printf) runs the C
 programs in `examples/c` on the reference emulator; how to compile and link against it by hand is
 in [docs/rv.md](docs/rv.md) section 6, until `malm build` does it. rv-emu, the RV32IM emulator
-written in HLA, is built into `emu.malm` with the toolchain and agrees with the reference emulator
-instruction by instruction. `malm build prog.elf -o prog.malm` turns an ELF into a pure `.malm`
+written in HLA, is built into `emu.malm` with the toolchain, agrees with the reference emulator
+instruction by instruction and passes riscv-tests `rv32ui-p-*` and `rv32um-p-*` in emu mode. `malm build prog.elf -o prog.malm` turns an ELF into a pure `.malm`
 that runs it in emu mode, then `malm run prog.malm` ([docs/rv.md](docs/rv.md) section 8).
 
 ## License
