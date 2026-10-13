@@ -85,8 +85,10 @@ script (`link.ld`), the system call wrappers and a minimal C library (`include/`
 ### Toolchain and linking
 
 The runtime needs clang with the riscv32 target and `ld.lld` (Arch: `clang lld`; Ubuntu:
-`clang-18 lld-18`), nothing else: no GCC toolchain, sysroot, compiler-rt or `llvm-ar`. Until
-`malm build` does it, a program is built like this (the CMake build in `tests/rv` does the same):
+`clang-18 lld-18`), nothing else: no GCC toolchain, sysroot, compiler-rt or `llvm-ar`.
+`malm build prog.c -o prog.malm` ([cli.md](cli.md)) compiles and links a C program with the
+runtime, which is built into `malm`, and builds it for emu mode (section 8). By hand, the same ELF
+is built like this (the CMake build in `tests/rv` does the same):
 
 ```sh
 target="--target=riscv32-unknown-elf -march=rv32im -mabi=ilp32"
@@ -168,8 +170,12 @@ locales, wide characters, `setjmp`, signals) is missing; picolibc is planned for
 [riscv-tests](https://github.com/riscv-software-src/riscv-tests) `rv32ui-p-*` and `rv32um-p-*`
 on `malm rvref`, and C programs through real pipes with their output and exit status checked:
 `tests/rv/programs/hello.c` and `cat.c` without the runtime (for the initial and final machine
-state), and on the runtime the examples in `examples/c` (hello, cat, fizzbuzz) and
+state), and on the runtime the examples in `examples/c` (hello, cat, wc, fizzbuzz, sort) and
 `tests/rv/programs/runtime_test.c`, a self-check of crt0 and the library.
+`rv_toolchain_test` compiles C with `malm build`'s toolchain code and the runtime built into
+`malm` and runs the result on the reference emulator; the `build_c_*` tests
+(`tests/rv/build_pipe_test.sh`) build each example with `malm build`, as a `.malm` and with `--exe`,
+and run both through real pipes (`cat` is `fast`, the rest `slow`; they need `MALM_BUILD_EMU`).
 `rv_emu_test` runs rv-emu against the reference emulator one instruction at a time (section 8).
 `rv_test` also builds a hand-assembled ELF with `malm build` and runs it, without the RISC-V
 toolchain; the slow `rvemu_program_*` tests build the C programs with `malm build` and compare

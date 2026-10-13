@@ -1,6 +1,8 @@
-// malm build (issue #26): the emu-mode image builder, an RV32IM ELF into a pure .malm.
+// malm build (issues #26, #28): the emu-mode image builder, an RV32IM ELF into a pure .malm; its
+// options and how it finds the C toolchain (toolchain_test.cpp compiles with the real one).
 
 #include <doctest/doctest.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <filesystem>
@@ -13,6 +15,7 @@
 
 #include "container/container.hpp"
 #include "core/vm.hpp"
+#include "driver/build_cmd.hpp"
 #include "driver/cli.hpp"
 #include "driver/program_io.hpp"
 #include "rv_test_util.hpp"
@@ -59,6 +62,13 @@ struct TempDir {
             .write(reinterpret_cast<const char*>(bytes.data()),
                    static_cast<std::streamsize>(bytes.size()));
         return p.string();
+    }
+    // An executable shell script.
+    std::string script(std::string_view name, std::string_view body) const {
+        const std::string text = "#!/bin/sh\n" + std::string(body) + "\n";
+        const std::string p = write(name, {text.begin(), text.end()});
+        ::chmod(p.c_str(), 0755);
+        return p;
     }
     std::vector<std::uint8_t> read(std::string_view name) const {
         std::ifstream f(path / name, std::ios::binary);
@@ -129,6 +139,17 @@ TEST_CASE("build: errors") {
              {"build", "--ram"},
              {"build", "--bogus", "-o", out, elf},
              {"build", "-o", out, elf, elf},
+             {"build", "--mode", "bogus", "-o", out, elf},
+             {"build", "--mode"},
+             {"build", "--cc", "-o", out, "a.c"}, // "-o" is taken as the compiler, then no -o
+             {"build", "--cc"},
+             {"build", "--exe", "-o", "-", "a.c"},
+             {"build", "--exe", "a.c"},
+             {"build", "-o", out, "a.c", elf},
+             {"build", "-o", out, elf, "a.c"},
+             {"build", "--cc", "clang", "-o", out, elf},
+             {"build", "-o", out, elf, "--", "-O0"},
+             {"build", "-o", out, "--", "a.c"}, // after --, a.c is a compiler argument
          }) {
         const Result r = run(args);
         CHECK(r.code == 2);
@@ -142,7 +163,7 @@ TEST_CASE("build: errors") {
     const std::string text = dir.write("hello.mal", {'(', '=', '<', '`'});
     r = run({"build", "-o", out, text});
     CHECK(r.code == 1);
-    CHECK(r.err == "malm build: " + text + ": not an ELF file\n");
+    CHECK(r.err == "malm build: " + text + ": neither a C source (.c) nor an ELF executable\n");
 
     // The data segment ends at 0x210, past 512 bytes of guest RAM.
     r = run({"build", "--ram", "512", "-o", out, elf});
@@ -152,5 +173,66 @@ TEST_CASE("build: errors") {
     r = run({"build", "-o", elf, elf});
     CHECK(r.code == 1);
     CHECK(r.err.find("refusing to overwrite the input file") != std::string::npos);
+    CHECK(!std::filesystem::exists(out));
+}
+
+TEST_CASE("build: --mode") {
+    Result r = run({"build", "--mode", "aot", "-o", "x.malm", "a.c"});
+    CHECK(r.code == 2);
+    CHECK(r.err.starts_with("malm build: --mode aot is not implemented yet (issue #29)\n"));
+}
+
+namespace {
+
+// build_command_with, with PATH pointing at directories of fake tools.
+Result build_with(std::vector<std::string_view> args, std::string_view path_env) {
+    std::ostringstream out;
+    std::ostringstream err;
+    const int code = malm::build_command_with(args, out, err, "/proc/self/exe", path_env);
+    return {code, out.str(), err.str()};
+}
+
+} // namespace
+
+TEST_CASE("build: finding the C toolchain") {
+    const TempDir dir;
+    const std::string empty = (dir.path / "empty").string();
+    std::filesystem::create_directories(empty);
+    const std::string src = dir.write("prog.c", {});
+    const std::string out = (dir.path / "prog.malm").string();
+
+    Result r = build_with({"-o", out, src}, empty);
+    CHECK(r.code == 1);
+    CHECK(r.err == "malm build: no C compiler: clang is not in PATH (install clang and lld, or "
+                   "name the compiler with --cc)\n");
+
+    r = build_with({"--cc", "/nonexistent/clang", "-o", out, src}, empty);
+    CHECK(r.code == 1);
+    CHECK(r.err == "malm build: compiler '/nonexistent/clang' not found or not executable\n");
+
+    r = build_with({"--cc", "mycc", "-o", out, src}, empty);
+    CHECK(r.code == 1);
+    CHECK(r.err == "malm build: compiler 'mycc' is not in PATH\n");
+
+    // A compiler without ld.lld next to it or in PATH.
+    std::filesystem::create_directories(dir.path / "cc");
+    const std::string cc = dir.script("cc/mycc", "exit 0");
+    r = build_with({"--cc", "mycc", "-o", out, src}, (dir.path / "cc").string());
+    CHECK(r.code == 1);
+    CHECK(r.err ==
+          "malm build: no linker: ld.lld is not next to " + cc + " or in PATH (install lld)\n");
+
+    // Compilers that cannot target riscv32; without --cc the newest versioned clang is taken.
+    std::filesystem::create_directories(dir.path / "bin");
+    dir.script("bin/ld.lld", "exit 0");
+    dir.script("bin/clang-18", "echo 'clang-18: no riscv32' >&2; exit 1");
+    const std::string clang20 =
+        dir.script("bin/clang-20", "echo \"error: unable to create target\" >&2; exit 1");
+    const std::string bin = (dir.path / "bin").string();
+    r = build_with({"-o", out, src}, empty + ":" + bin);
+    CHECK(r.code == 1);
+    CHECK(r.err == "error: unable to create target\nmalm build: " + clang20 +
+                       " cannot compile for riscv32-unknown-elf (malm build needs clang with the "
+                       "RISC-V target)\n");
     CHECK(!std::filesystem::exists(out));
 }

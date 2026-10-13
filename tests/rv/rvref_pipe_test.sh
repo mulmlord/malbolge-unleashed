@@ -68,6 +68,23 @@ fizzbuzz)
         test "$(cat "$tmp/out")" = "fizzbuzz: expected a number from 1 to 10000" || exit 1
     done
     ;;
+wc)
+    # The counts of `wc` (POSIX format: no padding), on text, binary input and nothing.
+    printf 'one two\n  three\t\nfour' > "$tmp/in"
+    for f in "$tmp/in" "$programs/beer99.expected" "$programs/cat5_input.bin" /dev/null; do
+        "$malm" rvref "$elf/example_wc.elf" < "$f" > "$tmp/out" || exit 1
+        wc < "$f" | awk '{ print $1, $2, $3 }' | cmp "$tmp/out" - || exit 1
+    done
+    ;;
+sort)
+    # Bytewise like `LC_ALL=C sort`: empty lines, a NUL byte, bytes above 127, duplicates and a
+    # last line without a newline.
+    printf 'pear\nApple\n\napple\n\303\244\nx\000y\npear\nfig' > "$tmp/in"
+    for f in "$tmp/in" "$programs/beer99.expected" /dev/null; do
+        "$malm" rvref "$elf/example_sort.elf" < "$f" > "$tmp/out" || exit 1
+        LC_ALL=C sort < "$f" | cmp "$tmp/out" - || exit 1
+    done
+    ;;
 runtime)
     # The self-check: stdout and stderr in order, the atexit handlers after the summary, and
     # exit(42) from a nested call.
