@@ -266,8 +266,8 @@ void check_same(const Outcome& want, const Outcome& got) {
 
 TEST_CASE("rv-aot: leaders, indirect targets and resolved jumps") {
     Asm a;
-    a.la(t0, "f");      // 0x1000: a code address built by lui + addi: an indirect target
-    a.j(ra, "g");       // 0x1008: a call; 0x100C is a return address
+    a.la(t0, "f"); // 0x1000: a code address built by lui + addi: an indirect target
+    a.j(ra, "g");  // 0x1008: a call; 0x100C is a return address
     a.put(addi(t1, t1, 1));
     a.put(auipc(t2, 0)); // 0x1010: auipc + jalr resolve to 0x1020
     a.put(jalr(ra, t2, 0x10));
@@ -275,8 +275,8 @@ TEST_CASE("rv-aot: leaders, indirect targets and resolved jumps") {
     a.put(addi(t1, t1, 2));
     a.label("f"); // 0x1020
     a.put(addi(t1, t1, 3));
-    a.label("g"); // 0x1024
-    a.put(jalr(0, ra, 0)); // ret: dynamic
+    a.label("g");            // 0x1024
+    a.put(jalr(0, ra, 0));   // ret: dynamic
     a.label("table_target"); // 0x1028, only named by a data word
     a.put(addi(t1, t1, 4));
     a.label("end"); // 0x102C
@@ -285,8 +285,8 @@ TEST_CASE("rv-aot: leaders, indirect targets and resolved jumps") {
     const auto cfg = malm::aot::recover_cfg(image_of(elf, 8192));
     REQUIRE(cfg.has_value());
     CHECK(cfg->code.size() == 13);
-    CHECK(cfg->leaders == std::set<u32>{0x1000, 0x100C, 0x1010, 0x1018, 0x101C, 0x1020, 0x1024,
-                                        0x1028, 0x102C});
+    CHECK(cfg->leaders ==
+          std::set<u32>{0x1000, 0x100C, 0x1010, 0x1018, 0x101C, 0x1020, 0x1024, 0x1028, 0x102C});
     // The entry, the return addresses, f (la), the auipc's own address (a code address in a
     // register, so it might be a target), table_target (a data word); not 0x1001 or kData.
     CHECK(cfg->indirect == std::set<u32>{0x1000, 0x100C, 0x1010, 0x1018, 0x1020, 0x1028});
@@ -314,8 +314,7 @@ TEST_CASE("rv-aot: self-modifying code is a build error") {
         a.sys(93);
         const auto cfg = malm::aot::recover_cfg(image_of(program(a, {}), 8192));
         REQUIRE(!cfg.has_value());
-        CHECK(cfg.error() ==
-              "fence.i at 0x1000: self-modifying code is not supported in aot mode");
+        CHECK(cfg.error() == "fence.i at 0x1000: self-modifying code is not supported in aot mode");
     }
     {
         Asm a;
@@ -357,8 +356,8 @@ std::vector<std::uint8_t> alu_program(int n) {
     std::mt19937 gen(29);
     const auto rng = [&] { return static_cast<u32>(gen()); };
     const auto any = [&]() -> u32 {
-        static constexpr std::array<u32, 8> kEdges = {0,          1,          0x7FFFFFFF, 0x80000000,
-                                                      0xFFFFFFFF, 0x12345678, 0xFF,       31};
+        static constexpr std::array<u32, 8> kEdges = {
+            0, 1, 0x7FFFFFFF, 0x80000000, 0xFFFFFFFF, 0x12345678, 0xFF, 31};
         return rng() % 2 ? kEdges[rng() % kEdges.size()] : rng();
     };
     const auto reg = [&]() -> u32 { return rng() % 4 == 0 ? 0 : rng() % 32; };
@@ -412,8 +411,7 @@ std::vector<std::uint8_t> alu_program(int n) {
 
 } // namespace
 
-TEST_CASE("rv-aot: ALU instructions match the reference emulator" *
-          kSlowInDebug) {
+TEST_CASE("rv-aot: ALU instructions match the reference emulator" * kSlowInDebug) {
     const auto elf = alu_program(kDebugBuild ? 60 : 200);
     const Aot aot(elf, 8192);
     check_same(reference(elf, 8192, "", 0), aot.run("", 0, 8192));
@@ -476,9 +474,9 @@ ControlProgram control_program() {
             a.put(addi(s0, s0, n));
             a.label(skip);
         }
-        for (const auto& [f3, r1, r2] : {std::tuple{0u, t0, 0u}, std::tuple{1u, 0u, t0},
-                                         std::tuple{4u, t0, 0u}, std::tuple{5u, 0u, t0},
-                                         std::tuple{0u, 0u, 0u}, std::tuple{1u, 0u, 0u}}) {
+        for (const auto& [f3, r1, r2] :
+             {std::tuple{0u, t0, 0u}, std::tuple{1u, 0u, t0}, std::tuple{4u, t0, 0u},
+              std::tuple{5u, 0u, t0}, std::tuple{0u, 0u, 0u}, std::tuple{1u, 0u, 0u}}) {
             const std::string skip = "skip" + std::to_string(n++);
             a.bc(f3, r1, r2, skip);
             a.put(addi(s0, s0, n));
@@ -545,6 +543,7 @@ ControlProgram control_program() {
     a.put(op(0, 1, s3, s0, s2)); // mul
     a.put(op(5, 1, s4, s0, s2)); // divu, by zero without input
     a.put(addi(a0, s0, 0));
+    a.sys(255); // the register dump
     a.sys(93);
     a.label("f1");
     a.put(addi(s0, s0, 100));
@@ -740,8 +739,7 @@ TEST_CASE("rv-aot: the cost of instructions" * kSlowInDebug) {
         {"bltu not taken", 8, [](Asm& a) { a.put(branch(6, t1, t2, 8)); }},
         {"bne taken", 8, [](Asm& a) { a.put(branch(1, t1, t2, 4)); }},
         {"jal", 8, [](Asm& a) { a.put(jal(0, 4)); }},
-        {"jalr (call) + ret (both dispatched)", 4,
-         [](Asm& a) { a.put(jalr(ra, a3, 0)); }},
+        {"jalr (call) + ret (both dispatched)", 4, [](Asm& a) { a.put(jalr(ra, a3, 0)); }},
         {"ecall brk, with li a0 and li a7", 2,
          [](Asm& a) {
              a.put(li(a0, 0));

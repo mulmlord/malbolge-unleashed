@@ -458,7 +458,9 @@ void system_cases(Gen& g) {
     for (const u32 addr : {0u, 0x800u, 0x900u, 0x7FFu, g.ram, g.ram + 1, 0xFFFFFFFFu}) {
         sys(214, addr, 0, 0);
     }
-    sys(1000, 5, 6, 7); // ENOSYS
+    sys(255, 1, 2, 3);       // the register dump
+    sys(255 + 256, 0, 0, 0); // ENOSYS: the switch sees 255
+    sys(1000, 5, 6, 7);      // ENOSYS
     sys(0, 5, 6, 7);
     g.add(g.make("ebreak", kEbreak));
     // Illegal encodings: compressed, unknown opcodes, reserved funct3 / funct7, CSR instructions.

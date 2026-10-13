@@ -97,19 +97,20 @@ foreach(src IN LISTS rt_sources)
     list(APPEND rt_libc "${obj}")
 endforeach()
 
-# rv_elf(<name> <source> [RUNTIME] [DEPENDS <files>...] [FLAGS <flags>...]): compile and link one
-# test ELF; RUNTIME builds it against the runtime's headers and links crt0 and the libc.
+# rv_elf(<name> <source> [RUNTIME] [DEPENDS <files>...] [FLAGS <flags>...] [LDFLAGS <flags>...]):
+# compile and link one test ELF; RUNTIME builds it against the runtime's headers and links crt0 and
+# the libc.
 function(rv_elf name src)
-    cmake_parse_arguments(ARG "RUNTIME" "" "DEPENDS;FLAGS" ${ARGN})
+    cmake_parse_arguments(ARG "RUNTIME" "" "DEPENDS;FLAGS;LDFLAGS" ${ARGN})
     set(obj "${rv_elf_dir}/${name}.o")
     set(elf "${rv_elf_dir}/${name}.elf")
     set(inputs "${obj}")
-    set(ld_flags "")
+    set(ld_flags ${ARG_LDFLAGS})
     if(ARG_RUNTIME)
         list(PREPEND ARG_FLAGS ${rt_cflags})
         list(APPEND ARG_DEPENDS ${rt_headers} "${rt_crt0}" ${rt_libc})
         set(inputs "${rt_crt0}" "${obj}" --start-lib ${rt_libc} --end-lib)
-        set(ld_flags --gc-sections)
+        list(APPEND ld_flags --gc-sections)
     endif()
     add_custom_command(OUTPUT "${elf}"
         COMMAND "${MALM_RV_CC}" ${rv_flags} ${ARG_FLAGS} -c "${src}" -o "${obj}"
@@ -157,6 +158,22 @@ endforeach()
 rv_elf(runtime_test "${CMAKE_CURRENT_SOURCE_DIR}/programs/runtime_test.c" RUNTIME
     FLAGS -Wall -Wextra -Werror)
 
+# The same programs dumping their registers as they exit (ecall 255), for the three-way
+# differential test: the bare ones with -DMALM_DUMP_REGS, the others linked with
+# __malm_dump_regs (and a 16K heap reserve, so that sort has a heap in 64K of guest RAM).
+foreach(prog hello cat)
+    rv_elf(dump_${prog} "${CMAKE_CURRENT_SOURCE_DIR}/programs/${prog}.c"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/programs/sys.h"
+        FLAGS -O2 -ffreestanding -Wall -Wextra -Werror -DMALM_DUMP_REGS)
+endforeach()
+foreach(prog hello cat fizzbuzz wc sort)
+    rv_elf(dump_example_${prog} "${PROJECT_SOURCE_DIR}/examples/c/${prog}.c" RUNTIME
+        FLAGS -Wall -Wextra -Werror
+        LDFLAGS --defsym=__malm_dump_regs=1 --defsym=__stack_size=16384)
+endforeach()
+rv_elf(dump_runtime_test "${CMAKE_CURRENT_SOURCE_DIR}/programs/runtime_test.c" RUNTIME
+    FLAGS -Wall -Wextra -Werror LDFLAGS --defsym=__malm_dump_regs=1)
+
 add_custom_target(rv_test_elfs ALL DEPENDS ${rv_elfs})
 
 foreach(name IN LISTS rv_suite_tests)
@@ -171,30 +188,34 @@ foreach(case hello cat trace regs example_hello example_cat fizzbuzz wc sort run
     set_tests_properties(rvref_program_${case} PROPERTIES LABELS fast TIMEOUT 60)
 endforeach()
 
-# rv-emu end to end through `malm build` and `malm run` (issues #25, #26); slow: each case
-# compiles an emulator. Only where emu.malm is built (not in the debug preset, which would need
-# about 4 minutes per case); the rv-aot cases below are left out with them, as they compile as
-# long.
+# The three-way differential test (issue #30): each program on the reference emulator and built
+# in emu and aot mode (`malm build`, `malm run`), through real pipes; stdout, which ends with the
+# register dump, and the exit status must agree. Only where emu.malm is built (not in the debug
+# preset, which would need about 4 minutes per build). hello is fast, the rest slow (nightly); the
+# runtime's self-check runs 3 M guest instructions, most of an hour in emu mode.
+set(rv_inputs "${CMAKE_CURRENT_SOURCE_DIR}/inputs")
 if(NOT MALM_BUILD_EMU)
     return()
 endif()
-foreach(case hello cat fizzbuzz)
-    add_test(NAME rvemu_program_${case}
-        COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/rv_pipe_test.sh" $<TARGET_FILE:malm> emu
-            "${rv_elf_dir}" "${PROJECT_SOURCE_DIR}/tests/programs" ${case})
-    set_tests_properties(rvemu_program_${case} PROPERTIES LABELS slow TIMEOUT 1800)
-endforeach()
-# The same through rv-aot (issue #29), and the runtime's self-check (3 M guest instructions, a few
-# minutes); hello is fast.
-foreach(case hello cat fizzbuzz runtime)
+foreach(spec
+        "hello|dump_hello|64K|/dev/null"
+        "cat|dump_cat|64K|${PROJECT_SOURCE_DIR}/tests/programs/cat5_input.bin|/dev/null"
+        "example_hello|dump_example_hello|64K|/dev/null"
+        "example_cat|dump_example_cat|64K|${rv_inputs}/hi.in|${PROJECT_SOURCE_DIR}/tests/programs/cat5_input.bin|/dev/null"
+        "wc|dump_example_wc|64K|${rv_inputs}/wc.in"
+        "fizzbuzz|dump_example_fizzbuzz|64K|${rv_inputs}/fizzbuzz.in|${rv_inputs}/fizzbuzz_bad.in"
+        "sort|dump_example_sort|64K|${rv_inputs}/sort.in"
+        "runtime|dump_runtime_test|256K|${rv_inputs}/runtime.in|${rv_inputs}/runtime_assert.in")
+    string(REPLACE "|" ";" fields "${spec}")
+    list(POP_FRONT fields case elf ram)
     set(label slow)
-    if(case STREQUAL "hello")
+    if(case STREQUAL "example_hello")
         set(label fast)
     endif()
-    add_test(NAME rvaot_program_${case}
-        COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/rv_pipe_test.sh" $<TARGET_FILE:malm> aot
-            "${rv_elf_dir}" "${PROJECT_SOURCE_DIR}/tests/programs" ${case})
-    set_tests_properties(rvaot_program_${case} PROPERTIES LABELS ${label} TIMEOUT 1800)
+    add_test(NAME rvdiff_program_${case}
+        COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/rv_diff_test.sh" $<TARGET_FILE:malm>
+            "${rv_elf_dir}/${elf}.elf" ${ram} ${fields})
+    set_tests_properties(rvdiff_program_${case} PROPERTIES LABELS ${label} TIMEOUT 7200)
 endforeach()
 
 # `malm build` for C (issue #28): each example built into a .malm and a native executable and run
@@ -217,24 +238,22 @@ foreach(case hello cat wc fizzbuzz sort)
     set_tests_properties(build_c_aot_${case} PROPERTIES LABELS ${label} TIMEOUT 1800)
 endforeach()
 
-# riscv-tests on rv-emu (issue #27) and rv-aot (issue #29): each test built with `malm build` (8K
-# of guest RAM) and run; a few seconds per test in a release build. A subset is fast, the rest slow
-# (nightly). fence_i modifies its code: aot mode refuses to build it.
-set(rv_emu_fast_tests rv32ui-p-add rv32ui-p-beq rv32ui-p-lw rv32ui-p-sw)
-set(rv_aot_fast_tests rv32ui-p-add rv32ui-p-jalr rv32ui-p-lw rv32ui-p-ma_data rv32ui-p-fence_i)
+# riscv-tests (issues #27, #29, #30): each test on the reference emulator and built in emu and aot
+# mode (8K of guest RAM: every test ends below 0x2000 and uses no stack), with the three-way
+# differential test; the reference emulator must also pass it (status 0). A subset is fast, the
+# rest slow (nightly). fence_i modifies its code: aot mode must refuse it.
+set(rv_diff_fast_tests rv32ui-p-add rv32ui-p-jalr rv32ui-p-lw rv32ui-p-ma_data rv32ui-p-fence_i)
 foreach(name IN LISTS rv_suite_tests)
-    foreach(mode emu aot)
-        set(label slow)
-        if(name IN_LIST rv_${mode}_fast_tests)
-            set(label fast)
-        endif()
-        set(expect "")
-        if(mode STREQUAL "aot" AND name STREQUAL "rv32ui-p-fence_i")
-            set(expect smc)
-        endif()
-        add_test(NAME rv${mode}_${name}
-            COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/rv_suite_test.sh" $<TARGET_FILE:malm> ${mode}
-                "${rv_elf_dir}/${name}.elf" ${expect})
-        set_tests_properties(rv${mode}_${name} PROPERTIES LABELS ${label} TIMEOUT 600)
-    endforeach()
+    set(label slow)
+    if(name IN_LIST rv_diff_fast_tests)
+        set(label fast)
+    endif()
+    set(smc "")
+    if(name STREQUAL "rv32ui-p-fence_i")
+        set(smc --aot-smc)
+    endif()
+    add_test(NAME rvdiff_${name}
+        COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/rv_diff_test.sh" $<TARGET_FILE:malm>
+            "${rv_elf_dir}/${name}.elf" 8K --status 0 ${smc} -- /dev/null)
+    set_tests_properties(rvdiff_${name} PROPERTIES LABELS ${label} TIMEOUT 600)
 endforeach()

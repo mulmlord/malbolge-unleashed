@@ -1,6 +1,7 @@
 // riscv-tests environment for user-mode emulators (replaces riscv-test-env's p/riscv_test.h): no
 // CSRs, no trap handler, no tohost. The test runs from _start and reports through the exit ecall:
-// status 0 on pass, the failing test number (TESTNUM = gp) mod 256 on fail, never 0.
+// status 0 on pass, the failing test number (TESTNUM = gp) mod 256 on fail, never 0. Before that it
+// dumps its registers (ecall 255, docs/rv.md 4) for the differential tests.
 #ifndef MALM_RISCV_TEST_H
 #define MALM_RISCV_TEST_H
 
@@ -21,11 +22,15 @@
 #define RVTEST_CODE_END unimp
 
 #define RVTEST_PASS                                                                                \
+    li a7, 255;                                                                                    \
+    ecall;                                                                                         \
     li a0, 0;                                                                                      \
     li a7, 93;                                                                                     \
     ecall
 
 #define RVTEST_FAIL                                                                                \
+    li a7, 255;                                                                                    \
+    ecall;                                                                                         \
     andi a0, TESTNUM, 255;                                                                         \
     seqz t0, a0;                                                                                   \
     or a0, a0, t0;                                                                                 \

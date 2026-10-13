@@ -3,12 +3,14 @@
 #include <stdint.h>
 #include <unistd.h>
 
-enum { SYS_read = 63, SYS_write = 64, SYS_exit = 93, SYS_brk = 214 };
+enum { SYS_read = 63, SYS_write = 64, SYS_exit = 93, SYS_brk = 214, SYS_dump_regs = 255 };
 
 int errno;
 char* __malm_stack_top; // the initial sp, set by crt0
 
 extern char __stack_size[]; // link.ld
+// Linking with --defsym=__malm_dump_regs=1 makes _exit dump the registers first (docs/rv.md 6).
+__attribute__((weak)) extern char __malm_dump_regs[];
 
 static long syscall3(long n, long a, long b, long c) {
     register long a0 __asm__("a0") = a;
@@ -37,6 +39,9 @@ ssize_t write(int fd, const void* buf, size_t count) {
 }
 
 void _exit(int status) {
+    if (__malm_dump_regs) {
+        syscall3(SYS_dump_regs, 0, 0, 0);
+    }
     syscall3(SYS_exit, status, 0, 0);
     __builtin_unreachable();
 }
