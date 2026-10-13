@@ -37,6 +37,7 @@ add_subdirectory(src/hla)
 add_subdirectory(src/container)
 add_subdirectory(src/pack)
 add_subdirectory(src/rv)
+add_subdirectory(src/aot)
 add_subdirectory(src/driver)
 add_subdirectory(rv/emu)
 

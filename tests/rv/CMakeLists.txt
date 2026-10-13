@@ -6,6 +6,9 @@ malm_add_test(NAME rv_test LABEL fast SOURCES elf_test.cpp machine_test.cpp rvre
 # rv-emu (issue #25): single instructions against the reference emulator. A debug build spends
 # about 3 minutes compiling the emulator, so there its cases are slow.
 malm_add_test(NAME rv_emu_test LABEL fast SOURCES emu_test.cpp LIBS malm_rv malm_hla TIMEOUT 1800)
+# rv-aot (issue #29): the control-flow graph, and translated programs against the reference
+# emulator. A debug build's programs are slow.
+malm_add_test(NAME rv_aot_test LABEL fast SOURCES aot_test.cpp LIBS malm_aot malm_hla TIMEOUT 1800)
 # emu.malm as built (rv/emu): with zero RAM, the instruction at pc 0 is illegal, so it halts with 1.
 # With 1M of guest RAM its startup takes 220 M steps and about 5 GB of VM memory.
 if(TARGET emu)
@@ -170,15 +173,28 @@ endforeach()
 
 # rv-emu end to end through `malm build` and `malm run` (issues #25, #26); slow: each case
 # compiles an emulator. Only where emu.malm is built (not in the debug preset, which would need
-# about 4 minutes per case).
+# about 4 minutes per case); the rv-aot cases below are left out with them, as they compile as
+# long.
 if(NOT MALM_BUILD_EMU)
     return()
 endif()
 foreach(case hello cat fizzbuzz)
     add_test(NAME rvemu_program_${case}
-        COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/rvemu_pipe_test.sh" $<TARGET_FILE:malm>
+        COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/rv_pipe_test.sh" $<TARGET_FILE:malm> emu
             "${rv_elf_dir}" "${PROJECT_SOURCE_DIR}/tests/programs" ${case})
     set_tests_properties(rvemu_program_${case} PROPERTIES LABELS slow TIMEOUT 1800)
+endforeach()
+# The same through rv-aot (issue #29), and the runtime's self-check (3 M guest instructions, a few
+# minutes); hello is fast.
+foreach(case hello cat fizzbuzz runtime)
+    set(label slow)
+    if(case STREQUAL "hello")
+        set(label fast)
+    endif()
+    add_test(NAME rvaot_program_${case}
+        COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/rv_pipe_test.sh" $<TARGET_FILE:malm> aot
+            "${rv_elf_dir}" "${PROJECT_SOURCE_DIR}/tests/programs" ${case})
+    set_tests_properties(rvaot_program_${case} PROPERTIES LABELS ${label} TIMEOUT 1800)
 endforeach()
 
 # `malm build` for C (issue #28): each example built into a .malm and a native executable and run
@@ -193,18 +209,32 @@ foreach(case hello cat wc fizzbuzz sort)
             "${MALM_RV_CC}" "${PROJECT_SOURCE_DIR}/examples/c" "${PROJECT_SOURCE_DIR}/tests/programs"
             ${case})
     set_tests_properties(build_c_${case} PROPERTIES LABELS ${label} TIMEOUT 1800)
+    # In aot mode (issue #29): the same output as in emu mode.
+    add_test(NAME build_c_aot_${case}
+        COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/build_pipe_test.sh" $<TARGET_FILE:malm>
+            "${MALM_RV_CC}" "${PROJECT_SOURCE_DIR}/examples/c" "${PROJECT_SOURCE_DIR}/tests/programs"
+            ${case} aot)
+    set_tests_properties(build_c_aot_${case} PROPERTIES LABELS ${label} TIMEOUT 1800)
 endforeach()
 
-# riscv-tests on rv-emu (issue #27): each test built with `malm build` (8K of guest RAM) and run;
-# a few seconds per test in a release build. A subset is fast, the rest slow (nightly).
+# riscv-tests on rv-emu (issue #27) and rv-aot (issue #29): each test built with `malm build` (8K
+# of guest RAM) and run; a few seconds per test in a release build. A subset is fast, the rest slow
+# (nightly). fence_i modifies its code: aot mode refuses to build it.
 set(rv_emu_fast_tests rv32ui-p-add rv32ui-p-beq rv32ui-p-lw rv32ui-p-sw)
+set(rv_aot_fast_tests rv32ui-p-add rv32ui-p-jalr rv32ui-p-lw rv32ui-p-ma_data rv32ui-p-fence_i)
 foreach(name IN LISTS rv_suite_tests)
-    set(label slow)
-    if(name IN_LIST rv_emu_fast_tests)
-        set(label fast)
-    endif()
-    add_test(NAME rvemu_${name}
-        COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/rvemu_suite_test.sh" $<TARGET_FILE:malm>
-            "${rv_elf_dir}/${name}.elf")
-    set_tests_properties(rvemu_${name} PROPERTIES LABELS ${label} TIMEOUT 600)
+    foreach(mode emu aot)
+        set(label slow)
+        if(name IN_LIST rv_${mode}_fast_tests)
+            set(label fast)
+        endif()
+        set(expect "")
+        if(mode STREQUAL "aot" AND name STREQUAL "rv32ui-p-fence_i")
+            set(expect smc)
+        endif()
+        add_test(NAME rv${mode}_${name}
+            COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/rv_suite_test.sh" $<TARGET_FILE:malm> ${mode}
+                "${rv_elf_dir}/${name}.elf" ${expect})
+        set_tests_properties(rv${mode}_${name} PROPERTIES LABELS ${label} TIMEOUT 600)
+    endforeach()
 endforeach()

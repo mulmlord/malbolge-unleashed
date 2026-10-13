@@ -299,6 +299,30 @@ void Writer::call(std::string_view link, std::string_view target, std::string_vi
     label(ret);
 }
 
+void declare_ram(Writer& w, std::uint32_t ram_size, const Image* image) {
+    std::vector<std::uint32_t> words;
+    if (image != nullptr) {
+        for (const Segment& s : image->segments) {
+            for (std::size_t i = 0; i < s.data.size(); ++i) {
+                const std::size_t addr = s.vaddr + i;
+                if (words.size() <= addr / 4) {
+                    words.resize(addr / 4 + 1);
+                }
+                words[addr / 4] |= std::uint32_t{s.data[i]} << (8 * (addr % 4));
+            }
+        }
+        while (!words.empty() && words.back() == 0) {
+            words.pop_back();
+        }
+    }
+    std::string ram = std::format("ram mem[{}]", ram_size / 4);
+    for (std::size_t i = 0; i < words.size(); ++i) {
+        ram += i == 0 ? " = " : ", ";
+        ram += num(words[i]);
+    }
+    w.stmt(ram);
+}
+
 void declare_runtime(Writer& w, std::uint32_t brk) {
     w.stmt("reg ea, b, r, lkm, lke, t, u, n, wa, w0, w1");
     w.stmt(std::format("reg brk = {0}, brkmin = {0}, stop", num(brk)));

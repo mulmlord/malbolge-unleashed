@@ -6,6 +6,7 @@
 #include <utility>
 
 #include "asm/assemble.hpp"
+#include "aot/aot.hpp"
 #include "asm/parser.hpp"
 #include "container/container.hpp"
 #include "driver/pack_cmd.hpp"
@@ -21,10 +22,11 @@ namespace malm {
 namespace {
 
 constexpr std::string_view kUsage =
-    "usage: malm build [--mode emu] [--ram <size>] [--cc <compiler>]\n"
+    "usage: malm build [--mode emu|aot] [--ram <size>] [--cc <compiler>]\n"
     "                  (-o <out.malm> | --exe -o <out>) (<prog.c>... | <prog.elf>)\n"
     "                  [-- <compiler args>...]\n"
-    "  --mode emu       run it in rv-emu, the RV32IM emulator (the default; aot: issue #29)\n"
+    "  --mode emu       run it in rv-emu, the RV32IM emulator (the default)\n"
+    "  --mode aot       translate it to Malbolge ahead of time: faster, larger\n"
     "  --ram <size>     guest RAM in bytes, or with a K/M suffix (default 1M, at most 4M)\n"
     "  --cc <compiler>  the C compiler, clang with the riscv32 target (default: clang in PATH)\n"
     "  -o <out.malm>    write the program there (-o - writes to stdout)\n"
@@ -45,23 +47,21 @@ bool is_elf(const std::vector<std::uint8_t>& bytes) {
            bytes[3] == 'F';
 }
 
-} // namespace
-
-core::Result<std::vector<std::uint8_t>, std::string> build_emu(const rv::Image& image,
-                                                               std::uint32_t ram_size) {
+// The generated HLA program `src` (as `name`) compiled to a pure .malm with EXIT_A; `what` names
+// the generator in an internal error.
+core::Result<std::vector<std::uint8_t>, std::string> compile_hla(const std::string& name,
+                                                                 std::string src,
+                                                                 std::string_view what) {
     using R = core::Result<std::vector<std::uint8_t>, std::string>;
-    rv::EmuOptions opt;
-    opt.ram_size = ram_size;
-    opt.image = image;
-    assembler::MemoryLoader loader({{"emu.mhl", rv::emu_source(opt)}});
+    assembler::MemoryLoader loader({{name, std::move(src)}});
     assembler::Diagnostics diags;
-    const assembler::Program program = hla::translate("emu.mhl", loader, diags);
+    const assembler::Program program = hla::translate(name, loader, diags);
     std::optional<assembler::Assembly> assembly;
     if (!diags.has_errors()) {
         assembly = assembler::assemble(program, diags);
     }
     if (diags.has_errors()) {
-        return R::err("internal error: the emulator does not compile:\n" +
+        return R::err("internal error: " + std::string(what) + " does not compile:\n" +
                       assembler::format_diagnostics(diags, program.files));
     }
     const std::vector<std::uint8_t>& cells = assembly->startup.text;
@@ -70,6 +70,25 @@ core::Result<std::vector<std::uint8_t>, std::string> build_emu(const rv::Image& 
         return R::err("internal error: the program fails the purity check");
     }
     return R::ok(std::move(malm));
+}
+
+} // namespace
+
+core::Result<std::vector<std::uint8_t>, std::string> build_emu(const rv::Image& image,
+                                                               std::uint32_t ram_size) {
+    rv::EmuOptions opt;
+    opt.ram_size = ram_size;
+    opt.image = image;
+    return compile_hla("emu.mhl", rv::emu_source(opt), "the emulator");
+}
+
+core::Result<std::vector<std::uint8_t>, std::string> build_aot(const rv::Image& image,
+                                                               std::uint32_t ram_size) {
+    auto src = aot::aot_source(image, ram_size);
+    if (!src) {
+        return core::Result<std::vector<std::uint8_t>, std::string>::err(std::move(src.error()));
+    }
+    return compile_hla("aot.mhl", std::move(*src), "the translated program");
 }
 
 int build_command(std::span<const std::string_view> args, std::istream&, std::ostream& out,
@@ -85,6 +104,7 @@ int build_command_with(std::span<const std::string_view> args, std::ostream& out
     std::string_view output;
     std::optional<std::string_view> cc;
     bool exe = false;
+    bool aot = false;
     std::uint32_t ram_size = rv::kDefaultRamSize;
     for (std::size_t i = 0; i < args.size(); ++i) {
         const std::string_view arg = args[i];
@@ -113,12 +133,10 @@ int build_command_with(std::span<const std::string_view> args, std::ostream& out
                 return usage_error(err, "--mode needs emu or aot");
             }
             const std::string_view mode = args[++i];
-            if (mode == "aot") {
-                return usage_error(err, "--mode aot is not implemented yet (issue #29)");
-            }
-            if (mode != "emu") {
+            if (mode != "emu" && mode != "aot") {
                 return usage_error(err, "unknown mode '" + std::string(mode) + "'");
             }
+            aot = mode == "aot";
         } else if (arg == "--cc") {
             if (i + 1 >= args.size() || args[i + 1].empty()) {
                 return usage_error(err, "--cc needs a compiler");
@@ -186,9 +204,13 @@ int build_command_with(std::span<const std::string_view> args, std::ostream& out
             << ": " << image.error() << '\n';
         return 1;
     }
-    auto malm = build_emu(*image, ram_size);
+    auto malm = aot ? build_aot(*image, ram_size) : build_emu(*image, ram_size);
     if (!malm) {
-        err << "malm build: " << malm.error() << '\n';
+        err << "malm build: ";
+        if (aot && !malm.error().starts_with("internal error")) {
+            err << (c ? std::string_view("the linked program") : inputs.front()) << ": ";
+        }
+        err << malm.error() << '\n';
         return 1;
     }
     if (exe) {

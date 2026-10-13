@@ -1,5 +1,5 @@
 // The semantics of RV32IM guest instructions in HLA (docs/rv.md 8): the "macros" that rv-emu
-// (emu.hpp) expands for its decoded operands and rv-aot will expand for each instruction of a
+// (emu.hpp) expands for its decoded operands and rv-aot (aot/aot.hpp) for each instruction of a
 // program. HLA has no macros of its own, so they are C++ functions that write HLA statements.
 //
 // A guest register is an HLA register: x1 .. x31 (rv-emu reads x0 as the constant 0). HLA's
@@ -19,6 +19,8 @@
 #include <string>
 #include <string_view>
 #include <vector>
+
+#include "rv/elf.hpp"
 
 namespace malm::rv::sem {
 
@@ -52,6 +54,7 @@ enum class StopCode : std::uint32_t {
     StoreFault = 5,     // a store to ea not entirely inside guest RAM
     FetchFault = 6,     // pc is outside guest RAM
     Exit = 7,           // exit(a0)
+    Untranslated = 8,   // rv-aot: pc is inside guest RAM but not the start of translated code
 };
 
 // The labels of the runtime's stops; each sets `stop` and halts with status 1 (an exit: a0 & 255).
@@ -69,6 +72,10 @@ struct Config {
     // one VM can run case after case (tests/rv/emu_test.cpp).
     bool harness = false;
 };
+
+// `ram mem[ram_size / 4]`: guest RAM at HLA address 0, with the segments of `image` (if any) as
+// little-endian initial words.
+void declare_ram(Writer& w, std::uint32_t ram_size, const Image* image);
 
 // The runtime's registers: `reg` declarations of the interface and scratch registers above, the
 // program break (brk, brkmin) and stop.

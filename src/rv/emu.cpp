@@ -53,29 +53,8 @@ void declarations(Writer& w, const EmuOptions& opt) {
     w.stmt(std::format("reg pc = {}, insn, a, ix, tg, b7, lk, lkw = next",
                        num(opt.image ? opt.image->entry : 0)));
     sem::declare_runtime(w, opt.image ? opt.image->brk : 0);
-
     // Guest RAM: one region at address 0, the image's words as its initial values.
-    std::vector<std::uint32_t> words;
-    if (opt.image) {
-        for (const Segment& s : opt.image->segments) {
-            for (std::size_t i = 0; i < s.data.size(); ++i) {
-                const std::size_t addr = s.vaddr + i;
-                if (words.size() <= addr / 4) {
-                    words.resize(addr / 4 + 1);
-                }
-                words[addr / 4] |= std::uint32_t{s.data[i]} << (8 * (addr % 4));
-            }
-        }
-        while (!words.empty() && words.back() == 0) {
-            words.pop_back();
-        }
-    }
-    std::string ram = std::format("ram mem[{}]", opt.ram_size / 4);
-    for (std::size_t i = 0; i < words.size(); ++i) {
-        ram += i == 0 ? " = " : ", ";
-        ram += num(words[i]);
-    }
-    w.stmt(ram);
+    sem::declare_ram(w, opt.ram_size, opt.image ? &*opt.image : nullptr);
 }
 
 // Fetch, dispatch on the opcode (the low 7 bits; bit 7 is rd's lowest), and the end of an

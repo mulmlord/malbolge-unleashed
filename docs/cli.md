@@ -15,9 +15,10 @@ usage: malm <command> [args...]
 | `asm` | implemented | assemble a `.mua` file into a `.malm` or Malbolge text; check and pretty-print it |
 | `disasm` | implemented | turn a program back into readable assembly, or list it cell by cell |
 | `hla` | implemented | compile a high-level `.mhl` file into a `.malm` or Malbolge text; check it and print the generated assembly |
-| `build` | implemented for C and RV32IM ELF input (emu mode) | build a C program or a RISC-V ELF into a `.malm` or a native executable; aot mode and other languages follow |
+| `build` | implemented for C and RV32IM ELF input (emu and aot mode) | build a C program or a RISC-V ELF into a `.malm` or a native executable; other languages follow |
 | `rvref` | implemented, hidden | run an RV32IM ELF on the C++ reference emulator (a debugging tool; not listed by `--help`) |
 | `rvemu` | implemented, hidden | write the HLA program of rv-emu, the RV32IM emulator, optionally with a guest program in its RAM (a build and debugging tool; not listed by `--help`) |
+| `rvaot` | implemented, hidden | write the HLA program that rv-aot translates an RV32IM ELF into (a debugging tool; not listed by `--help`) |
 
 The program file of `run`, `export`, `pack` and `disasm` is a `.malm` container ([malm-format.md](malm-format.md))
 or Malbolge text (spec 4); the two are told apart by the first four bytes. For a `.malm` the header
@@ -256,21 +257,23 @@ the `.mhl` file, also for errors the assembler finds in the generated program.
 ## `malm build`
 
 ```
-usage: malm build [--mode emu] [--ram <size>] [--cc <compiler>]
+usage: malm build [--mode emu|aot] [--ram <size>] [--cc <compiler>]
                   (-o <out.malm> | --exe -o <out>) (<prog.c>... | <prog.elf>)
                   [-- <compiler args>...]
 ```
 
-Builds a C program, or an RV32IM ELF executable, into a pure `.malm` that runs it in emu mode:
-rv-emu with the program in its guest RAM ([rv.md](rv.md) section 8). The guest's stdin, stdout
-and exit status are the program's, through `malm run` or the native executable of `--exe`.
+Builds a C program, or an RV32IM ELF executable, into a pure `.malm` that runs it in emu mode
+(rv-emu with the program in its guest RAM, [rv.md](rv.md) section 8) or in aot mode (the program
+translated instruction by instruction, rv.md section 9). The guest's stdin, stdout and exit status
+are the program's, through `malm run` or the native executable of `--exe`.
 Implementation: `src/driver/build_cmd.cpp` and `src/driver/toolchain.cpp`; tests:
 `tests/rv/build_test.cpp`, `tests/rv/toolchain_test.cpp`, `tests/rv/build_pipe_test.sh` and
-`tests/rv/rvemu_pipe_test.sh`.
+`tests/rv/rv_pipe_test.sh`.
 
 | option | meaning |
 |---|---|
-| `--mode emu` | run the program in rv-emu, the RV32IM emulator; the default and, until aot mode (issue #29), the only mode |
+| `--mode emu` | run the program in rv-emu, the RV32IM emulator (the default) |
+| `--mode aot` | translate the program ahead of time: about three times faster (rv.md section 9), and larger by about 54 K characters of Malbolge text per guest instruction; no self-modifying code |
 | `--ram <size>` | guest RAM in bytes, or with a `K` (KiB) or `M` (MiB) suffix; a multiple of 16 up to `4M` (HLA's RAM limit); default `1M` |
 | `--cc <compiler>` | the C compiler: a path, or a name looked up in `PATH`; default `clang`, else the newest `clang-N` in `PATH` |
 | `-o <out.malm>` | where to write the program, a `.malm` (zstd) with the `EXIT_A` flag; `-o -` writes it to stdout |
@@ -294,12 +297,14 @@ The compiler's and the linker's diagnostics and warnings for the program go to s
 Exit codes: 0; 1 if clang or ld.lld is missing (`malm build: no C compiler: ...`,
 `malm build: no linker: ...`), the compiler cannot target riscv32 (`malm build: <cc> cannot
 compile for riscv32-unknown-elf ...`, after the compiler's own message), compiling or linking
-fails, the ELF loader rejects the program (`malm build: <file>: <reason>`), a file cannot be read
-or written, or the output would overwrite an input; 2 for a usage error, including `--mode aot`.
+fails, the ELF loader rejects the program (`malm build: <file>: <reason>`), aot mode cannot
+translate it (`malm build: <file>: fence.i at 0x...: self-modifying code is not supported in aot
+mode`, or guest RAM and the dispatch table exceed HLA's RAM), a file cannot be read or written, or
+the output would overwrite an input; 2 for a usage error.
 The output passes the purity check of `malm asm`, and the same ELF and options give the same bytes.
 
 Building compiles the whole emulator: about 25 seconds with the default 1 MiB of guest RAM and 4 with
-64 KiB (release build). Running needs about 5 GB of host memory with 1 MiB (rv.md section 8), so
+64 KiB (release build); aot mode adds about 5 seconds per thousand guest instructions. Running needs about 5 GB of host memory with 1 MiB (rv.md section 8), so
 small programs are better built with a smaller `--ram`. The heap ends `__stack_size` (64 KiB) below
 the stack (rv.md section 6): with 64 KiB of guest RAM a program that calls `malloc` needs
 `-- -Wl,--defsym=__stack_size=16384` or similar.
@@ -311,6 +316,11 @@ hi
 $ malm build --ram 64K -o hello.malm hello.elf
 $ malm run hello.malm
 Hello, world!
+$ malm build --mode aot --ram 64K --exe -o fizzbuzz examples/c/fizzbuzz.c
+$ echo 3 | ./fizzbuzz
+1
+2
+Fizz
 ```
 
 ## `malm disasm`
@@ -422,6 +432,32 @@ compiled with `malm hla --map`:
 
 ```
 $ malm rvemu --ram 64K hello.elf -o hello.mhl && malm hla -o hello.malm hello.mhl
+$ malm run hello.malm
+Hello, world!
+```
+
+## `malm rvaot`
+
+```
+usage: malm rvaot [--ram <size>] [-o <out.mhl>] [--] <prog.elf>
+```
+
+Writes the HLA program that rv-aot translates an RV32IM program into ([rv.md](rv.md) section 9),
+for reading or for `malm hla` to compile; `malm build --mode aot` does both steps in one.
+Implementation: `src/aot/` and `src/driver/rvaot_cmd.cpp`; tests: `tests/rv/aot_test.cpp`. A
+debugging tool, so `malm --help` does not list it.
+
+| option | meaning |
+|---|---|
+| `--ram <size>` | guest RAM in bytes, or with a `K` (KiB) or `M` (MiB) suffix; a multiple of 16 up to `4M` (HLA's RAM limit, which the dispatch table shares); default `1M` |
+| `-o <out.mhl>` | where to write the program (`-` or no `-o`: stdout) |
+| `<prog.elf>` | the program, loaded like `malm rvref` loads it |
+
+Exit codes: 0; 1 if the ELF loader rejects the file, aot mode cannot translate it (as
+`malm build`), or a file cannot be read or written, with a diagnostic on stderr; 2 usage error.
+
+```
+$ malm rvaot --ram 64K hello.elf -o hello.mhl && malm hla -o hello.malm hello.mhl
 $ malm run hello.malm
 Hello, world!
 ```
