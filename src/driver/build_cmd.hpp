@@ -21,10 +21,16 @@ namespace malm {
 core::Result<std::vector<std::uint8_t>, std::string> build_emu(const rv::Image& image,
                                                                std::uint32_t ram_size);
 
-// `malm build [--mode emu] [--ram <size>] [--cc <compiler>] (-o <out.malm> | --exe -o <out>)
+// The aot-mode builder (docs/rv.md 9): `image` translated by rv-aot, compiled to a pure .malm with
+// EXIT_A. Preconditions as build_emu. The error is a one-line reason why the program cannot be
+// translated (aot::aot_source), or an internal one.
+core::Result<std::vector<std::uint8_t>, std::string> build_aot(const rv::Image& image,
+                                                               std::uint32_t ram_size);
+
+// `malm build [--mode emu|aot] [--ram <size>] [--cc <compiler>] (-o <out.malm> | --exe -o <out>)
 // (<prog.c>... | <prog.elf>) [-- <compiler args>...]` (docs/cli.md): compiles C sources with the
-// runtime (toolchain.hpp), or takes an RV32IM ELF, and builds an emu-mode .malm or a native
-// executable of it. `args` excludes the subcommand name.
+// runtime (toolchain.hpp), or takes an RV32IM ELF, and builds an emu-mode or aot-mode .malm or a
+// native executable of it. `args` excludes the subcommand name.
 int build_command(std::span<const std::string_view> args, std::istream& in, std::ostream& out,
                   std::ostream& err);
 

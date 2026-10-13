@@ -1,5 +1,6 @@
-// malm build (issues #26, #28): the emu-mode image builder, an RV32IM ELF into a pure .malm; its
-// options and how it finds the C toolchain (toolchain_test.cpp compiles with the real one).
+// malm build (issues #26, #28, #29): the emu-mode image builder and aot mode, an RV32IM ELF into a
+// pure .malm; its options and how it finds the C toolchain (toolchain_test.cpp compiles with the
+// real one).
 
 #include <doctest/doctest.h>
 #include <sys/stat.h>
@@ -176,10 +177,39 @@ TEST_CASE("build: errors") {
     CHECK(!std::filesystem::exists(out));
 }
 
-TEST_CASE("build: --mode") {
-    Result r = run({"build", "--mode", "aot", "-o", "x.malm", "a.c"});
-    CHECK(r.code == 2);
-    CHECK(r.err.starts_with("malm build: --mode aot is not implemented yet (issue #29)\n"));
+TEST_CASE("build: a hand-assembled ELF prints hi in aot mode" * kSlowInDebug) {
+    const TempDir dir;
+    const std::string elf = dir.write("hi.elf", hi_elf());
+    const std::string out = (dir.path / "hi.malm").string();
+    const Result r = run({"build", "--mode", "aot", "--ram", "4K", "-o", out, elf});
+    INFO(r.err);
+    REQUIRE(r.code == 0);
+
+    const std::vector<std::uint8_t> malm = dir.read("hi.malm");
+    const auto program = malm::container::read_malm(malm);
+    REQUIRE(program.has_value());
+    CHECK(program->exit_a);
+    CHECK(malm::is_pure(program->cells, malm, true));
+    malm::core::Vm vm(program->cells);
+    StringIo io;
+    const auto res = vm.run(io, 200'000'000);
+    REQUIRE(res.kind == malm::core::RunResult::Kind::Halted);
+    CHECK(io.out == "hi");
+    CHECK(malm::core::exit_status(res, vm, program->exit_a) == 7);
+}
+
+TEST_CASE("build: aot mode refuses self-modifying code") {
+    const TempDir dir;
+    ElfSpec spec;
+    spec.entry = 0x100;
+    spec.segments.push_back({0x100, words({0x0000100F, li(a7, 93), kEcall}), 0}); // fence.i
+    const std::string elf = dir.write("smc.elf", build_elf(spec));
+    const std::string out = (dir.path / "smc.malm").string();
+    const Result r = run({"build", "--mode", "aot", "--ram", "4K", "-o", out, elf});
+    CHECK(r.code == 1);
+    CHECK(r.err == "malm build: " + elf +
+                       ": fence.i at 0x100: self-modifying code is not supported in aot mode\n");
+    CHECK(!std::filesystem::exists(out));
 }
 
 namespace {

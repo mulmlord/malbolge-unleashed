@@ -88,6 +88,13 @@ into a pure `.malm` that runs it in emu mode, or with `--exe` into a native exec
 ([docs/cli.md](docs/cli.md)): `malm build --ram 64K --exe -o cat examples/c/cat.c`, then
 `echo hi | ./cat` prints `hi`, the M3 exit criterion.
 
+M4 (aot mode, in progress): rv-aot translates an RV32IM program instruction by instruction into
+HLA, with rv-emu's instruction semantics, a control-flow graph recovered from the ELF and a
+dispatch table for indirect jumps ([docs/rv.md](docs/rv.md) section 9). `malm build --mode aot`
+builds C programs and ELFs that way: the examples give the same output as in emu mode, about
+three times faster, and riscv-tests `rv32ui-p-*` and `rv32um-p-*` pass (`fence_i`, which modifies its own
+code, is refused).
+
 ## License
 
 MIT, see [LICENSE](LICENSE). Third-party components and their licences are listed in

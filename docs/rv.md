@@ -2,7 +2,7 @@
 
 The contract between a RISC-V guest program and the machines that run it: the C++ reference
 emulator (`src/rv/machine.hpp`, `malm rvref`), rv-emu (section 8, emu mode) and rv-aot
-(`src/aot`). The reference emulator is the oracle; the other two must agree with it on stdout,
+(section 9, aot mode). The reference emulator is the oracle; the other two must agree with it on stdout,
 exit status and, for the differential tests, the final registers. Design background:
 [the design spec](superpowers/specs/2026-10-01-malbolge-unleashed-design.md) sections 5.3, 5.4
 and 6.
@@ -177,14 +177,22 @@ state), and on the runtime the examples in `examples/c` (hello, cat, wc, fizzbuz
 (`tests/rv/build_pipe_test.sh`) build each example with `malm build`, as a `.malm` and with `--exe`,
 and run both through real pipes (`cat` is `fast`, the rest `slow`; they need `MALM_BUILD_EMU`).
 `rv_emu_test` runs rv-emu against the reference emulator one instruction at a time (section 8).
-`rv_test` also builds a hand-assembled ELF with `malm build` and runs it, without the RISC-V
-toolchain; the slow `rvemu_program_*` tests build the C programs with `malm build` and compare
-them with the reference emulator through real pipes.
-The same riscv-tests also run on rv-emu (`rvemu_rv32u*-p-*`, `tests/rv/rvemu_suite_test.sh`): each
-test is built with `malm build --ram 8K` (every test ends below `0x2000` and uses no stack) and run
-with `malm run`, about 4 seconds per test in a release build. `add`, `beq`, `lw` and `sw` are
-`fast`, the rest `slow` (nightly CI). Like the other rv-emu tests they need `MALM_BUILD_EMU`, so the
-debug preset leaves them out.
+`rv_aot_test` checks rv-aot's control-flow graph and runs translated hand-assembled programs
+(random ALU code; loads, stores, branches, calls, a jump table and the system calls; every fault
+and jump out of the code) against the reference emulator, comparing output, exit status, stop
+code, registers and RAM, and reports the cost of each instruction class (section 9).
+`rv_test` also builds a hand-assembled ELF with `malm build` in both modes and runs it, without the
+RISC-V toolchain; the slow `rvemu_program_*` and `rvaot_program_*` tests
+(`tests/rv/rv_pipe_test.sh`) build the C programs with `malm build` and compare them with the
+reference emulator through real pipes, in aot mode also the runtime's self-check (at 256 KiB of
+guest RAM; aot's hello is `fast`). The `build_c_aot_*` tests are the `build_c_*` tests in aot mode.
+The same riscv-tests also run on rv-emu and rv-aot (`rvemu_rv32u*-p-*`, `rvaot_rv32u*-p-*`,
+`tests/rv/rv_suite_test.sh`): each test is built with `malm build --ram 8K` (every test ends below
+`0x2000` and uses no stack) and run with `malm run`, about 4 seconds per test in a release build.
+In emu mode `add`, `beq`, `lw` and `sw` are `fast`, in aot mode `add`, `jalr`, `lw`, `ma_data` and
+`fence_i`, the rest `slow` (nightly CI). `fence_i` modifies its own code, so in aot mode the test is
+that the build refuses it. Like the other rv-emu tests they need `MALM_BUILD_EMU`, so the debug
+preset leaves them out (and the aot ones, which compile as long).
 
 riscv-tests is fetched at configure time (pinned commit) and built with clang and ld.lld, without
 its `env` submodule: `tests/rv/env/riscv_test.h` replaces the machine-mode environment with one
@@ -231,7 +239,7 @@ changes the values written. Building takes about 25 seconds with 1 MiB of guest 
 | `pc` | register `pc` (the ELF entry) |
 | guest RAM `[0, ram_size)` | the RAM region `mem` at HLA address 0, so a guest address is an HLA byte address; at most 4 MiB (HLA's limit of 2^20 words) |
 | program break | registers `brk` and `brkmin` (the end of the image) |
-| why it stopped | register `stop` (`src/rv/semantics.hpp` `StopCode`: 0 running, 1 illegal instruction, 2 `ebreak`, 3 misaligned jump, 4 and 5 a load or store outside RAM, 6 a fetch outside RAM, 7 `exit`) |
+| why it stopped | register `stop` (`src/rv/semantics.hpp` `StopCode`: 0 running, 1 illegal instruction, 2 `ebreak`, 3 misaligned jump, 4 and 5 a load or store outside RAM, 6 a fetch outside RAM, 7 `exit`; 8 only in aot mode, section 9) |
 
 ### The loop
 
@@ -309,3 +317,135 @@ Program size and startup (the startup code writes the registers, RAM and tables,
 The 26 `switch` tables (320 K characters each) and the arithmetic library make up the 26 M of the
 smallest; each word of guest RAM adds about 750 characters. `malm hla` compiles the 1 MiB
 emulator in about 25 seconds (release build).
+
+## 9. rv-aot
+
+rv-aot is aot mode: `malm build --mode aot` ([cli.md](cli.md)) translates the program into HLA ahead
+of time, every guest instruction into inline HLA, and compiles that into one pure `.malm` with the
+`EXIT_A` flag. `src/aot/cfg.cpp` recovers the control-flow graph, `src/aot/aot.cpp` writes the HLA
+program (`malm rvaot` prints it). It reuses rv-emu's state, instruction semantics and runtime
+(`src/rv/semantics.hpp`: the ALU statements, branches, the load, store and system call subroutines
+and the stops), so the two modes agree by construction where the semantics are concerned; what aot
+saves is the decoding, the operand `switch`es and `pc` arithmetic, which happen at build time.
+
+### The control-flow graph
+
+- **The code** is every 4-aligned word inside an executable (`PF_X`) segment, decoded at build
+  time. Nothing else is translated: with the runtime's linker script `.text` has a segment of its
+  own, `.rodata` and `.data` others.
+- **Basic blocks** start at the entry, the targets of branches and `jal`, the instruction after a
+  branch or jump, and the indirect targets. Each starts with the HLA label `b_<address>`, in
+  address order, so a block falls through into the next.
+- **Indirect targets**, the entries of the dispatch table: the entry, the return addresses (after a
+  `jal` or `jalr` with `rd` not `x0`), every aligned word of the image whose value is a code address
+  (jump tables, function pointers, `.init_array`; an instruction word never is one, as its low two
+  bits are 11), and the code addresses that `lui`, `auipc` and `addi` build from constants inside a
+  block (`la a0, f`).
+- The same constant tracking turns a `jalr` on a constant (`auipc` + `jalr`, a far `call` or
+  `tail`) into a direct jump.
+
+### Translation
+
+The guest registers are the HLA registers `x1` .. `x31`, guest RAM the region `mem` at HLA address
+0, with the program break and `stop` as in section 8. `x0` is a constant: an instruction with
+`rd = x0` is dropped (a load still runs, as it can fault), and an operand `x0` is a constant or the
+register `zero`, which is never written. `pc` is written only where something reads it: before a
+load, a store or an `ecall` (the runtime's faults and `exit`) and in the stops.
+
+| instruction | HLA |
+|---|---|
+| `lui`, `auipc` | `mov rd, k` (`auipc`'s value is computed at build time) |
+| OP-IMM, OP | one arithmetic statement; `mov` where an operand is `x0` or the operation an identity (`mv`, `li`) |
+| loads, stores | `ea := rs1 + imm`, `mov pc`, the runtime's subroutine (section 8) |
+| branches | `xor`, `slt` or `sltu`, then `bz`/`bnz` to the target's block; one `bz`/`bnz` against `x0` |
+| `jal` | `mov rd, pc + 4`, `jmp` to the target's block |
+| `jalr` | as `jal` for a constant target, otherwise through the dispatch table |
+| `ecall` | `mov pc`, the runtime's `ecall` |
+| `fence` | nothing |
+| `ebreak`, illegal | `mov pc` (and `insn`), the stop |
+
+A jump whose target is a constant goes straight to the target's block, or to a stub that stops as
+the reference emulator does: misaligned (`stop` 3, `pc` the jump, `tg` the target), outside guest
+RAM (6, `pc` the target) or no translated code (8). Running off the end of the code is such a jump.
+
+### The dispatch table
+
+The dispatch table `disp` is an HLA RAM region after guest RAM (and after the padding `dpad` that
+aligns it), one word for every guest word of the smallest aligned power-of-two block `[B, B + S)`
+that holds all the code: the code address of the block's label for an indirect target, the stop
+`f_disp` otherwise. A `jalr` whose target is not a constant computes `t = rs1 + imm` (`add`, unless
+`imm` is 0), then
+
+```
+and t', t, ~(S - 1) | 2     ; outside the block, or bit 1 set
+xor t', t', B
+bnz t', stub                ; misaligned, outside guest RAM, or no code: as above
+and ix, t, S - 4            ; bit 0 is dropped, as jalr does
+or  ix, ix, T               ; T, the table's address, is a multiple of S
+mov rd, pc + 4
+load t', [ix]
+jmp t'
+```
+
+about 2 200 steps. `f_disp` recovers the target from `ix` and stops with 8. Guest RAM and the table
+together must fit HLA's 2^20 RAM words, which leaves `--ram 4M` no room.
+
+### Differences from the reference emulator
+
+- **Self-modifying code** is not supported. A `fence.i` anywhere in the code, or a store to a
+  constant address in the code (its base built by `lui`, `auipc` and `addi` in the block), is a
+  build error: `malm build: prog.elf: fence.i at 0x1040: self-modifying code is not supported in aot
+  mode`. Other stores into the code go undetected: guest RAM changes, so loads see the new bytes,
+  but the translation keeps running the old instructions.
+- **Code aot did not translate:** a jump to an aligned address inside guest RAM that is not
+  translated code (outside the executable segments, or off their end), or an indirect jump to an
+  instruction that is not an indirect target, stops with `stop` 8 (`Untranslated`) and `pc` = the
+  target, after the jump wrote `rd`. The reference emulator would run that code. The programs of
+  the tests (section 7) never get there.
+- The faults are otherwise rv-emu's (section 8): `stop` and `pc` say why and where, the exit status
+  is 1.
+
+### Costs
+
+VM steps per instruction from `rv_aot_test` (each a run of 2 to 8 copies in its own block of a
+small program, release build), next to rv-emu's (section 8):
+
+| instruction | aot | emu |
+|---|---|---|
+| `lui` / `addi rd, rs, 0` (`mv`) | 120 / 180 | 2 200 / 5 500 |
+| `addi` / `slti` | 1 950 / 1 900 | 5 500 to 7 300 |
+| `ori` / `srli 7` / `slli 7` | 300 / 580 / 950 | 5 500 to 7 300 |
+| `add` / `sltu` (register) | 2 070 / 1 990 | 8 500 |
+| `xor` / `sll` (register) | 250 / 1 160 | 6 800 / 7 500 to 8 300 |
+| `mul` (`y` = `0xF00D`) / `divu` | 36 800 / 120 000 | 50 000 / 125 000 to 130 000 |
+| `lw` / `lb`, `lbu` | 4 400 / 5 600, 5 260 | 9 400 / 10 000 to 10 700 |
+| `sw` / `sb` | 4 400 / 6 600 | 10 800 / 12 400 to 12 700 |
+| `beqz` / `beq` / `bltu` not taken | 280 / 540 / 3 140 | 5 300 to 7 800 |
+| `bne` taken | 540 | 11 400 to 14 000 |
+| `jal` | 3 | 11 600 |
+| `jalr` (through the table) | 2 200 | 10 800 |
+| `ecall` (`brk`, with two `li`) | 4 750 | 17 000 |
+
+The arithmetic statements are HLA's (hla.md 4.7), slightly dearer with the many call sites of a
+real program; a load or store adds the address `add` (1 750) and the range check (`and`, then
+`bnz` on zero, which tests all four bytes: 750). A comparison branch that falls through on a zero
+word pays that `bnz` too.
+
+Programs, 64 KiB of guest RAM unless noted (release build; times measured back to back on a
+desktop machine):
+
+| program | mode | `.malm` | Malbolge text (and startup steps) | build | guest instructions | VM steps |
+|---|---|---|---|---|---|---|
+| `hello.c` | emu / aot | 0.98 / 1.06 MB | 38 M / 34 M | 3.9 / 3.9 s | 899 | 47 M / 37 M |
+| `cat.c` (9 bytes) | emu / aot | 0.93 / 1.22 MB | 37 M / 43 M | 4.0 / 4.3 s | 1 628 | 52 M / 45 M |
+| `fizzbuzz.c` (15) | emu / aot | 1.00 / 4.70 MB | 35 M / 123 M | 3.9 / 13.4 s | 6 740 | 100 M / 145 M |
+| `fizzbuzz.c` (2000) | emu / aot | | | | 848 167 | 8.44 G / 3.21 G (161 / 62 s) |
+| `runtime_test.c`, 256 KiB | aot | 13.9 MB | | 33 s | 3 120 348 | 6.92 G (146 s) |
+
+Without startup, fizzbuzz runs about 9 900 steps per guest instruction in emu mode and 3 650 in aot
+mode, 2.7 times faster; the runtime's self-check takes about 2 200 per instruction in aot mode,
+startup included, against rv-emu's 8 740 (section 8, at 1 MiB). The price is size: emu mode's
+program depends on the guest RAM only, while aot mode adds about 54 K characters of Malbolge text,
+and as many startup steps, per guest instruction (2.2 KB of `.malm`), so a program of about 250
+instructions is as large in both modes and fizzbuzz's 1 887 make 123 M characters. Issue #31 is
+about both.

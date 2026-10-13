@@ -1,22 +1,25 @@
 #!/bin/sh
-# `malm build` for C end to end (issue #28): an example from examples/c built into a .malm and,
-# with --exe, a native executable; both run through real pipes and must give the expected stdout
-# and exit status.
-# Usage: build_pipe_test.sh <malm> <cc> <examples-dir> <programs-dir> <case>
+# `malm build` for C end to end (issues #28, #29): an example from examples/c built in emu or aot
+# mode into a .malm and, with --exe, a native executable; both run through real pipes and must give
+# the expected stdout and exit status.
+# Usage: build_pipe_test.sh <malm> <cc> <examples-dir> <programs-dir> <case> [emu|aot]
 set -u
 malm=$1
 cc=$2
 examples=$3
 programs=$4
 case_=$5
+mode=${6:-emu}
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
 # build [compiler args...]: prog.malm and the executable prog. 64K of guest RAM keeps the builds
 # short.
 build() {
-    "$malm" build --ram 64K --cc "$cc" -o "$tmp/prog.malm" "$examples/$case_.c" -- "$@" || exit 1
-    "$malm" build --ram 64K --cc "$cc" --exe -o "$tmp/prog" "$examples/$case_.c" -- "$@" \
+    "$malm" build --mode "$mode" --ram 64K --cc "$cc" -o "$tmp/prog.malm" "$examples/$case_.c" \
+        -- "$@" || exit 1
+    "$malm" build --mode "$mode" --ram 64K --cc "$cc" --exe -o "$tmp/prog" "$examples/$case_.c" \
+        -- "$@" \
         2> "$tmp/err" || { cat "$tmp/err"; exit 1; }
 }
 
