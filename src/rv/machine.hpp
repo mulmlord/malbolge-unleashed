@@ -20,6 +20,8 @@ inline constexpr std::uint32_t kSysRead = 63;
 inline constexpr std::uint32_t kSysWrite = 64;
 inline constexpr std::uint32_t kSysExit = 93;
 inline constexpr std::uint32_t kSysBrk = 214;
+// Not Linux: writes the registers to stdout (docs/rv.md 4), for the differential tests.
+inline constexpr std::uint32_t kSysDumpRegs = 255;
 
 // Negated Linux errno values returned in a0.
 inline constexpr std::uint32_t kEbadf = static_cast<std::uint32_t>(-9);

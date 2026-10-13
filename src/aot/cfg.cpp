@@ -196,9 +196,7 @@ class Recovery {
 } // namespace
 
 std::uint32_t Insn::imm_i() const noexcept { return ux(sx(word) >> 20); }
-std::uint32_t Insn::imm_s() const noexcept {
-    return ux(sx(word) >> 25) << 5 | (word >> 7 & 0x1f);
-}
+std::uint32_t Insn::imm_s() const noexcept { return ux(sx(word) >> 25) << 5 | (word >> 7 & 0x1f); }
 std::uint32_t Insn::imm_b() const noexcept {
     return ux(sx(word) >> 31) << 12 | (word << 4 & 0x800) | (word >> 20 & 0x7e0) |
            (word >> 7 & 0x1e);

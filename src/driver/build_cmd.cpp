@@ -5,8 +5,8 @@
 #include <ostream>
 #include <utility>
 
-#include "asm/assemble.hpp"
 #include "aot/aot.hpp"
+#include "asm/assemble.hpp"
 #include "asm/parser.hpp"
 #include "container/container.hpp"
 #include "driver/pack_cmd.hpp"
@@ -49,9 +49,8 @@ bool is_elf(const std::vector<std::uint8_t>& bytes) {
 
 // The generated HLA program `src` (as `name`) compiled to a pure .malm with EXIT_A; `what` names
 // the generator in an internal error.
-core::Result<std::vector<std::uint8_t>, std::string> compile_hla(const std::string& name,
-                                                                 std::string src,
-                                                                 std::string_view what) {
+core::Result<std::vector<std::uint8_t>, std::string>
+compile_hla(const std::string& name, std::string src, std::string_view what) {
     using R = core::Result<std::vector<std::uint8_t>, std::string>;
     assembler::MemoryLoader loader({{name, std::move(src)}});
     assembler::Diagnostics diags;

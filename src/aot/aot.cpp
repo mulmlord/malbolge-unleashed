@@ -341,7 +341,8 @@ class Translator {
     void branch(std::uint32_t pc, const Insn& in) {
         using rv::sem::Cond;
         static constexpr std::array<std::optional<Cond>, 8> kConds = {
-            Cond::Eq, Cond::Ne, std::nullopt, std::nullopt, Cond::Lt, Cond::Ge, Cond::Ltu, Cond::Geu};
+            Cond::Eq, Cond::Ne, std::nullopt, std::nullopt,
+            Cond::Lt, Cond::Ge, Cond::Ltu,    Cond::Geu};
         const std::optional<Cond> cond = kConds[in.funct3()];
         if (!cond) {
             return illegal(pc, in);
@@ -383,8 +384,8 @@ class Translator {
             w_.stmt(std::format("add tg, {}, {}", base, imm(in.imm_i())));
             base = "tg";
         }
-        const std::string mis = stub({std::format("mov pc, {}", num(pc)),
-                                      std::format("jmp {}", rv::sem::kFaultMisaligned)});
+        const std::string mis = stub(
+            {std::format("mov pc, {}", num(pc)), std::format("jmp {}", rv::sem::kFaultMisaligned)});
         std::vector<std::string> outside;
         if (base != "tg") {
             outside.push_back(std::format("mov tg, {}", base));

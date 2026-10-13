@@ -1,6 +1,7 @@
 #include <doctest/doctest.h>
 
 #include <cstdint>
+#include <map>
 #include <optional>
 #include <string>
 #include <vector>
@@ -359,6 +360,19 @@ TEST_CASE("machine: brk, unknown syscalls and exit") {
     // The exit ecall counts as a step and leaves pc on itself.
     CHECK(r.m.steps() == prog.size());
     CHECK(r.m.pc() == kCode + static_cast<u32>(prog.size() * 4) - 4);
+}
+
+TEST_CASE("machine: the register dump") {
+    const Run r = run(sys(255, 0x80000001, 0xabc) + kExit0);
+    REQUIRE(r.stop.kind == Stop::Kind::Exit);
+    std::string want = "== registers ==\npc 0x00001020\n"; // the ecall, after 8 words
+    for (unsigned i = 1; i < 32; ++i) {
+        const std::map<unsigned, std::string> set = {
+            {2, "00010000"}, {10, "80000001"}, {11, "00000abc"}, {17, "000000ff"}};
+        want += "x" + std::to_string(i) + " 0x" + (set.contains(i) ? set.at(i) : "00000000") + "\n";
+    }
+    CHECK(r.out == want);
+    CHECK(r.m.reg(a0) == 0); // exit's: the dump changed nothing, then exit set a0 to 0
 }
 
 TEST_CASE("machine: host I/O errors fault with E_IO") {

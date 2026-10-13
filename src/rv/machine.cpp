@@ -181,6 +181,19 @@ std::optional<Stop> Machine::ecall(core::Io& io) {
         }
         x_[10] = brk_;
         return std::nullopt;
+    case kSysDumpRegs: {
+        // As rv-emu's and rv-aot's (sem::ecall): pc, then x1 .. x31.
+        std::string text = "== registers ==\npc " + hex(pc_) + "\n";
+        for (unsigned i = 1; i < 32; ++i) {
+            text += "x" + std::to_string(i) + " " + hex(x_[i]) + "\n";
+        }
+        for (const char c : text) {
+            if (!io.write_byte(static_cast<std::uint8_t>(c))) {
+                return fault("E_IO: cannot write to stdout");
+            }
+        }
+        return std::nullopt;
+    }
     default:
         x_[10] = kEnosys;
         return std::nullopt;

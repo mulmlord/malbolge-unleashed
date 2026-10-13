@@ -14,7 +14,11 @@ static inline long sys3(long n, long a, long b, long c) {
 static inline long sys_read(int fd, void* buf, unsigned long n) { return sys3(63, fd, (long)buf, (long)n); }
 static inline long sys_write(int fd, const void* buf, unsigned long n) { return sys3(64, fd, (long)buf, (long)n); }
 static inline void* sys_brk(void* addr) { return (void*)sys3(214, (long)addr, 0, 0); }
+// Built with -DMALM_DUMP_REGS, sys_exit dumps the registers first (ecall 255, docs/rv.md 4).
 static inline __attribute__((noreturn)) void sys_exit(int code) {
+#ifdef MALM_DUMP_REGS
+    sys3(255, 0, 0, 0);
+#endif
     sys3(93, code, 0, 0);
     __builtin_unreachable();
 }

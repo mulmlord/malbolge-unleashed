@@ -56,10 +56,15 @@ other register. The numbers are those of Linux RV32. Errors are negated Linux er
 | 64 | `write(fd, buf, count)` | `fd` must be 1 or 2; both go to stdout. Writes the bytes, returns `count`. |
 | 93 | `exit(code)` | ends the program with exit status `code & 255`. |
 | 214 | `brk(addr)` | if `initial break <= addr <= ram_size`, the break becomes `addr`; returns the break after the call (so `brk(0)` reads it). |
+| 255 | register dump | not Linux: writes `== registers ==`, then `pc 0x...` (the `ecall`) and `x1 0x...` .. `x31 0x...`, one per line with 8 lowercase hex digits, to stdout; changes no register. For the differential tests (section 7). |
 
 `read` from another fd and `write` to another fd return `-EBADF` (-9); a buffer that is not
 entirely inside guest RAM gives `-EFAULT` (-14), with no I/O. Any other number returns `-ENOSYS`
-(-38).
+(-38). All three machines implement the register dump the same way, so their stdout can be
+compared byte for byte. In rv-emu and rv-aot it is a subroutine of the runtime that computes each
+hex digit (no table); it adds about 2.3 M characters of Malbolge text, and as many startup steps,
+to every program, most of it the 32 register reads (each register access costs program text, hla.md
+4).
 
 ## 5. Faults
 
@@ -138,7 +143,7 @@ aligns `sp` to 16 and records it for the heap limit, runs the `.init_array` cons
 
 | header | contents |
 |---|---|
-| `unistd.h` | `read`, `write`, `_exit`, `brk`, `sbrk`: the system calls of section 4; an error sets `errno` and returns -1 |
+| `unistd.h` | `read`, `write`, `_exit`, `brk`, `sbrk`: the system calls of section 4; an error sets `errno` and returns -1. A program linked with `--defsym=__malm_dump_regs=1` dumps its registers (ecall 255) in `_exit`, so on every way out (`exit`, a return from `main`, `abort`) |
 | `errno.h` | `errno` and the Linux error numbers |
 | `stdlib.h` | `malloc`, `calloc`, `realloc`, `free` (first-fit, address-ordered free list with merging, on `sbrk`; blocks 16-aligned); `exit`, `atexit` (32 functions), `abort`; `abs`, `labs`, `atoi`, `atol`, `strtol`, `strtoul`; `qsort` (heapsort) |
 | `string.h` | `memcpy`, `memmove`, `memset`, `memcmp`, `memchr`, `strlen`, `strnlen`, `strcmp`, `strncmp`, `strcpy`, `strncpy`, `strcat`, `strncat`, `strchr`, `strrchr`, `strstr`, `strdup` |
@@ -173,26 +178,42 @@ on `malm rvref`, and C programs through real pipes with their output and exit st
 state), and on the runtime the examples in `examples/c` (hello, cat, wc, fizzbuzz, sort) and
 `tests/rv/programs/runtime_test.c`, a self-check of crt0 and the library.
 `rv_toolchain_test` compiles C with `malm build`'s toolchain code and the runtime built into
-`malm` and runs the result on the reference emulator; the `build_c_*` tests
-(`tests/rv/build_pipe_test.sh`) build each example with `malm build`, as a `.malm` and with `--exe`,
-and run both through real pipes (`cat` is `fast`, the rest `slow`; they need `MALM_BUILD_EMU`).
+`malm` and runs the result on the reference emulator; the `build_c_*` and `build_c_aot_*` tests
+(`tests/rv/build_pipe_test.sh`) build each example with `malm build` in emu and aot mode, as a
+`.malm` and with `--exe`, and run both through real pipes (`cat` is `fast`, the rest `slow`; they
+need `MALM_BUILD_EMU`).
 `rv_emu_test` runs rv-emu against the reference emulator one instruction at a time (section 8).
 `rv_aot_test` checks rv-aot's control-flow graph and runs translated hand-assembled programs
 (random ALU code; loads, stores, branches, calls, a jump table and the system calls; every fault
 and jump out of the code) against the reference emulator, comparing output, exit status, stop
 code, registers and RAM, and reports the cost of each instruction class (section 9).
-`rv_test` also builds a hand-assembled ELF with `malm build` in both modes and runs it, without the
-RISC-V toolchain; the slow `rvemu_program_*` and `rvaot_program_*` tests
-(`tests/rv/rv_pipe_test.sh`) build the C programs with `malm build` and compare them with the
-reference emulator through real pipes, in aot mode also the runtime's self-check (at 256 KiB of
-guest RAM; aot's hello is `fast`). The `build_c_aot_*` tests are the `build_c_*` tests in aot mode.
-The same riscv-tests also run on rv-emu and rv-aot (`rvemu_rv32u*-p-*`, `rvaot_rv32u*-p-*`,
-`tests/rv/rv_suite_test.sh`): each test is built with `malm build --ram 8K` (every test ends below
-`0x2000` and uses no stack) and run with `malm run`, about 4 seconds per test in a release build.
-In emu mode `add`, `beq`, `lw` and `sw` are `fast`, in aot mode `add`, `jalr`, `lw`, `ma_data` and
-`fence_i`, the rest `slow` (nightly CI). `fence_i` modifies its own code, so in aot mode the test is
-that the build refuses it. Like the other rv-emu tests they need `MALM_BUILD_EMU`, so the debug
-preset leaves them out (and the aot ones, which compile as long).
+`rv_test` also builds a hand-assembled ELF with `malm build` in both modes and runs it, without
+the RISC-V toolchain.
+
+**The three-way differential test** (`tests/rv/rv_diff_test.sh`, the M4 exit criterion) runs a
+program on the reference emulator (`malm rvref`) and builds it in emu and aot mode (`malm build`,
+then `malm run`), each input through real pipes, and requires the same stdout, byte for byte, and
+the same exit status from all three. The programs dump their registers as they exit (ecall 255,
+section 4), so stdout ends with the final `pc` and registers: the riscv-tests through
+`env/riscv_test.h` before the pass or fail `exit`, the C programs through the runtime's `_exit`
+(linked with `--defsym=__malm_dump_regs=1`; the bare `hello.c` and `cat.c` with
+`-DMALM_DUMP_REGS`, see `programs/sys.h`). The script checks that the dump is there, and, for the
+riscv-tests, that the reference emulator passes (status 0).
+
+- `rvdiff_rv32u*-p-*`: every riscv-test with 8 KiB of guest RAM (each ends below `0x2000` and uses
+  no stack), about 8 seconds per test in a release build. `fence_i` modifies its own code, so aot
+  mode must refuse it (the build error of section 9) and only emu mode is compared. `add`, `jalr`,
+  `lw`, `ma_data` and `fence_i` are `fast`, the rest `slow`.
+- `rvdiff_program_*`: the e2e suite with 64 KiB of guest RAM: the bare `hello.c` and `cat.c`, and on
+  the runtime the examples hello, cat, wc, fizzbuzz (also its error path, status 2) and sort (with a
+  16 KiB heap reserve, as 64 KiB leaves none by default), each with the inputs in `tests/rv/inputs`;
+  and the runtime's self-check with 256 KiB, on both of its inputs (exit 42, and a failed `assert`,
+  134). The example hello is `fast`, the rest `slow`; the self-check takes about 11 minutes, nearly
+  all of it in emu mode.
+
+They need `MALM_BUILD_EMU`, so the debug preset leaves them out. The `build_c_*` and
+`build_c_aot_*` tests check the same examples against fixed expected output, built from C by
+`malm build` as a `.malm` and with `--exe`.
 
 riscv-tests is fetched at configure time (pinned commit) and built with clang and ld.lld, without
 its `env` submodule: `tests/rv/env/riscv_test.h` replaces the machine-mode environment with one
@@ -310,12 +331,12 @@ Program size and startup (the startup code writes the registers, RAM and tables,
 
 | guest RAM | `emu.malm` | Malbolge text and startup steps | startup time |
 |---|---|---|---|
-| 4 KiB | 0.8 MB | 26 M | under a second |
-| 64 KiB | 0.9 MB | 37 M | about a second |
-| 1 MiB (the default) | 2.6 MB | 223 M | 6 to 60 seconds (idle to busy machine) |
+| 4 KiB | 0.9 MB | 28 M | under a second |
+| 64 KiB | 0.9 MB | 36 M | about a second |
+| 1 MiB (the default) | 2.8 MB | 222 M | 6 to 60 seconds (idle to busy machine) |
 
-The 26 `switch` tables (320 K characters each) and the arithmetic library make up the 26 M of the
-smallest; each word of guest RAM adds about 750 characters. `malm hla` compiles the 1 MiB
+The 26 `switch` tables (320 K characters each), the arithmetic library and the register dump
+(section 4) make up the 28 M of the smallest; each word of guest RAM adds about 750 characters. `malm hla` compiles the 1 MiB
 emulator in about 25 seconds (release build).
 
 ## 9. rv-aot

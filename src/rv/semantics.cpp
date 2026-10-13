@@ -181,11 +181,12 @@ void sys_error(Writer& w, std::string_view label, std::int32_t err) {
 void system_calls(Writer& w, const Config& c) {
     w.comment("ecall: the system call a7 (docs/rv.md 4)");
     w.label("ecall");
-    std::vector<std::string> by_number(215, "sys_nosys");
+    std::vector<std::string> by_number(256, "sys_nosys");
     by_number[63] = "sys_read";
     by_number[64] = "sys_write";
     by_number[93] = "sys_exit";
     by_number[214] = "sys_brk";
+    by_number[255] = "sys_dump";
     w.switch_on("x17", by_number);
     w.stmt("jmp sys_nosys");
     const auto high_zero = [&](std::string_view reg, std::string_view otherwise) {
@@ -256,6 +257,49 @@ void system_calls(Writer& w, const Config& c) {
     w.stmt("mov x10, brk");
     w.stmt("jmp lke");
 
+    // The register dump: "== registers ==", then pc and x1 .. x31, one per line, as in the
+    // reference emulator (machine.cpp). Nothing changes, a0 included.
+    w.label("sys_dump");
+    high_zero("x17", "sys_nosys");
+    w.stmt("out \"== registers ==\\n\"");
+    for (unsigned i = 0; i < 32; ++i) {
+        const std::string name = i == 0 ? "pc" : std::format("x{}", i);
+        w.stmt(std::format("out \"{} 0x\"", name));
+        w.stmt(std::format("mov hv, {}", name));
+        w.call("lkd", "sys_hex", w.fresh("sys_dump"));
+    }
+    w.stmt("jmp lke");
+    // sys_hex: hv as 8 hex digits (high first) and a newline; returns to lkd. A digit is computed
+    // rather than looked up: a switch would add a table of its own to every program.
+    w.label("sys_hex");
+    for (unsigned shift = 28;; shift -= 4) {
+        if (shift == 28) {
+            w.stmt("srl t, hv, 28");
+        } else if (shift == 0) {
+            w.stmt("and t, hv, 15");
+        } else {
+            w.stmt(std::format("srl t, hv, {}", shift));
+            w.stmt("and t, t, 15");
+        }
+        w.call("lkn", "sys_hex_digit", w.fresh("sys_hex"));
+        if (shift == 0) {
+            break;
+        }
+    }
+    w.stmt("out 10");
+    w.stmt("jmp lkd");
+    // The digit of t (0..15): '0' + t, or 'a' + t - 10.
+    w.label("sys_hex_digit");
+    w.stmt("sltu u, t, 10");
+    w.stmt("bz u, sys_hex_letter");
+    w.stmt("or t, t, 0x30");
+    w.stmt("out t");
+    w.stmt("jmp lkn");
+    w.label("sys_hex_letter");
+    w.stmt("add t, t, 0x57");
+    w.stmt("out t");
+    w.stmt("jmp lkn");
+
     sys_error(w, "sys_nosys", -38);
     sys_error(w, "sys_ebadf", -9);
     sys_error(w, "sys_efault", -14);
@@ -324,7 +368,7 @@ void declare_ram(Writer& w, std::uint32_t ram_size, const Image* image) {
 }
 
 void declare_runtime(Writer& w, std::uint32_t brk) {
-    w.stmt("reg ea, b, r, lkm, lke, t, u, n, wa, w0, w1");
+    w.stmt("reg ea, b, r, lkm, lke, t, u, n, wa, w0, w1, hv, lkd, lkn");
     w.stmt(std::format("reg brk = {0}, brkmin = {0}, stop", num(brk)));
 }
 

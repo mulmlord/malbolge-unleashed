@@ -11,8 +11,8 @@
 //   b    the value of a store
 //   r    the result of a load
 //   lkm  the return address of a memory subroutine, lke of the system call
-// The subroutines use the scratch registers t, u, n, wa, w0 and w1 and leave every other register
-// alone.
+// The subroutines use the scratch registers t, u, n, wa, w0, w1, hv, lkd and lkn and leave every
+// other register alone.
 #pragma once
 
 #include <cstdint>
@@ -120,8 +120,8 @@ enum class Width : std::uint8_t { Byte = 1, Half = 2, Word = 4 };
 void load(Writer& w, Width width, bool sign, std::string_view ret);
 // The `width` low bytes of b go to ea; outside guest RAM: StoreFault. Continues at `ret`.
 void store(Writer& w, Width width, std::string_view ret);
-// The system call of a7 (docs/rv.md 4): a0 := the result, or the program exits. Continues at
-// `ret`.
+// The system call of a7 (docs/rv.md 4): a0 := the result, or the program exits; the register
+// dump (255) writes pc and x1 .. x31 to stdout. Continues at `ret`.
 void ecall(Writer& w, std::string_view ret);
 
 // The subroutines and stops: ld_b, ld_h, ld_w, st_b, st_h, st_w, ecall and the fault labels.
