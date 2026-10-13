@@ -13,7 +13,7 @@ The command line (`run`, `asm`, `hla`, `export`, `pack`, `--trace`, `--stats`) i
 ## Prerequisites
 
 - C++23 compiler (GCC 14+ or Clang 18+), CMake 3.28+, Ninja
-- For the RISC-V runtime and tests (and later `malm build`): clang with the riscv32 target and lld
+- For `malm build` of C programs and the RISC-V tests: clang with the riscv32 target and lld
   (`ld.lld`); without them those tests are skipped with a configure warning (`MALM_RV_TESTS`,
   [docs/rv.md](docs/rv.md))
 
@@ -51,7 +51,7 @@ Binaries land in `build/<preset>/src/driver/malm`. CMake options: `MALM_WERROR`,
 | `rv/runtime` | RISC-V runtime: crt0, linker script, syscalls, minimal libc ([docs/rv.md](docs/rv.md)) |
 | `examples/asm` | assembly examples: hello world, cat, halting cat, adder, digital root |
 | `examples/hla` | high-level assembly examples: hello world, cat, exit status, reverse (stack) |
-| `examples/c` | C examples for the RISC-V runtime: hello world, cat, fizzbuzz |
+| `examples/c` | C examples for the RISC-V runtime: hello world, cat, wc, fizzbuzz, sort |
 | `tests/` | doctest suites (labels `fast`, `slow`) |
 | `docs/` | spec, CLI reference, research and design decisions (`docs/adr`) |
 | `prototypes/` | throwaway spike code behind the ADRs; not built or tested |
@@ -76,15 +76,17 @@ step counts in [docs/adr/0002-hla-arithmetic.md](docs/adr/0002-hla-arithmetic.md
 `malm hla examples/hla/cat.mhl -o cat.malm`, then `echo hi | malm run cat.malm`. The arithmetic
 suite (`tests/hla/arith_test.cpp`, with its slow cases) passes, which is the M2 exit criterion.
 
-M3 (RISC-V emu mode), in progress: the RV32IM ELF loader and a C++ reference emulator, the test
+M3 (RISC-V emu mode): the RV32IM ELF loader and a C++ reference emulator, the test
 oracle for emu and aot mode, which passes riscv-tests `rv32ui-p-*` and `rv32um-p-*`; run an ELF
 with the hidden debugging command `malm rvref prog.elf` ([docs/rv.md](docs/rv.md)). The RISC-V
 runtime (crt0, linker script, system calls and a minimal libc with malloc and printf) runs the C
-programs in `examples/c` on the reference emulator; how to compile and link against it by hand is
-in [docs/rv.md](docs/rv.md) section 6, until `malm build` does it. rv-emu, the RV32IM emulator
-written in HLA, is built into `emu.malm` with the toolchain, agrees with the reference emulator
-instruction by instruction and passes riscv-tests `rv32ui-p-*` and `rv32um-p-*` in emu mode. `malm build prog.elf -o prog.malm` turns an ELF into a pure `.malm`
-that runs it in emu mode, then `malm run prog.malm` ([docs/rv.md](docs/rv.md) section 8).
+programs in `examples/c` on the reference emulator ([docs/rv.md](docs/rv.md) section 6). rv-emu,
+the RV32IM emulator written in HLA, is built into `emu.malm` with the toolchain, agrees with the
+reference emulator instruction by instruction and passes riscv-tests `rv32ui-p-*` and `rv32um-p-*`
+in emu mode. `malm build` compiles a C program with clang and the runtime (or takes an RV32IM ELF)
+into a pure `.malm` that runs it in emu mode, or with `--exe` into a native executable
+([docs/cli.md](docs/cli.md)): `malm build --ram 64K --exe -o cat examples/c/cat.c`, then
+`echo hi | ./cat` prints `hi`, the M3 exit criterion.
 
 ## License
 

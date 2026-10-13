@@ -35,7 +35,7 @@ constexpr auto kCommands = std::to_array<Command>({
     {"asm", "Assemble a low-level .mua file into a .malm", asm_command},
     {"hla", "Compile a high-level .mhl file to .malm", hla_command},
     {"disasm", "Disassemble a .malm or Malbolge text file", disasm_command},
-    {"build", "Build an RV32IM ELF into a .malm (emu mode)", build_command},
+    {"build", "Build a C program or an RV32IM ELF into a .malm or an executable", build_command},
     {"pack", "Pack a .malm into a native executable", pack_command},
     {"export", "Convert between .malm and plain Malbolge text (--text | --malm)", export_command},
     {"rvref", "Run an RV32IM ELF on the C++ reference emulator", rvref_command, true},

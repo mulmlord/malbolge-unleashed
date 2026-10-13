@@ -15,7 +15,7 @@ usage: malm <command> [args...]
 | `asm` | implemented | assemble a `.mua` file into a `.malm` or Malbolge text; check and pretty-print it |
 | `disasm` | implemented | turn a program back into readable assembly, or list it cell by cell |
 | `hla` | implemented | compile a high-level `.mhl` file into a `.malm` or Malbolge text; check it and print the generated assembly |
-| `build` | implemented for RV32IM ELF input (emu mode) | build a RISC-V program into a `.malm`; compiling C and other sources and `--exe` follow (issue #28) |
+| `build` | implemented for C and RV32IM ELF input (emu mode) | build a C program or a RISC-V ELF into a `.malm` or a native executable; aot mode and other languages follow |
 | `rvref` | implemented, hidden | run an RV32IM ELF on the C++ reference emulator (a debugging tool; not listed by `--help`) |
 | `rvemu` | implemented, hidden | write the HLA program of rv-emu, the RV32IM emulator, optionally with a guest program in its RAM (a build and debugging tool; not listed by `--help`) |
 
@@ -256,29 +256,59 @@ the `.mhl` file, also for errors the assembler finds in the generated program.
 ## `malm build`
 
 ```
-usage: malm build [--ram <size>] -o <out.malm> [--] <prog.elf>
+usage: malm build [--mode emu] [--ram <size>] [--cc <compiler>]
+                  (-o <out.malm> | --exe -o <out>) (<prog.c>... | <prog.elf>)
+                  [-- <compiler args>...]
 ```
 
-Builds an RV32IM ELF executable into a pure `.malm` that runs it in emu mode: rv-emu with the
-program in its guest RAM ([rv.md](rv.md) section 8). The ELF is loaded like `malm rvref` loads it
-(rv.md section 1); the guest's stdin, stdout and exit status are the program's, through `malm run`
-or a packed executable (`malm pack`). Implementation: `src/driver/build_cmd.cpp`; tests:
-`tests/rv/build_test.cpp` and `tests/rv/rvemu_pipe_test.sh`.
+Builds a C program, or an RV32IM ELF executable, into a pure `.malm` that runs it in emu mode:
+rv-emu with the program in its guest RAM ([rv.md](rv.md) section 8). The guest's stdin, stdout
+and exit status are the program's, through `malm run` or the native executable of `--exe`.
+Implementation: `src/driver/build_cmd.cpp` and `src/driver/toolchain.cpp`; tests:
+`tests/rv/build_test.cpp`, `tests/rv/toolchain_test.cpp`, `tests/rv/build_pipe_test.sh` and
+`tests/rv/rvemu_pipe_test.sh`.
 
 | option | meaning |
 |---|---|
+| `--mode emu` | run the program in rv-emu, the RV32IM emulator; the default and, until aot mode (issue #29), the only mode |
 | `--ram <size>` | guest RAM in bytes, or with a `K` (KiB) or `M` (MiB) suffix; a multiple of 16 up to `4M` (HLA's RAM limit); default `1M` |
+| `--cc <compiler>` | the C compiler: a path, or a name looked up in `PATH`; default `clang`, else the newest `clang-N` in `PATH` |
 | `-o <out.malm>` | where to write the program, a `.malm` (zstd) with the `EXIT_A` flag; `-o -` writes it to stdout |
+| `--exe -o <out>` | write a native executable instead, as `malm pack` would (not to stdout) |
+| `-- <args>...` | everything after `--` goes to the compiler; an argument `-Wl,a,b` passes `a` and `b` to the linker instead |
 
-Exit codes: 0; 1 if the ELF loader rejects the file (`malm build: <file>: <reason>`), a file
-cannot be read or written, or the output would overwrite the input; 2 for a usage error. The
-output passes the purity check of `malm asm`, and the same ELF and options give the same bytes.
+The input is one or more C sources (files ending in `.c`), compiled and linked together, or one
+ELF executable (recognized by its first four bytes), loaded like `malm rvref` loads it (rv.md
+section 1). Because `--` starts the compiler arguments, a source whose name starts with `-` is
+written `./-name.c`.
+
+C sources are compiled with clang for `riscv32-unknown-elf`, `rv32im`, `ilp32`, `-O2` (the
+arguments after `--` come later, so `-O0` overrides it), against the runtime's headers, and linked
+by `ld.lld` with crt0, the linker script and the libc of [rv.md](rv.md) section 6, as described
+there. The runtime is built into `malm`, so nothing besides clang and ld.lld is needed: the
+runtime is compiled anew in a temporary directory for every build (about a quarter of a second).
+`ld.lld` is looked for next to the compiler, after resolving symlinks (which finds Ubuntu's
+`/usr/lib/llvm-N/bin/ld.lld` for `clang-N`), then as `ld.lld` or the newest `ld.lld-N` in `PATH`.
+The compiler's and the linker's diagnostics and warnings for the program go to stderr.
+
+Exit codes: 0; 1 if clang or ld.lld is missing (`malm build: no C compiler: ...`,
+`malm build: no linker: ...`), the compiler cannot target riscv32 (`malm build: <cc> cannot
+compile for riscv32-unknown-elf ...`, after the compiler's own message), compiling or linking
+fails, the ELF loader rejects the program (`malm build: <file>: <reason>`), a file cannot be read
+or written, or the output would overwrite an input; 2 for a usage error, including `--mode aot`.
+The output passes the purity check of `malm asm`, and the same ELF and options give the same bytes.
 
 Building compiles the whole emulator: about 25 seconds with the default 1 MiB of guest RAM and 4 with
-64 KiB (release build). Running needs about 5 GB of host memory with 1 MiB (rv.md section 8).
+64 KiB (release build). Running needs about 5 GB of host memory with 1 MiB (rv.md section 8), so
+small programs are better built with a smaller `--ram`. The heap ends `__stack_size` (64 KiB) below
+the stack (rv.md section 6): with 64 KiB of guest RAM a program that calls `malloc` needs
+`-- -Wl,--defsym=__stack_size=16384` or similar.
 
 ```
-$ malm build --ram 64K hello.elf -o hello.malm
+$ malm build --ram 64K --exe -o cat examples/c/cat.c
+$ echo hi | ./cat
+hi
+$ malm build --ram 64K -o hello.malm hello.elf
 $ malm run hello.malm
 Hello, world!
 ```

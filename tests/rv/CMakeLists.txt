@@ -140,8 +140,14 @@ foreach(prog hello cat)
         FLAGS -O2 -ffreestanding -Wall -Wextra -Werror)
 endforeach()
 
+# malm build's C toolchain (issue #28): the runtime built into malm, compiled with this clang.
+malm_add_test(NAME rv_toolchain_test LABEL fast SOURCES toolchain_test.cpp
+    LIBS malm_rv malm_driver TIMEOUT 300)
+target_compile_definitions(rv_toolchain_test PRIVATE MALM_RV_CC="${MALM_RV_CC}"
+    MALM_EXAMPLES_DIR="${PROJECT_SOURCE_DIR}/examples/c")
+
 # Programs on the runtime: the C examples and the runtime's self-check.
-foreach(prog hello cat fizzbuzz)
+foreach(prog hello cat fizzbuzz wc sort)
     rv_elf(example_${prog} "${PROJECT_SOURCE_DIR}/examples/c/${prog}.c" RUNTIME
         FLAGS -Wall -Wextra -Werror)
 endforeach()
@@ -155,7 +161,7 @@ foreach(name IN LISTS rv_suite_tests)
     set_tests_properties(rvref_${name} PROPERTIES LABELS fast TIMEOUT 60)
 endforeach()
 
-foreach(case hello cat trace regs example_hello example_cat fizzbuzz runtime runtime_assert)
+foreach(case hello cat trace regs example_hello example_cat fizzbuzz wc sort runtime runtime_assert)
     add_test(NAME rvref_program_${case}
         COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/rvref_pipe_test.sh" $<TARGET_FILE:malm>
             "${rv_elf_dir}" "${PROJECT_SOURCE_DIR}/tests/programs" ${case})
@@ -173,6 +179,20 @@ foreach(case hello cat fizzbuzz)
         COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/rvemu_pipe_test.sh" $<TARGET_FILE:malm>
             "${rv_elf_dir}" "${PROJECT_SOURCE_DIR}/tests/programs" ${case})
     set_tests_properties(rvemu_program_${case} PROPERTIES LABELS slow TIMEOUT 1800)
+endforeach()
+
+# `malm build` for C (issue #28): each example built into a .malm and a native executable and run
+# through pipes; cat is the M3 exit criterion (`echo hi | ./cat`) and fast, the rest slow.
+foreach(case hello cat wc fizzbuzz sort)
+    set(label slow)
+    if(case STREQUAL "cat")
+        set(label fast)
+    endif()
+    add_test(NAME build_c_${case}
+        COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/build_pipe_test.sh" $<TARGET_FILE:malm>
+            "${MALM_RV_CC}" "${PROJECT_SOURCE_DIR}/examples/c" "${PROJECT_SOURCE_DIR}/tests/programs"
+            ${case})
+    set_tests_properties(build_c_${case} PROPERTIES LABELS ${label} TIMEOUT 1800)
 endforeach()
 
 # riscv-tests on rv-emu (issue #27): each test built with `malm build` (8K of guest RAM) and run;

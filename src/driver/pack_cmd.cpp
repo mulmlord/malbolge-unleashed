@@ -223,40 +223,49 @@ int pack_command_with(std::span<const std::string_view> args, std::ostream& err,
     if (const int rc = load_program(input, classic, err, prog, max_cells); rc != 0) {
         return rc;
     }
-    const std::string out_path(output);
-    if (is_dynamic_loader(self_exe)) {
-        err << "malm: refusing to pack: the running binary is the dynamic loader; run malm "
-               "directly, "
-               "not through ld.so\n";
-        return 1;
-    }
-    if (same_file(out_path, self_exe)) {
-        err << "malm: refusing to overwrite the running binary '" << output << "'\n";
-        return 1;
-    }
-    if (same_file(out_path, std::string(input))) {
+    if (same_file(std::string(output), std::string(input))) {
         err << "malm: refusing to overwrite the input file '" << output << "'\n";
         return 1;
     }
-
-    std::vector<std::uint8_t> base;
     std::vector<std::uint8_t> payload;
     try {
-        if (!read_base_binary(self_exe, base, err)) {
-            return 1;
-        }
         payload = encode_malm(std::move(prog), exit_a, container::Codec::Zstd);
     } catch (const std::bad_alloc&) {
         err << "malm: out of memory\n";
         return 1;
     }
-    const auto trailer = pack::make_trailer({base.size(), payload.size()});
+    return write_packed(std::string(output), payload, self_exe, err) ? 0 : 1;
+}
+
+bool write_packed(const std::string& output, std::span<const std::uint8_t> malm,
+                  const char* self_exe, std::ostream& err) {
+    if (is_dynamic_loader(self_exe)) {
+        err << "malm: refusing to pack: the running binary is the dynamic loader; run malm "
+               "directly, "
+               "not through ld.so\n";
+        return false;
+    }
+    if (same_file(output, self_exe)) {
+        err << "malm: refusing to overwrite the running binary '" << output << "'\n";
+        return false;
+    }
+
+    std::vector<std::uint8_t> base;
+    try {
+        if (!read_base_binary(self_exe, base, err)) {
+            return false;
+        }
+    } catch (const std::bad_alloc&) {
+        err << "malm: out of memory\n";
+        return false;
+    }
+    const auto trailer = pack::make_trailer({base.size(), malm.size()});
 
 #ifndef MALM_STATIC
     err << "malm: warning: this malm is dynamically linked; the packed executable needs the same "
            "shared libraries at run time\n";
 #endif
-    return write_executable(out_path, {base, payload, trailer}, err) ? 0 : 1;
+    return write_executable(output, {base, malm, trailer}, err);
 }
 
 } // namespace malm
