@@ -28,9 +28,9 @@ core::Result<std::vector<std::uint8_t>, std::string> build_aot(const rv::Image& 
                                                                std::uint32_t ram_size);
 
 // `malm build [--mode emu|aot] [--ram <size>] [--cc <compiler>] (-o <out.malm> | --exe -o <out>)
-// (<prog.c>... | <prog.elf>) [-- <compiler args>...]` (docs/cli.md): compiles C sources with the
-// runtime (toolchain.hpp), or takes an RV32IM ELF, and builds an emu-mode or aot-mode .malm or a
-// native executable of it. `args` excludes the subcommand name.
+// (<source>... | <prog.elf>) [-- <compiler args>...]` (docs/cli.md): compiles C and C++ sources
+// with the runtime (toolchain.hpp), or takes an RV32IM ELF, and builds an emu-mode or aot-mode
+// .malm or a native executable of it. `args` excludes the subcommand name.
 int build_command(std::span<const std::string_view> args, std::istream& in, std::ostream& out,
                   std::ostream& err);
 

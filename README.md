@@ -13,10 +13,11 @@ The command line (`run`, `asm`, `hla`, `export`, `pack`, `--trace`, `--stats`) i
 ## Prerequisites
 
 - C++23 compiler (GCC 14+ or Clang 18+), CMake 3.28+, Ninja
-- For `malm build` of C programs and the RISC-V tests: clang with the riscv32 target and lld
-  (`ld.lld`); without them those tests are skipped with a configure warning (`MALM_RV_TESTS`,
+- For `malm build` of C and C++ programs and the RISC-V tests: clang with the riscv32 target and
+  lld (`ld.lld`); without them those tests are skipped with a configure warning (`MALM_RV_TESTS`,
   [docs/rv.md](docs/rv.md)). With them, and `llvm-ar` or `ar`, the build also cross-compiles
-  picolibc into `malm` for `malm build --libc picolibc` (`MALM_PICOLIBC`)
+  picolibc and libc++ into `malm` for `malm build --libc picolibc` and C++ (`MALM_PICOLIBC`;
+  it downloads LLVM's 140 MB source tarball once)
 
 Arch: `sudo pacman -S --needed cmake ninja clang lld`
 
@@ -49,10 +50,11 @@ Binaries land in `build/<preset>/src/driver/malm`. CMake options: `MALM_WERROR`,
 | `src/pack` | native executable packer |
 | `src/rv` | RV32IM ELF loader, the C++ reference emulator (`malm rvref`) and the generator of rv-emu with its instruction semantics (`malm rvemu`, [docs/rv.md](docs/rv.md)) |
 | `rv/emu` | builds `emu.malm`, the RV32IM emulator written in HLA |
-| `rv/runtime` | RISC-V runtime: crt0, linker script, syscalls, minimal libc; picolibc build and its system interface ([docs/rv.md](docs/rv.md)) |
+| `rv/runtime` | RISC-V runtime: crt0, linker script, syscalls, minimal libc; picolibc and libc++ build and their system interface ([docs/rv.md](docs/rv.md)) |
 | `examples/asm` | assembly examples: hello world, cat, halting cat, adder, digital root |
 | `examples/hla` | high-level assembly examples: hello world, cat, exit status, reverse (stack) |
 | `examples/c` | C examples for the RISC-V runtime: hello world, cat, wc, fizzbuzz, sort; stats (floating point, picolibc) |
+| `examples/cpp` | C++ examples (libc++): hello world, sort (`std::vector`, `std::sort`) |
 | `tests/` | doctest suites (labels `fast`, `slow`) |
 | `docs/` | spec, CLI reference, research and design decisions (`docs/adr`) |
 | `prototypes/` | throwaway spike code behind the ADRs; not built or tested |
@@ -103,7 +105,10 @@ is refused by aot mode).
 M5 (more languages): `malm build --libc picolibc` links C programs with picolibc, the full C
 library, and compiler-rt's soft-float routines, built into `malm` ([docs/rv.md](docs/rv.md)
 section 6): `malm build --libc picolibc --ram 64K --exe -o stats examples/c/stats.c`, then
-`echo 1.5 -2.25 1e3 | ./stats` prints the mean and standard deviation.
+`echo 1.5 -2.25 1e3 | ./stats` prints the mean and standard deviation. C++ programs are built
+with libc++ on picolibc, without exceptions and RTTI unless `-- -fexceptions` (emu mode only) or
+`-- -frtti` turns them on: `malm build --exe -o sort examples/cpp/sort.cpp`, then
+`printf 'b\na\n' | ./sort`.
 
 ## License
 

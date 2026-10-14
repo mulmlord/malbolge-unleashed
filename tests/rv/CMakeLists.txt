@@ -74,18 +74,23 @@ foreach(src IN LISTS rt_sources)
     list(APPEND rt_libc "${obj}")
 endforeach()
 
-# picolibc (issue #32), as built into malm (rv/runtime/CMakeLists.txt).
+# picolibc (issue #32) and libc++ (issue #33), as built into malm (rv/runtime/CMakeLists.txt).
 if(TARGET picolibc_sysroot)
     get_target_property(pl_sysroot picolibc_sysroot MALM_SYSROOT)
     set(pl_libs "${pl_sysroot}/lib/libmalm.a" "${pl_sysroot}/lib/libc.a"
         "${pl_sysroot}/lib/libclang_rt.builtins.a")
+    set(cxx_libs "${pl_sysroot}/lib/libc++.a" "${pl_sysroot}/lib/libc++abi.a")
+    set(cxx_eh_libs "${pl_sysroot}/lib/eh/libc++.a" "${pl_sysroot}/lib/eh/libc++abi.a"
+        "${pl_sysroot}/lib/eh/libunwind.a")
 endif()
 
-# rv_elf(<name> <source> [RUNTIME | PICOLIBC] [DEPENDS <files>...] [FLAGS <flags>...]
-#        [LDFLAGS <flags>...]): compile and link one test ELF; RUNTIME builds it against the
-# runtime's headers and links crt0 and the libc, PICOLIBC the same with picolibc.
+# rv_elf(<name> <source> [RUNTIME | PICOLIBC | CXX | CXX_EH] [DEPENDS <files>...]
+#        [FLAGS <flags>...] [LDFLAGS <flags>...]): compile and link one test ELF; RUNTIME builds it
+# against the runtime's headers and links crt0 and the libc, PICOLIBC the same with picolibc, CXX
+# a C++ source with picolibc and libc++ as `malm build` does (no exceptions or RTTI), CXX_EH with
+# exceptions and RTTI.
 function(rv_elf name src)
-    cmake_parse_arguments(ARG "RUNTIME;PICOLIBC" "" "DEPENDS;FLAGS;LDFLAGS" ${ARGN})
+    cmake_parse_arguments(ARG "RUNTIME;PICOLIBC;CXX;CXX_EH" "" "DEPENDS;FLAGS;LDFLAGS" ${ARGN})
     set(obj "${rv_elf_dir}/${name}.o")
     set(elf "${rv_elf_dir}/${name}.elf")
     set(inputs "${obj}")
@@ -100,6 +105,20 @@ function(rv_elf name src)
             -fdata-sections)
         list(APPEND ARG_DEPENDS picolibc_sysroot "${rt_crt0}" ${pl_libs})
         set(inputs "${rt_crt0}" "${obj}" ${pl_libs})
+        list(APPEND ld_flags --gc-sections)
+    elseif(ARG_CXX OR ARG_CXX_EH)
+        set(libs ${cxx_libs})
+        set(cxx_flags -fno-exceptions -fno-rtti)
+        if(ARG_CXX_EH)
+            set(libs ${cxx_eh_libs})
+            set(cxx_flags -fexceptions -frtti)
+            list(APPEND ld_flags --eh-frame-hdr)
+        endif()
+        list(PREPEND ARG_FLAGS -O2 -nostdlibinc -isystem "${pl_sysroot}/include/c++/v1"
+            -isystem "${pl_sysroot}/include" -ffunction-sections -fdata-sections
+            -fbinutils-version=none ${cxx_flags})
+        list(APPEND ARG_DEPENDS picolibc_sysroot "${rt_crt0}" ${libs} ${pl_libs})
+        set(inputs "${rt_crt0}" "${obj}" ${libs} ${pl_libs})
         list(APPEND ld_flags --gc-sections)
     endif()
     add_custom_command(OUTPUT "${elf}"
@@ -138,7 +157,9 @@ endforeach()
 malm_add_test(NAME rv_toolchain_test LABEL fast SOURCES toolchain_test.cpp
     LIBS malm_rv malm_driver TIMEOUT 300)
 target_compile_definitions(rv_toolchain_test PRIVATE MALM_RV_CC="${MALM_RV_CC}"
-    MALM_EXAMPLES_DIR="${PROJECT_SOURCE_DIR}/examples/c")
+    MALM_EXAMPLES_DIR="${PROJECT_SOURCE_DIR}/examples/c"
+    MALM_CXX_EXAMPLES_DIR="${PROJECT_SOURCE_DIR}/examples/cpp"
+    MALM_RV_PROGRAMS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/programs")
 
 # Programs on the runtime: the C examples and the runtime's self-check.
 foreach(prog hello cat fizzbuzz wc sort)
@@ -174,6 +195,25 @@ if(TARGET picolibc_sysroot)
     rv_elf(picolibc_runtime_test "${CMAKE_CURRENT_SOURCE_DIR}/programs/runtime_test.c" PICOLIBC
         FLAGS -Wall -Wextra -Werror)
     set(rv_picolibc_cases example_hello example_cat fizzbuzz wc sort stats runtime runtime_assert)
+
+    # C++ (issue #33): the examples and libc++'s self-check, also with exceptions and RTTI.
+    foreach(prog hello sort)
+        rv_elf(cxx_example_${prog} "${PROJECT_SOURCE_DIR}/examples/cpp/${prog}.cpp" CXX
+            FLAGS -Wall -Wextra -Werror)
+        rv_elf(dump_cxx_example_${prog} "${PROJECT_SOURCE_DIR}/examples/cpp/${prog}.cpp" CXX
+            FLAGS -Wall -Wextra -Werror
+            LDFLAGS --defsym=__malm_dump_regs=1 --defsym=__stack_size=16384)
+    endforeach()
+    rv_elf(cxx_test "${CMAKE_CURRENT_SOURCE_DIR}/programs/cxx_test.cpp" CXX
+        FLAGS -std=c++20 -Wall -Wextra -Werror)
+    rv_elf(dump_cxx_test "${CMAKE_CURRENT_SOURCE_DIR}/programs/cxx_test.cpp" CXX
+        FLAGS -std=c++20 -Wall -Wextra -Werror LDFLAGS --defsym=__malm_dump_regs=1)
+    rv_elf(cxx_eh_test "${CMAKE_CURRENT_SOURCE_DIR}/programs/cxx_test.cpp" CXX_EH
+        FLAGS -std=c++20 -Wall -Wextra -Werror)
+    rv_elf(dump_cxx_eh_test "${CMAKE_CURRENT_SOURCE_DIR}/programs/cxx_test.cpp" CXX_EH
+        FLAGS -std=c++20 -Wall -Wextra -Werror LDFLAGS --defsym=__malm_dump_regs=1)
+    set(rv_cxx_cases example_hello sort self_check abort)
+    set(rv_cxx_eh_cases self_check abort)
 endif()
 
 add_custom_target(rv_test_elfs ALL DEPENDS ${rv_elfs})
@@ -189,11 +229,13 @@ foreach(case hello cat trace regs example_hello example_cat fizzbuzz wc sort run
             "${rv_elf_dir}" "${PROJECT_SOURCE_DIR}/tests/programs" ${case})
     set_tests_properties(rvref_program_${case} PROPERTIES LABELS fast TIMEOUT 60)
 endforeach()
-foreach(case IN LISTS rv_picolibc_cases)
-    add_test(NAME rvref_picolibc_${case}
-        COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/rvref_pipe_test.sh" $<TARGET_FILE:malm>
-            "${rv_elf_dir}" "${PROJECT_SOURCE_DIR}/tests/programs" ${case} picolibc)
-    set_tests_properties(rvref_picolibc_${case} PROPERTIES LABELS fast TIMEOUT 60)
+foreach(libc picolibc cxx cxx_eh)
+    foreach(case IN LISTS rv_${libc}_cases)
+        add_test(NAME rvref_${libc}_${case}
+            COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/rvref_pipe_test.sh" $<TARGET_FILE:malm>
+                "${rv_elf_dir}" "${PROJECT_SOURCE_DIR}/tests/programs" ${case} ${libc})
+        set_tests_properties(rvref_${libc}_${case} PROPERTIES LABELS fast TIMEOUT 60)
+    endforeach()
 endforeach()
 
 # The three-way differential test (issue #30): each program on the reference emulator and built
@@ -225,6 +267,26 @@ foreach(spec
             "${rv_elf_dir}/${elf}.elf" ${ram} ${fields})
     set_tests_properties(rvdiff_program_${case} PROPERTIES LABELS ${label} TIMEOUT 7200)
 endforeach()
+# C++ (issue #33): the examples and libc++'s self-check (its abort too); with exceptions in emu
+# mode only. hello is fast, the rest slow.
+if(TARGET picolibc_sysroot)
+    foreach(spec
+            "cxx_hello|dump_cxx_example_hello|64K|/dev/null"
+            "cxx_sort|dump_cxx_example_sort|64K|${rv_inputs}/sort.in"
+            "cxx_self_check|dump_cxx_test|256K|/dev/null|${rv_inputs}/cxx_abort.in"
+            "cxx_eh_self_check|dump_cxx_eh_test|256K|--emu-only|/dev/null|${rv_inputs}/cxx_abort.in")
+        string(REPLACE "|" ";" fields "${spec}")
+        list(POP_FRONT fields case elf ram)
+        set(label slow)
+        if(case STREQUAL "cxx_hello")
+            set(label fast)
+        endif()
+        add_test(NAME rvdiff_program_${case}
+            COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/rv_diff_test.sh" $<TARGET_FILE:malm>
+                "${rv_elf_dir}/${elf}.elf" ${ram} ${fields})
+        set_tests_properties(rvdiff_program_${case} PROPERTIES LABELS ${label} TIMEOUT 7200)
+    endforeach()
+endif()
 
 # `malm build` for C (issue #28): each example built into a .malm and a native executable and run
 # through pipes; cat is the M3 exit criterion (`echo hi | ./cat`) and fast, the rest slow.
@@ -257,6 +319,24 @@ if(TARGET picolibc_sysroot)
                 "${MALM_RV_CC}" "${PROJECT_SOURCE_DIR}/examples/c"
                 "${PROJECT_SOURCE_DIR}/tests/programs" ${case} emu picolibc)
         set_tests_properties(build_c_picolibc_${case} PROPERTIES LABELS ${label} TIMEOUT 1800)
+    endforeach()
+    # C++ (issue #33), the M5 criterion for C++, in emu and aot mode; sort in emu mode is fast.
+    foreach(case hello sort)
+        foreach(mode emu aot)
+            set(label slow)
+            if(case STREQUAL "sort" AND mode STREQUAL "emu")
+                set(label fast)
+            endif()
+            set(name build_cpp_${case})
+            if(mode STREQUAL "aot")
+                set(name build_cpp_aot_${case})
+            endif()
+            add_test(NAME ${name}
+                COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/build_pipe_test.sh" $<TARGET_FILE:malm>
+                    "${MALM_RV_CC}" "${PROJECT_SOURCE_DIR}/examples/cpp"
+                    "${PROJECT_SOURCE_DIR}/tests/programs" ${case} ${mode} picolibc)
+            set_tests_properties(${name} PROPERTIES LABELS ${label} TIMEOUT 1800)
+        endforeach()
     endforeach()
 endif()
 

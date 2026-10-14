@@ -87,7 +87,7 @@ instructions from 1, the faulting one included. Reasons:
 `rv/runtime` is what a C program needs to run as a guest: the entry point (`crt0.S`), the linker
 script (`link.ld`), the system call wrappers and a minimal C library (`include/`, `src/`), or
 instead [picolibc](https://github.com/picolibc/picolibc), the full C library (`malm build --libc
-picolibc`, below).
+picolibc`, below), which comes with libc++ for C++ (below).
 
 ### Toolchain and linking
 
@@ -125,7 +125,7 @@ malm rvref prog.elf
 | addresses | contents |
 |---|---|
 | `[0, 0x1000)` | unused; nothing faults there, a null pointer reads zeros |
-| `0x1000` up | `.text` (`_start` first), `.rodata`, `.init_array`, `.fini_array`, `.data`, `.bss`, up to `_end` |
+| `0x1000` up | `.text` (`_start` first), `.rodata`, `.eh_frame_hdr` and `.eh_frame` (C++ exceptions only), `.init_array`, `.fini_array`, `.data`, `.bss`, up to `_end` |
 | `_end` up | the heap, grown through `brk` |
 | below `ram_size` | the stack, growing down from the initial `sp` |
 
@@ -182,14 +182,17 @@ script. Floating point works in software: `float` and `double` arithmetic, `prin
 in compiler-rt for riscv32: a program that computes with it fails to link.
 
 These are built when `malm` is built, with the RISC-V toolchain of section 7 (and `llvm-ar` or
-`ar`): `rv/runtime/CMakeLists.txt` fetches picolibc and compiler-rt 20.1.8 (pinned release
-tarballs), cross-compiles both with CMake (`-O2`; picolibc without thread-local storage and
-locking, so `errno` is a plain global) and packs headers and libraries into a zstd-compressed tar,
-about 0.8 MB, that is built into `malm`. `malm build` unpacks it into its temporary directory. The
+`ar`): `rv/runtime/CMakeLists.txt` fetches picolibc 1.8.12 and LLVM 20.1.8 (pinned release
+tarballs; of LLVM's 140 MB only compiler-rt's builtins and the C++ runtimes are extracted),
+cross-compiles them with CMake (`-O2`; picolibc without thread-local storage and locking, so
+`errno` is a plain global), and packs headers and libraries, libc++'s too, into a tar compressed
+with zstd's highest level (`cmake/PackSysroot.cmake`), about 1.9 MB, that is built into `malm`
+(4.3 MB with it, 2.3 MB without; `malm pack` copies all of it into every executable it makes).
+`malm build` unpacks it into its temporary directory. The
 CMake cache variable `MALM_PICOLIBC` controls this like `MALM_RV_TESTS`: `AUTO` (default) builds
 it when the toolchain is found and otherwise builds `malm` without it, with a warning; `ON` makes a
 missing toolchain a configure error; `OFF` leaves it out. A `malm` without picolibc rejects
-`--libc picolibc`.
+`--libc picolibc` and C++.
 
 `libmalm.a` keeps the minimal runtime's behaviour:
 
@@ -200,6 +203,9 @@ missing toolchain a configure error; `OFF` leaves it out. A `malm` without picol
   `stdout` (a destructor of priority 101, run last through `.fini_array`).
 - **System calls** are `src/syscalls.c` (`read`, `write`, `_exit`, `brk`, `sbrk`; also the
   register dump of `__malm_dump_regs`), so the heap limit is the same.
+- **memset** is the minimal runtime's (`picolibc/memset.c`), taken before picolibc's because
+  `libmalm.a` comes first in the link: picolibc's assembly `memset` jumps into the middle of a
+  table of stores, which aot mode cannot follow (section 9).
 - **Everything else** fails (`picolibc/posix.c`): there are no files and no clock, so `fopen`,
   `remove` and `open` fail with `ENOSYS`, `time` and `clock` return -1; `lseek` on the standard
   streams gives `ESPIPE`, `isatty` 0. `raise` ends the program with status 128 + the signal, so
@@ -212,6 +218,53 @@ instructions). Linking with `-- -Wl,--defsym=vfprintf=__i_vfprintf` selects pico
 integer-only `printf` (3.4 KB). In emu mode the size of the code hardly matters (section 8), in aot
 mode it does (section 9). A `printf("%f")` takes about 3 000 guest instructions.
 
+### C++
+
+`malm build` compiles C++ sources (`.cpp`, `.cc`, `.cxx`) with the same clang and links them with
+picolibc and [libc++](https://libcxx.llvm.org/) 20.1.8, LLVM's C++ standard library, with its
+runtime libc++abi; both are in the picolibc sysroot above, so C++ always uses picolibc (`--libc
+minimal` is an error). C and C++ sources can be built together. The C++ ones are compiled with
+libc++'s headers before picolibc's, `-fno-exceptions -fno-rtti` and clang's default standard
+(gnu++17); the arguments after `--` come later and go to every source, so `-std=c++20`, `-frtti`
+or `-fexceptions` override the defaults (and a `-std=c++20` breaks a C source built with them).
+
+- **The library** is libc++ without what needs an operating system the guest does not have:
+  threads (`std::thread`, `std::mutex`, ...), files (`std::fstream`, the operations of
+  `<filesystem>`), `std::random_device`, `steady_clock` (`system_clock::now()` is the epoch: there
+  is no clock) and wide characters; and without locales, so without iostreams (`std::cout`,
+  `std::stringstream`), `<locale>` and `<regex>`. The headers can be included, but using what is
+  missing is a compile or link error. Output goes through `<cstdio>`. `std::format` and
+  `std::print` do not link either: they can format `long double`, which has no arithmetic routines
+  (above). Containers, strings, algorithms, smart pointers, `<functional>`, `<optional>`,
+  `<variant>`, `<random>`'s engines, `<charconv>` (also for floating point), `std::to_string` and
+  `<cmath>` work. libc++'s frozen C++03 headers are left out of the sysroot.
+- **The runtime.** libc++abi has `operator new` and `delete` (on `malloc`), the guards of
+  function-local statics (`__cxa_guard_*`, no locks: one hart), pure virtual calls and the type
+  information of RTTI. crt0 runs the static constructors (`.init_array`, above); the
+  destructors of static objects are registered with picolibc's `__cxa_atexit` and run by `exit`
+  with the `atexit` functions, before `stdout` is flushed.
+- **Errors.** Without exceptions, what would throw prints libc++'s message on stderr and aborts
+  with status 134: `out_of_range was thrown in -fno-exceptions mode with message "vector"`, or
+  `libc++abi: bad_alloc was thrown in -fno-exceptions mode` when `operator new` finds no memory.
+  The heap limit of section 6 applies: with 64 KiB of guest RAM a program that allocates needs
+  `-- -Wl,--defsym=__stack_size=16384` or similar.
+- **Exceptions** (`-- -fexceptions`) link copies of libc++ and libc++abi built with exceptions,
+  and libunwind (in `lib/eh` of the sysroot), with `ld.lld --eh-frame-hdr`; the linker script
+  places `.eh_frame_hdr` and `.eh_frame` and defines the symbols libunwind looks for. C++ is
+  compiled with `-fbinutils-version=none` (the libraries too), which lets `--gc-sections` drop a
+  function's exception table with the function. An uncaught exception prints `libc++abi:
+  terminating due to uncaught exception of type St12out_of_range: vector` (the type mangled, which
+  saves the demangler's 110 KB) and aborts with 134. Exceptions work in emu mode only: libunwind
+  enters a landing pad through a computed jump to an address in the exception tables, which aot
+  mode cannot follow (section 9), so `malm build --mode aot` refuses `-fexceptions` for C++.
+- **RTTI** (`-- -frtti`): `dynamic_cast`, `typeid` and `type_info::name` (mangled names).
+
+**Size.** `examples/cpp/hello.cpp` (`std::string_view` and `fwrite`) is 1.0 KB of code,
+`examples/cpp/sort.cpp` (`std::string`, `std::vector`, `std::sort`) 24 KB, 10 KB of it picolibc's
+floating-point `printf`, which libc++'s abort messages call: `-Wl,--defsym=vfprintf=__i_vfprintf`
+(above) makes it 14 KB. A program that can throw carries libunwind and libc++abi's personality
+routine, about 50 KB more; one that never throws pays nothing for `-fexceptions`.
+
 ## 7. Tests
 
 `tests/rv/`: unit tests for the loader and every instruction class (`rv_test`), the official
@@ -222,14 +275,18 @@ state), and on the runtime the examples in `examples/c` (hello, cat, wc, fizzbuz
 `tests/rv/programs/runtime_test.c`, a self-check of crt0 and the library. The same programs, the
 self-check and `examples/c/stats.c` (which needs floating point) also run linked with picolibc
 (`rvref_picolibc_*`; the self-check then also checks floating point, `scanf`, `setjmp` and the
-missing files and clock).
+missing files and clock). The C++ examples (`examples/cpp`: hello, sort) and
+`tests/rv/programs/cxx_test.cpp`, a self-check of libc++ and libc++abi (static constructors and
+destructors, `new`, virtual calls, containers, `<charconv>`, and its abort), run as `rvref_cxx_*`,
+the self-check also with exceptions and RTTI (`rvref_cxx_eh_*`).
 `rv_toolchain_test` compiles C with `malm build`'s toolchain code and the runtime built into
-`malm`, with either C library, and runs the result on the reference emulator; `rv_test` unpacks
+`malm`, with either C library, and C++, and runs the result on the reference emulator; `rv_test` unpacks
 the picolibc sysroot and hand-made archives (`sysroot_test.cpp`); the `build_c_*` and `build_c_aot_*` tests
 (`tests/rv/build_pipe_test.sh`) build each example with `malm build` in emu and aot mode, as a
 `.malm` and with `--exe`, and run both through real pipes (`cat` is `fast`, the rest `slow`; they
 need `MALM_BUILD_EMU`); `build_c_picolibc_*` do the same with picolibc in emu mode, and stats
-(`fast`).
+(`fast`); `build_cpp_*` and `build_cpp_aot_*` build the C++ examples, the M5 criterion for C++
+(`build_cpp_sort` is `fast`).
 `rv_emu_test` runs rv-emu against the reference emulator one instruction at a time (section 8).
 `rv_aot_test` checks rv-aot's control-flow graph and runs translated hand-assembled programs
 (random ALU code; loads, stores, branches, calls, a jump table and the system calls; every fault
@@ -260,6 +317,9 @@ riscv-tests, that the reference emulator passes (status 0).
   and the runtime's self-check with 256 KiB, on both of its inputs (exit 42, and a failed `assert`,
   134). The example hello is `fast`, the rest `slow`; the self-check takes about 11 minutes, nearly
   all of it in emu mode.
+- `rvdiff_program_cxx_*`: the C++ examples hello (`fast`) and sort with 64 KiB, and libc++'s
+  self-check with 256 KiB on empty input (exit 42) and `abort` (134), about a minute and a half;
+  with exceptions in emu mode only (`--emu-only`), as aot mode does not support them (section 6).
 
 They need `MALM_BUILD_EMU`, so the debug preset leaves them out. The `build_c_*` and
 `build_c_aot_*` tests check the same examples against fixed expected output, built from C by
@@ -487,7 +547,9 @@ together must fit HLA's 2^20 RAM words, which leaves `--ram 4M` no room.
   translated code (outside the executable segments, or off their end), or an indirect jump to an
   instruction that is not an indirect target, stops with `stop` 8 (`Untranslated`) and `pc` = the
   target, after the jump wrote `rd`. The reference emulator would run that code. The programs of
-  the tests (section 7) never get there.
+  the tests (section 7) never get there. Hand-written assembly that computes a jump into the middle
+  of a function does: picolibc's `memset`, which the runtime replaces for that reason, and
+  libunwind entering a landing pad, which is why C++ exceptions are emu mode only (section 6).
 - The faults are otherwise rv-emu's (section 8): `stop` and `pc` say why and where, the exit status
   is 1.
 

@@ -15,7 +15,7 @@ usage: malm <command> [args...]
 | `asm` | implemented | assemble a `.mua` file into a `.malm` or Malbolge text; check and pretty-print it |
 | `disasm` | implemented | turn a program back into readable assembly, or list it cell by cell |
 | `hla` | implemented | compile a high-level `.mhl` file into a `.malm` or Malbolge text; check it and print the generated assembly |
-| `build` | implemented for C and RV32IM ELF input (emu and aot mode) | build a C program or a RISC-V ELF into a `.malm` or a native executable; other languages follow |
+| `build` | implemented for C, C++ and RV32IM ELF input (emu and aot mode) | build a C or C++ program or a RISC-V ELF into a `.malm` or a native executable; other languages follow |
 | `rvref` | implemented, hidden | run an RV32IM ELF on the C++ reference emulator (a debugging tool; not listed by `--help`) |
 | `rvemu` | implemented, hidden | write the HLA program of rv-emu, the RV32IM emulator, optionally with a guest program in its RAM (a build and debugging tool; not listed by `--help`) |
 | `rvaot` | implemented, hidden | write the HLA program that rv-aot translates an RV32IM ELF into (a debugging tool; not listed by `--help`) |
@@ -259,11 +259,11 @@ the `.mhl` file, also for errors the assembler finds in the generated program.
 ```
 usage: malm build [--mode emu|aot] [--ram <size>] [--cc <compiler>]
                   [--libc minimal|picolibc]
-                  (-o <out.malm> | --exe -o <out>) (<prog.c>... | <prog.elf>)
+                  (-o <out.malm> | --exe -o <out>) (<source>... | <prog.elf>)
                   [-- <compiler args>...]
 ```
 
-Builds a C program, or an RV32IM ELF executable, into a pure `.malm` that runs it in emu mode
+Builds a C or C++ program, or an RV32IM ELF executable, into a pure `.malm` that runs it in emu mode
 (rv-emu with the program in its guest RAM, [rv.md](rv.md) section 8) or in aot mode (the program
 translated instruction by instruction, rv.md section 9). The guest's stdin, stdout and exit status
 are the program's, through `malm run` or the native executable of `--exe`.
@@ -276,24 +276,26 @@ Implementation: `src/driver/build_cmd.cpp` and `src/driver/toolchain.cpp`; tests
 | `--mode emu` | run the program in rv-emu, the RV32IM emulator (the default) |
 | `--mode aot` | translate the program ahead of time: about three times faster (rv.md section 9), and larger by about 24 K characters of Malbolge text per guest instruction; no self-modifying code |
 | `--ram <size>` | guest RAM in bytes, or with a `K` (KiB) or `M` (MiB) suffix; a multiple of 16 up to `4M` (HLA's RAM limit); default `1M` |
-| `--cc <compiler>` | the C compiler: a path, or a name looked up in `PATH`; default `clang`, else the newest `clang-N` in `PATH` |
-| `--libc minimal` | link C sources with the runtime's minimal C library (the default) |
-| `--libc picolibc` | link them with picolibc, the full C library with floating point (rv.md section 6); only if `malm` is built with it |
+| `--cc <compiler>` | the compiler, for C and C++: a path, or a name looked up in `PATH`; default `clang`, else the newest `clang-N` in `PATH` |
+| `--libc minimal` | link C sources with the runtime's minimal C library (the default for C) |
+| `--libc picolibc` | link them with picolibc, the full C library with floating point, and libc++ (rv.md section 6); the default, and the only choice, for C++; only if `malm` is built with it |
 | `-o <out.malm>` | where to write the program, a `.malm` (zstd) with the `EXIT_A` flag; `-o -` writes it to stdout |
 | `--exe -o <out>` | write a native executable instead, as `malm pack` would (not to stdout) |
 | `-- <args>...` | everything after `--` goes to the compiler; an argument `-Wl,a,b` passes `a` and `b` to the linker instead |
 
-The input is one or more C sources (files ending in `.c`), compiled and linked together, or one
-ELF executable (recognized by its first four bytes), loaded like `malm rvref` loads it (rv.md
-section 1). Because `--` starts the compiler arguments, a source whose name starts with `-` is
-written `./-name.c`.
+The input is one or more C and C++ sources (files ending in `.c`, and `.cpp`, `.cc` or `.cxx`),
+compiled and linked together, or one ELF executable (recognized by its first four bytes), loaded
+like `malm rvref` loads it (rv.md section 1). Because `--` starts the compiler arguments, a source
+whose name starts with `-` is written `./-name.c`.
 
 C sources are compiled with clang for `riscv32-unknown-elf`, `rv32im`, `ilp32`, `-O2` (the
 arguments after `--` come later, so `-O0` overrides it), against the C library's headers, and
 linked by `ld.lld` with crt0, the linker script and the C library of [rv.md](rv.md) section 6, as
-described there. The runtime is built into `malm`, so nothing besides clang and ld.lld is needed:
+described there. C++ sources are compiled the same way against libc++'s headers, without
+exceptions and RTTI unless `-- -fexceptions` or `-- -frtti` turns them on, and linked with libc++
+too (rv.md section 6, "C++": no iostreams, threads or files; output through `<cstdio>`). The runtime is built into `malm`, so nothing besides clang and ld.lld is needed:
 the minimal C library is compiled anew in a temporary directory for every build (about a quarter
-of a second), picolibc comes prebuilt and is unpacked there.
+of a second), picolibc and libc++ come prebuilt and are unpacked there.
 `ld.lld` is looked for next to the compiler, after resolving symlinks (which finds Ubuntu's
 `/usr/lib/llvm-N/bin/ld.lld` for `clang-N`), then as `ld.lld` or the newest `ld.lld-N` in `PATH`.
 The compiler's and the linker's diagnostics and warnings for the program go to stderr.
@@ -301,8 +303,9 @@ The compiler's and the linker's diagnostics and warnings for the program go to s
 Exit codes: 0; 1 if clang or ld.lld is missing (`malm build: no C compiler: ...`,
 `malm build: no linker: ...`), the compiler cannot target riscv32 (`malm build: <cc> cannot
 compile for riscv32-unknown-elf ...`, after the compiler's own message), `--libc picolibc` is
-given to a `malm` built without it (`malm build: this malm is built without picolibc
-(MALM_PICOLIBC)`), compiling or linking
+or C++ given to a `malm` built without it (`malm build: this malm is built without picolibc
+(MALM_PICOLIBC)`), C++ exceptions in aot mode (`malm build: C++ exceptions (-fexceptions) are not
+supported in aot mode`: rv.md section 6), compiling or linking
 fails, the ELF loader rejects the program (`malm build: <file>: <reason>`), aot mode cannot
 translate it (`malm build: <file>: fence.i at 0x...: self-modifying code is not supported in aot
 mode`, or guest RAM and the dispatch table exceed HLA's RAM), a file cannot be read or written, or
@@ -334,6 +337,11 @@ min -2.25
 max 1000
 mean 333.083
 stddev 471.584
+$ malm build --ram 64K --exe -o sort examples/cpp/sort.cpp -- -Wl,--defsym=__stack_size=16384
+$ printf 'pear\nfig\napple\n' | ./sort
+apple
+fig
+pear
 ```
 
 ## `malm disasm`
