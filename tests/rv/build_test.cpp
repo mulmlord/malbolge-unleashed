@@ -154,6 +154,8 @@ TEST_CASE("build: errors") {
              {"build", "-o", out, "a.c", "--libc"},
              {"build", "-o", out, elf, "--", "-O0"},
              {"build", "-o", out, "--", "a.c"}, // after --, a.c is a compiler argument
+             {"build", "-o", out, "a.cpp", elf},
+             {"build", "--libc", "minimal", "-o", out, "a.c", "b.cc"}, // C++ needs picolibc
          }) {
         const Result r = run(args);
         CHECK(r.code == 2);
@@ -167,7 +169,13 @@ TEST_CASE("build: errors") {
     const std::string text = dir.write("hello.mal", {'(', '=', '<', '`'});
     r = run({"build", "-o", out, text});
     CHECK(r.code == 1);
-    CHECK(r.err == "malm build: " + text + ": neither a C source (.c) nor an ELF executable\n");
+    CHECK(r.err == "malm build: " + text +
+                       ": neither a C or C++ source (.c, .cpp, .cc, .cxx) nor an ELF executable\n");
+
+    // Before anything is compiled.
+    r = run({"build", "--mode", "aot", "-o", out, "a.cpp", "--", "-fexceptions"});
+    CHECK(r.code == 1);
+    CHECK(r.err == "malm build: C++ exceptions (-fexceptions) are not supported in aot mode\n");
 
     // The data segment ends at 0x210, past 512 bytes of guest RAM.
     r = run({"build", "--ram", "512", "-o", out, elf});

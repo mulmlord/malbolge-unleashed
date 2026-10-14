@@ -1,7 +1,8 @@
 #!/bin/sh
-# `malm build` for C end to end (issues #28, #29, #32): an example from examples/c built in emu or
-# aot mode, with the minimal C library or picolibc, into a .malm and, with --exe, a native
-# executable; both run through real pipes and must give the expected stdout and exit status.
+# `malm build` for C and C++ end to end (issues #28, #29, #32, #33): an example from examples/c or
+# examples/cpp (<case>.c or <case>.cpp) built in emu or aot mode, with the minimal C library or
+# picolibc, into a .malm and, with --exe, a native executable; both run through real pipes and must
+# give the expected stdout and exit status.
 # Usage: build_pipe_test.sh <malm> <cc> <examples-dir> <programs-dir> <case> [emu|aot]
 #            [minimal|picolibc]
 set -u
@@ -14,11 +15,15 @@ mode=${6:-emu}
 libc=${7:-minimal}
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
+src=$examples/$case_.c
+if [ ! -e "$src" ]; then
+    src=$examples/$case_.cpp
+fi
 
 # build [compiler args...]: prog.malm and the executable prog. 64K of guest RAM keeps the builds
 # short.
 build() {
-    set -- --mode "$mode" --libc "$libc" --ram 64K --cc "$cc" "$examples/$case_.c" -- "$@"
+    set -- --mode "$mode" --libc "$libc" --ram 64K --cc "$cc" "$src" -- "$@"
     "$malm" build -o "$tmp/prog.malm" "$@" || exit 1
     "$malm" build --exe -o "$tmp/prog" "$@" 2> "$tmp/err" || { cat "$tmp/err"; exit 1; }
 }

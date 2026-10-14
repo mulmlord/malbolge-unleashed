@@ -1,6 +1,6 @@
-// malm build's C toolchain (issue #28): compile_c with the real clang and ld.lld and the runtime
-// built into malm, the ELF run on the reference emulator. Fast, also in the debug build: no
-// emulator is compiled.
+// malm build's C and C++ toolchain (issues #28, #32, #33): compile_c with the real clang and
+// ld.lld and the runtime built into malm, the ELF run on the reference emulator. Fast, also in the
+// debug build: no emulator is compiled.
 
 #include <doctest/doctest.h>
 #include <unistd.h>
@@ -182,4 +182,84 @@ int main(void) {
     stop = run(c.elf, io);
     CHECK(io.out == "5.25\n");
     CHECK(stop.exit_code == 42);
+}
+
+TEST_CASE("toolchain: C++") {
+    if (malm::picolibc_sysroot().empty()) {
+        MESSAGE("malm is built without picolibc (MALM_PICOLIBC)");
+        return;
+    }
+    const Compiled sort = compile({MALM_CXX_EXAMPLES_DIR "/sort.cpp"}, {}, malm::Libc::Picolibc);
+    INFO(sort.diags);
+    REQUIRE(sort.ok);
+    CHECK(sort.diags.empty());
+    rvtest::StringIo io;
+    io.in = "pear\napple\n\nfig";
+    malm::rv::Stop stop = run(sort.elf, io);
+    CHECK(stop.exit_code == 0);
+    CHECK(io.out == "\napple\nfig\npear\n");
+
+    // libc++'s self-check, as malm build compiles it, and with exceptions and RTTI, which link
+    // the libraries built with exceptions.
+    for (const std::vector<std::string_view>& args :
+         {std::vector<std::string_view>{"-std=c++20"}, {"-std=c++20", "-fexceptions", "-frtti"}}) {
+        const Compiled self =
+            compile({MALM_RV_PROGRAMS_DIR "/cxx_test.cpp"}, args, malm::Libc::Picolibc);
+        INFO(self.diags);
+        REQUIRE(self.ok);
+        io = {};
+        stop = run(self.elf, io);
+        INFO(io.out);
+        CHECK(stop.exit_code == 42);
+        CHECK(io.out.starts_with("cxx_test: "));
+    }
+
+    // C and C++ sources together; a throw needs -fexceptions.
+    const TempDir dir;
+    const std::string main_cpp = dir.write("main.cpp", R"(#include <cstdio>
+#include <stdexcept>
+#include <typeinfo>
+extern "C" int twice(int);
+int main() {
+    try {
+        throw std::runtime_error("thrown");
+    } catch (const std::exception& e) {
+        std::printf("%s %d %s\n", e.what(), twice(21), typeid(e).name());
+    }
+}
+)");
+    const std::string twice_c = dir.write("twice.c", "int twice(int x) { return 2 * x; }\n");
+    Compiled c = compile({main_cpp, twice_c}, {"-fexceptions", "-frtti"}, malm::Libc::Picolibc);
+    INFO(c.diags);
+    REQUIRE(c.ok);
+    io = {};
+    stop = run(c.elf, io);
+    CHECK(io.out == "thrown 42 St13runtime_error\n");
+    CHECK(stop.exit_code == 0);
+
+    c = compile({main_cpp, twice_c}, {}, malm::Libc::Picolibc);
+    CHECK(!c.ok);
+    CHECK(c.error == "compilation failed");
+    CHECK(c.diags.find("exceptions") != std::string::npos);
+
+    c = compile({main_cpp});
+    CHECK(!c.ok);
+    CHECK(c.error == "C++ needs picolibc (--libc picolibc)");
+}
+
+TEST_CASE("toolchain: source kinds and exceptions") {
+    CHECK(malm::is_c_source("a.c"));
+    CHECK(!malm::is_c_source(".c"));
+    CHECK(!malm::is_c_source("a.cpp"));
+    for (const char* name : {"a.cpp", "dir/a.cc", "a.cxx"}) {
+        CHECK(malm::is_cxx_source(name));
+    }
+    CHECK(!malm::is_cxx_source("a.c"));
+    CHECK(!malm::is_cxx_source(".cpp"));
+    CHECK(!malm::is_cxx_source("a.hpp"));
+    using Args = std::vector<std::string_view>;
+    CHECK(!malm::wants_exceptions(Args{}));
+    CHECK(malm::wants_exceptions(Args{"-O1", "-fexceptions"}));
+    CHECK(!malm::wants_exceptions(Args{"-fexceptions", "-fno-exceptions"}));
+    CHECK(malm::wants_exceptions(Args{"-fno-exceptions", "-fexceptions", "-frtti"}));
 }

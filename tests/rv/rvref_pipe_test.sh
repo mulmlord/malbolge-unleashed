@@ -1,7 +1,8 @@
 #!/bin/sh
 # Real-pipe tests for `malm rvref` on the clang-built test programs, bare and on the runtime, with
-# the minimal C library or with picolibc (the programs named picolibc_*).
-# Usage: rvref_pipe_test.sh <malm> <elf-dir> <programs-dir> <case> [minimal|picolibc]
+# the minimal C library or with picolibc (the programs named picolibc_*), and the C++ programs with
+# libc++ (cxx_*), also with exceptions and RTTI (cxx_eh_*).
+# Usage: rvref_pipe_test.sh <malm> <elf-dir> <programs-dir> <case> [minimal|picolibc|cxx|cxx_eh]
 set -u
 malm=$1
 elf=$2
@@ -9,8 +10,8 @@ programs=$3
 case_=$4
 libc=${5:-minimal}
 p=
-if [ "$libc" = picolibc ]; then
-    p=picolibc_
+if [ "$libc" != minimal ]; then
+    p=${libc}_
 fi
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
@@ -117,6 +118,31 @@ runtime_assert)
         want="runtime_test\.c:[0-9]*: main: Assertion \`c == 'b'' failed\.$"
     fi
     tail -n 1 "$tmp/out" | grep -q "$want" || exit 1
+    ;;
+self_check)
+    # libc++'s self-check: the summary, then the static destructors in reverse order, and main's
+    # 42.
+    status=0
+    "$malm" rvref "$elf/${p}test.elf" < /dev/null > "$tmp/out" || status=$?
+    if [ "$status" != 42 ]; then
+        cat "$tmp/out" >&2
+        exit 1
+    fi
+    sed -n 1p "$tmp/out" | grep -Eq '^cxx_test: [0-9]+ checks passed$' || exit 1
+    test "$(sed -n '2,$p' "$tmp/out")" = "$(printf '~Global 2\n~Global 1')" || exit 1
+    ;;
+abort)
+    # std::vector::at out of range: libc++'s message, or with exceptions libc++abi's for the
+    # uncaught std::out_of_range (its type mangled), then abort's status 134.
+    status=0
+    echo abort | "$malm" rvref "$elf/${p}test.elf" > "$tmp/out" || status=$?
+    test "$status" = 134 || exit 1
+    if [ "$libc" = cxx_eh ]; then
+        want='libc++abi: terminating due to uncaught exception of type St12out_of_range: vector'
+    else
+        want='out_of_range was thrown in -fno-exceptions mode with message "vector"'
+    fi
+    test "$(cat "$tmp/out")" = "$want" || exit 1
     ;;
 stats)
     # picolibc only: floating point, scanf and sqrt.

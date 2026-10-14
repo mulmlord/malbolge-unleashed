@@ -24,17 +24,19 @@ namespace {
 constexpr std::string_view kUsage =
     "usage: malm build [--mode emu|aot] [--ram <size>] [--cc <compiler>]\n"
     "                  [--libc minimal|picolibc]\n"
-    "                  (-o <out.malm> | --exe -o <out>) (<prog.c>... | <prog.elf>)\n"
+    "                  (-o <out.malm> | --exe -o <out>) (<source>... | <prog.elf>)\n"
     "                  [-- <compiler args>...]\n"
     "  --mode emu       run it in rv-emu, the RV32IM emulator (the default)\n"
     "  --mode aot       translate it to Malbolge ahead of time: faster, larger\n"
     "  --ram <size>     guest RAM in bytes, or with a K/M suffix (default 1M, at most 4M)\n"
-    "  --cc <compiler>  the C compiler, clang with the riscv32 target (default: clang in PATH)\n"
-    "  --libc minimal   link C sources with malm's minimal C library (the default)\n"
-    "  --libc picolibc  link them with picolibc: the full C library, floating point\n"
+    "  --cc <compiler>  the compiler, clang with the riscv32 target (default: clang in PATH)\n"
+    "  --libc minimal   link C sources with malm's minimal C library (the default for C)\n"
+    "  --libc picolibc  link them with picolibc: the full C library, floating point,\n"
+    "                   and libc++ (the default and only choice for C++)\n"
     "  -o <out.malm>    write the program there (-o - writes to stdout)\n"
     "  --exe -o <out>   write a native executable instead (malm pack)\n"
-    "  <prog.c>...      C sources, compiled and linked with malm's runtime (docs/rv.md)\n"
+    "  <source>...      C (.c) and C++ (.cpp, .cc, .cxx) sources, compiled and linked with\n"
+    "                   malm's runtime (docs/rv.md)\n"
     "  <prog.elf>       an RV32IM ELF executable\n"
     "  -- <args>...     the rest goes to the compiler; -Wl,<args> to the linker\n";
 
@@ -43,7 +45,7 @@ int usage_error(std::ostream& err, std::string_view msg) {
     return 2;
 }
 
-bool is_c_source(std::string_view path) { return path.size() > 2 && path.ends_with(".c"); }
+bool is_source(std::string_view path) { return is_c_source(path) || is_cxx_source(path); }
 
 bool is_elf(const std::vector<std::uint8_t>& bytes) {
     return bytes.size() >= 4 && bytes[0] == 0x7f && bytes[1] == 'E' && bytes[2] == 'L' &&
@@ -168,20 +170,31 @@ int build_command_with(std::span<const std::string_view> args, std::ostream& out
     if (exe && output == "-") {
         return usage_error(err, "--exe cannot write to stdout");
     }
-    const bool c = is_c_source(inputs.front());
+    const bool c = is_source(inputs.front());
+    bool cxx = false;
     for (const std::string_view input : inputs) {
-        if (is_c_source(input) != c || (!c && inputs.size() > 1)) {
-            return usage_error(err, "give C sources or one ELF executable");
+        if (is_source(input) != c || (!c && inputs.size() > 1)) {
+            return usage_error(err, "give C or C++ sources or one ELF executable");
         }
+        cxx = cxx || is_cxx_source(input);
     }
     if (!c && (cc || libc || !cc_args.empty())) {
-        return usage_error(err, "--cc, --libc and compiler arguments need C sources");
+        return usage_error(err, "--cc, --libc and compiler arguments need C or C++ sources");
+    }
+    if (cxx && libc == Libc::Minimal) {
+        return usage_error(err, "C++ needs --libc picolibc");
     }
     for (const std::string_view input : inputs) {
         if (same_file(output, input)) {
             err << "malm build: refusing to overwrite the input file '" << input << "'\n";
             return 1;
         }
+    }
+
+    // Landing pads are reached through jumps that aot mode cannot follow (docs/rv.md 6).
+    if (cxx && aot && wants_exceptions(cc_args)) {
+        err << "malm build: C++ exceptions (-fexceptions) are not supported in aot mode\n";
+        return 1;
     }
 
     std::vector<std::uint8_t> bytes;
@@ -191,7 +204,8 @@ int build_command_with(std::span<const std::string_view> args, std::ostream& out
             err << "malm build: " << tools.error() << '\n';
             return 1;
         }
-        auto elf = compile_c(*tools, inputs, cc_args, err, libc.value_or(Libc::Minimal));
+        auto elf = compile_c(*tools, inputs, cc_args, err,
+                             libc.value_or(cxx ? Libc::Picolibc : Libc::Minimal));
         if (!elf) {
             err << "malm build: " << elf.error() << '\n';
             return 1;
@@ -203,7 +217,7 @@ int build_command_with(std::span<const std::string_view> args, std::ostream& out
         }
         if (!is_elf(bytes)) {
             err << "malm build: " << inputs.front()
-                << ": neither a C source (.c) nor an ELF executable\n";
+                << ": neither a C or C++ source (.c, .cpp, .cc, .cxx) nor an ELF executable\n";
             return 1;
         }
     }

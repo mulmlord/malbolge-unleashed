@@ -1,7 +1,8 @@
 # The RISC-V side of the picolibc runtime (docs/rv.md 6), cross-compiled by
 # rv/runtime/CMakeLists.txt with riscv32.cmake into the sysroot that already holds picolibc:
 # libmalm.a, picolibc's system interface (the system calls, the standard streams and the rest of
-# POSIX it needs), and libclang_rt.builtins.a, compiler-rt's soft-float and 64-bit integer routines.
+# POSIX it needs) and a memset that aot mode can translate, and libclang_rt.builtins.a,
+# compiler-rt's soft-float and 64-bit integer routines.
 cmake_minimum_required(VERSION 3.28)
 project(malm_picolibc_runtime LANGUAGES C)
 
@@ -12,7 +13,7 @@ option(WERROR "Treat warnings as errors" OFF)
 set(common -nostdlibinc -isystem "${SYSROOT}/include" -ffreestanding -ffunction-sections
     -fdata-sections)
 
-add_library(malm STATIC posix.c stdio.c ../src/syscalls.c)
+add_library(malm STATIC memset.c posix.c stdio.c ../src/syscalls.c)
 target_compile_options(malm PRIVATE ${common} -std=c11
     -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wsign-conversion $<$<BOOL:${WERROR}>:-Werror>)
 

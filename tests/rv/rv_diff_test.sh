@@ -4,9 +4,11 @@
 # through real pipes. stdout and the exit status must be the same on all three. The program dumps
 # its registers before it exits (ecall 255: riscv-tests through env/riscv_test.h, programs linked
 # with --defsym=__malm_dump_regs=1), so stdout compares the final registers too.
-# Usage: rv_diff_test.sh <malm> <elf> <ram> [--status N] [--aot-smc] [--] <input file>...
+# Usage: rv_diff_test.sh <malm> <elf> <ram> [--status N] [--aot-smc | --emu-only] [--]
+#            <input file>...
 #   --status N  the reference emulator must also exit with N
 #   --aot-smc   aot mode must refuse the program as self-modifying code; emu mode is still compared
+#   --emu-only  only emu mode is compared (C++ exceptions, which aot mode does not support)
 set -u
 malm=$1
 elf=$2
@@ -14,10 +16,12 @@ ram=$3
 shift 3
 status=""
 aot_smc=no
+emu_only=no
 while [ $# -gt 0 ]; do
     case "$1" in
     --status) status=$2; shift 2 ;;
     --aot-smc) aot_smc=yes; shift ;;
+    --emu-only) emu_only=yes; shift ;;
     --) shift; break ;;
     *) break ;;
     esac
@@ -36,7 +40,7 @@ if [ "$aot_smc" = yes ]; then
     fi
     grep -q "self-modifying code is not supported in aot mode" "$tmp/err" ||
         { cat "$tmp/err"; exit 1; }
-else
+elif [ "$emu_only" = no ]; then
     "$malm" build --mode aot --ram "$ram" -o "$tmp/aot.malm" "$elf" || exit 1
     modes="emu aot"
 fi

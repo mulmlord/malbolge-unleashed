@@ -10,6 +10,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <initializer_list>
 #include <iterator>
 #include <optional>
 #include <ostream>
@@ -137,20 +138,40 @@ bool run(const std::vector<std::string>& argv, const fs::path& log, std::ostream
     return job.pid >= 0 && finish(job, err);
 }
 
-// `include` is the C library's headers.
-std::vector<std::string> target_flags(const fs::path& include) {
-    return {"--target=riscv32-unknown-elf",
-            "-march=rv32im",
-            "-mabi=ilp32",
-            "-nostdlibinc",
-            "-isystem",
-            include.string(),
-            "-ffunction-sections",
-            "-fdata-sections",
-            "-O2"};
+// `includes` are the header directories, searched in this order: for C++ libc++'s, then the C
+// library's.
+std::vector<std::string> target_flags(std::initializer_list<fs::path> includes) {
+    std::vector<std::string> flags{"--target=riscv32-unknown-elf", "-march=rv32im", "-mabi=ilp32",
+                                   "-nostdlibinc"};
+    for (const fs::path& include : includes) {
+        flags.insert(flags.end(), {"-isystem", include.string()});
+    }
+    flags.insert(flags.end(), {"-ffunction-sections", "-fdata-sections", "-O2"});
+    return flags;
+}
+
+bool ends_with_any(std::string_view path, std::initializer_list<std::string_view> suffixes) {
+    for (const std::string_view suffix : suffixes) {
+        if (path.size() > suffix.size() && path.ends_with(suffix)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 } // namespace
+
+bool is_c_source(std::string_view path) { return ends_with_any(path, {".c"}); }
+
+bool is_cxx_source(std::string_view path) { return ends_with_any(path, {".cpp", ".cc", ".cxx"}); }
+
+bool wants_exceptions(std::span<const std::string_view> args) {
+    bool on = false;
+    for (const std::string_view a : args) {
+        on = a == "-fexceptions" || (on && a != "-fno-exceptions");
+    }
+    return on;
+}
 
 core::Result<Toolchain, std::string> find_toolchain(std::string_view cc,
                                                     std::string_view path_env) {
@@ -197,6 +218,13 @@ core::Result<std::vector<std::uint8_t>, std::string>
 compile_c(const Toolchain& tools, std::span<const std::string_view> sources,
           std::span<const std::string_view> args, std::ostream& err, Libc libc) {
     using R = core::Result<std::vector<std::uint8_t>, std::string>;
+    bool cxx = false;
+    for (const std::string_view src : sources) {
+        cxx = cxx || is_cxx_source(src);
+    }
+    if (cxx && libc == Libc::Minimal) {
+        return R::err("C++ needs picolibc (--libc picolibc)");
+    }
     if (libc == Libc::Picolibc && picolibc_sysroot().empty()) {
         return R::err("this malm is built without picolibc (MALM_PICOLIBC)");
     }
@@ -216,21 +244,6 @@ compile_c(const Toolchain& tools, std::span<const std::string_view> sources,
             libc_sources.push_back(p);
         }
     }
-    // picolibc: its headers and libraries, and libmalm.a, its system interface.
-    fs::path include = dir / "include";
-    std::vector<std::string> libs;
-    if (libc == Libc::Picolibc) {
-        const fs::path sysroot = dir / "picolibc";
-        const std::string unpacked = unpack_tar_zst(picolibc_sysroot(), sysroot);
-        if (!unpacked.empty()) {
-            return R::err("internal error: the picolibc sysroot: " + unpacked);
-        }
-        include = sysroot / "include";
-        for (const char* lib : {"libmalm.a", "libc.a", "libclang_rt.builtins.a"}) {
-            libs.push_back((sysroot / "lib" / lib).string());
-        }
-    }
-
     std::vector<std::string> cc_args;
     std::vector<std::string> ld_args;
     for (const std::string_view a : args) {
@@ -243,10 +256,39 @@ compile_c(const Toolchain& tools, std::span<const std::string_view> sources,
             cc_args.emplace_back(a);
         }
     }
+    const bool exceptions = wants_exceptions(args);
+
+    // picolibc: its headers and libraries, and libmalm.a, its system interface; for C++ libc++ and
+    // libc++abi, with exceptions those in lib/eh and libunwind (rv/runtime/CMakeLists.txt).
+    fs::path include = dir / "include";
+    fs::path cxx_include;
+    std::vector<std::string> libs;
+    if (libc == Libc::Picolibc) {
+        const fs::path sysroot = dir / "picolibc";
+        const std::string unpacked = unpack_tar_zst(picolibc_sysroot(), sysroot);
+        if (!unpacked.empty()) {
+            return R::err("internal error: the picolibc sysroot: " + unpacked);
+        }
+        include = sysroot / "include";
+        cxx_include = include / "c++" / "v1";
+        if (cxx) {
+            const fs::path lib = sysroot / "lib" / (exceptions ? "eh" : "");
+            for (const char* name : {"libc++.a", "libc++abi.a"}) {
+                libs.push_back((lib / name).string());
+            }
+            if (exceptions) {
+                libs.push_back((lib / "libunwind.a").string());
+                ld_args.insert(ld_args.begin(), "--eh-frame-hdr");
+            }
+        }
+        for (const char* lib : {"libmalm.a", "libc.a", "libclang_rt.builtins.a"}) {
+            libs.push_back((sysroot / "lib" / lib).string());
+        }
+    }
 
     // crt0 first and alone: if the compiler cannot target riscv32, this is where it says so.
     std::string error;
-    const std::vector<std::string> target = target_flags(include);
+    const std::vector<std::string> target = target_flags({include});
     const fs::path crt0 = dir / "crt0.o";
     std::vector<std::string> argv{tools.cc};
     argv.insert(argv.end(), target.begin(), target.end());
@@ -262,6 +304,8 @@ compile_c(const Toolchain& tools, std::span<const std::string_view> sources,
     }
 
     // The minimal libc and the program's sources in parallel; the libc's output only if it fails.
+    // C++ sources see libc++'s headers first, and by default neither exceptions nor RTTI;
+    // -fbinutils-version=none lets ld.lld drop a function's exception table with the function.
     struct Compile {
         Job job;
         bool runtime;
@@ -270,9 +314,10 @@ compile_c(const Toolchain& tools, std::span<const std::string_view> sources,
     std::vector<std::string> libc_objects;
     std::vector<std::string> objects;
     const auto start = [&](const std::string& src, const std::string& obj,
-                           std::span<const std::string> extra, bool runtime) {
+                           std::span<const std::string> flags, std::span<const std::string> extra,
+                           bool runtime) {
         std::vector<std::string> v{tools.cc};
-        v.insert(v.end(), target.begin(), target.end());
+        v.insert(v.end(), flags.begin(), flags.end());
         v.insert(v.end(), extra.begin(), extra.end());
         v.insert(v.end(), {"-c", src, "-o", obj});
         jobs.push_back({spawn(v, obj + ".log", error), runtime});
@@ -280,11 +325,15 @@ compile_c(const Toolchain& tools, std::span<const std::string_view> sources,
     const std::vector<std::string> libc_flags{"-ffreestanding", "-std=c11"};
     for (const fs::path& src : libc_sources) {
         libc_objects.push_back((dir / src.stem()).string() + ".o");
-        start(src.string(), libc_objects.back(), libc_flags, true);
+        start(src.string(), libc_objects.back(), target, libc_flags, true);
     }
+    std::vector<std::string> cxx_target = target_flags({cxx_include, include});
+    cxx_target.insert(cxx_target.end(),
+                      {"-fno-exceptions", "-fno-rtti", "-fbinutils-version=none"});
     for (std::size_t i = 0; i < sources.size(); ++i) {
         objects.push_back((dir / ("prog" + std::to_string(i) + ".o")).string());
-        start(std::string(sources[i]), objects.back(), cc_args, false);
+        start(std::string(sources[i]), objects.back(),
+              is_cxx_source(sources[i]) ? cxx_target : target, cc_args, false);
     }
     bool ok = true;
     bool runtime_ok = true;

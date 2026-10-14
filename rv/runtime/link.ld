@@ -11,6 +11,19 @@ SECTIONS
     . = 0x1000;
     .text : { KEEP(*(.text.init)) *(.text .text.*) }
     .rodata : { *(.rodata .rodata.* .srodata .srodata.*) }
+    /* C++ exceptions (-fexceptions): libunwind finds the unwind tables through these symbols, the
+       index (.eh_frame_hdr) only with --eh-frame-hdr. Not KEEP: a dead function's entry goes
+       too. */
+    .eh_frame_hdr : {
+        PROVIDE_HIDDEN(__eh_frame_hdr_start = .);
+        *(.eh_frame_hdr)
+        PROVIDE_HIDDEN(__eh_frame_hdr_end = .);
+    }
+    .eh_frame : {
+        PROVIDE_HIDDEN(__eh_frame_start = .);
+        *(.eh_frame)
+        PROVIDE_HIDDEN(__eh_frame_end = .);
+    }
     .init_array : {
         PROVIDE_HIDDEN(__init_array_start = .);
         KEEP(*(SORT_BY_INIT_PRIORITY(.init_array.*)))
