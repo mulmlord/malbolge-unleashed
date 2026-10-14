@@ -116,10 +116,11 @@ void branch(Writer& w, Cond c, std::string_view x, std::string_view y, std::stri
 enum class Width : std::uint8_t { Byte = 1, Half = 2, Word = 4 };
 
 // r := the `width` bytes at ea (little-endian, any alignment), sign-extended if `sign`; a load
-// outside guest RAM stops with LoadFault. Continues at `ret`.
-void load(Writer& w, Width width, bool sign, std::string_view ret);
+// outside guest RAM stops with LoadFault. Continues at `ret`. Without `checked` the caller knows
+// that the bytes are inside guest RAM: no check, so it cannot stop.
+void load(Writer& w, Width width, bool sign, std::string_view ret, bool checked = true);
 // The `width` low bytes of b go to ea; outside guest RAM: StoreFault. Continues at `ret`.
-void store(Writer& w, Width width, std::string_view ret);
+void store(Writer& w, Width width, std::string_view ret, bool checked = true);
 // The system call of a7 (docs/rv.md 4): a0 := the result, or the program exits; the register
 // dump (255) writes pc and x1 .. x31 to stdout. Continues at `ret`.
 void ecall(Writer& w, std::string_view ret);

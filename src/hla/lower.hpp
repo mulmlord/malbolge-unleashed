@@ -19,11 +19,16 @@
 
 namespace malm::hla {
 
-assembler::Program lower(const Program& program);
+struct LowerOptions {
+    // Statements that occur more than once become routines of their own (docs/hla.md 4.8).
+    bool outline = true;
+};
+
+assembler::Program lower(const Program& program, const LowerOptions& options = {});
 
 // parse_file, lower and the assembler's static checks (asm/check.hpp). With errors in `diags` the
 // result is incomplete; its file table is always set.
 assembler::Program translate(const std::string& path, assembler::FileLoader& loader,
-                             Diagnostics& diags);
+                             Diagnostics& diags, const LowerOptions& options = {});
 
 } // namespace malm::hla

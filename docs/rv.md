@@ -187,6 +187,8 @@ need `MALM_BUILD_EMU`).
 (random ALU code; loads, stores, branches, calls, a jump table and the system calls; every fault
 and jump out of the code) against the reference emulator, comparing output, exit status, stop
 code, registers and RAM, and reports the cost of each instruction class (section 9).
+`tests/rv/aot_bench.sh` is not a test but the aot-mode benchmark
+([aot-benchmarks.md](aot-benchmarks.md)): the sizes and VM steps of the differential test's programs.
 `rv_test` also builds a hand-assembled ELF with `malm build` in both modes and runs it, without
 the RISC-V toolchain.
 
@@ -331,13 +333,14 @@ Program size and startup (the startup code writes the registers, RAM and tables,
 
 | guest RAM | `emu.malm` | Malbolge text and startup steps | startup time |
 |---|---|---|---|
-| 4 KiB | 0.9 MB | 28 M | under a second |
-| 64 KiB | 0.9 MB | 36 M | about a second |
-| 1 MiB (the default) | 2.8 MB | 222 M | 6 to 60 seconds (idle to busy machine) |
+| 4 KiB | 0.60 MB | 20 M | under a second |
+| 64 KiB | 0.72 MB | 30 M | about a second |
+| 1 MiB (the default) | 2.3 MB | 221 M | 6 to 60 seconds (idle to busy machine) |
 
 The 26 `switch` tables (320 K characters each), the arithmetic library and the register dump
-(section 4) make up the 28 M of the smallest; each word of guest RAM adds about 750 characters. `malm hla` compiles the 1 MiB
-emulator in about 25 seconds (release build).
+(section 4) make up the 20 M of the smallest; each word of guest RAM adds about 750 characters. `malm hla` compiles the 1 MiB
+emulator in about 25 seconds (release build). HLA's outlining (hla.md 4.8, issue #31) took the
+emulator from 28 M to 20 M characters and its runs about 5% fewer steps.
 
 ## 9. rv-aot
 
@@ -373,11 +376,23 @@ The guest registers are the HLA registers `x1` .. `x31`, guest RAM the region `m
 register `zero`, which is never written. `pc` is written only where something reads it: before a
 load, a store or an `ecall` (the runtime's faults and `exit`) and in the stops.
 
+**Constants.** Inside a block aot knows the registers that hold constants: `x0`, and what `lui`,
+`auipc` and arithmetic on known registers write (computed by the reference emulator's
+`rv::compute`); a load or `ecall` (`a0`) makes its register unknown again, and every block starts
+with nothing known but `x0`. An arithmetic instruction on known registers becomes `mov rd, k`; a
+load or store whose address is known and lies inside guest RAM cannot fault, so it needs no
+`mov pc`: an aligned word is a single HLA `load rd, [k]` or `store [k], rs2` (about 200 steps
+instead of 4 000), anything else enters the subroutine after its range check. An instruction
+that only computes `rd` (`lui`, `auipc`, OP-IMM, OP) is left out when a later one in its block
+overwrites `rd` before anything reads it, and before anything that can stop or leave the block, so
+the registers are the same wherever the program stops: `lui a0, %hi(x); addi a0, a0, %lo(x)`
+is one `mov`.
+
 | instruction | HLA |
 |---|---|
 | `lui`, `auipc` | `mov rd, k` (`auipc`'s value is computed at build time) |
-| OP-IMM, OP | one arithmetic statement; `mov` where an operand is `x0` or the operation an identity (`mv`, `li`) |
-| loads, stores | `ea := rs1 + imm`, `mov pc`, the runtime's subroutine (section 8) |
+| OP-IMM, OP | one arithmetic statement; `mov` where the operands are known or the operation an identity (`mv`, `li`) |
+| loads, stores | `ea := rs1 + imm`, `mov pc`, the runtime's subroutine (section 8); at a known address inside guest RAM, `load`/`store` or the subroutine without `mov pc` |
 | branches | `xor`, `slt` or `sltu`, then `bz`/`bnz` to the target's block; one `bz`/`bnz` against `x0` |
 | `jal` | `mov rd, pc + 4`, `jmp` to the target's block |
 | `jalr` | as `jal` for a constant target, otherwise through the dispatch table |
@@ -429,23 +444,26 @@ together must fit HLA's 2^20 RAM words, which leaves `--ram 4M` no room.
 ### Costs
 
 VM steps per instruction from `rv_aot_test` (each a run of 2 to 8 copies in its own block of a
-small program, release build), next to rv-emu's (section 8):
+small program, the copies writing different registers; release build), next to rv-emu's
+(section 8):
 
 | instruction | aot | emu |
 |---|---|---|
-| `lui` / `addi rd, rs, 0` (`mv`) | 120 / 180 | 2 200 / 5 500 |
-| `addi` / `slti` | 1 950 / 1 900 | 5 500 to 7 300 |
-| `ori` / `srli 7` / `slli 7` | 300 / 580 / 950 | 5 500 to 7 300 |
-| `add` / `sltu` (register) | 2 070 / 1 990 | 8 500 |
-| `xor` / `sll` (register) | 250 / 1 160 | 6 800 / 7 500 to 8 300 |
-| `mul` (`y` = `0xF00D`) / `divu` | 36 800 / 120 000 | 50 000 / 125 000 to 130 000 |
-| `lw` / `lb`, `lbu` | 4 400 / 5 600, 5 260 | 9 400 / 10 000 to 10 700 |
-| `sw` / `sb` | 4 400 / 6 600 | 10 800 / 12 400 to 12 700 |
-| `beqz` / `beq` / `bltu` not taken | 280 / 540 / 3 140 | 5 300 to 7 800 |
-| `bne` taken | 540 | 11 400 to 14 000 |
+| `lui` / `addi rd, rs, 0` (`mv`) | 90 / 140 | 2 200 / 5 500 |
+| `addi` / `slti` | 1 900 / 1 860 | 5 500 to 7 300 |
+| `ori` / `srli 7` / `slli 7` | 240 / 530 / 910 | 5 500 to 7 300 |
+| `add` / `sltu` (register) | 2 010 / 1 940 | 8 500 |
+| `xor` / `sll` (register) | 200 / 1 060 | 6 800 / 7 500 to 8 300 |
+| `mul` (`y` = `0xF00D`) / `divu` | 33 900 / 117 000 | 50 000 / 125 000 to 130 000 |
+| `lui` + `addi` (folded into one `mov`, per pair) | 190 | |
+| `lw` / `lb`, `lbu` | 3 970 / 5 100, 4 800 | 9 400 / 10 000 to 10 700 |
+| `sw` / `sb` | 3 960 / 6 040 | 10 800 / 12 400 to 12 700 |
+| `lui` + `lw` / `lbu` / `sw` at a known address (per pair) | 340 / 1 850 / 380 | |
+| `beqz` / `beq` / `bltu` not taken | 240 / 480 / 2 890 | 5 300 to 7 800 |
+| `bne` taken | 480 | 11 400 to 14 000 |
 | `jal` | 3 | 11 600 |
-| `jalr` (through the table) | 2 200 | 10 800 |
-| `ecall` (`brk`, with two `li`) | 4 750 | 17 000 |
+| `jalr` (through the table) | 1 900 (3 780 for a call and its return) | 10 800 |
+| `ecall` (`brk`, with two `li`) | 4 390 | 17 000 |
 
 The arithmetic statements are HLA's (hla.md 4.7), slightly dearer with the many call sites of a
 real program; a load or store adds the address `add` (1 750) and the range check (`and`, then
@@ -453,20 +471,20 @@ real program; a load or store adds the address `add` (1 750) and the range check
 word pays that `bnz` too.
 
 Programs, 64 KiB of guest RAM unless noted (release build; times measured back to back on a
-desktop machine):
+desktop machine; [aot-benchmarks.md](aot-benchmarks.md) tracks the sizes and steps of aot mode):
 
 | program | mode | `.malm` | Malbolge text (and startup steps) | build | guest instructions | VM steps |
 |---|---|---|---|---|---|---|
-| `hello.c` | emu / aot | 0.98 / 1.06 MB | 38 M / 34 M | 3.9 / 3.9 s | 899 | 47 M / 37 M |
-| `cat.c` (9 bytes) | emu / aot | 0.93 / 1.22 MB | 37 M / 43 M | 4.0 / 4.3 s | 1 628 | 52 M / 45 M |
-| `fizzbuzz.c` (15) | emu / aot | 1.00 / 4.70 MB | 35 M / 123 M | 3.9 / 13.4 s | 6 740 | 100 M / 145 M |
-| `fizzbuzz.c` (2000) | emu / aot | | | | 848 167 | 8.44 G / 3.21 G (161 / 62 s) |
-| `runtime_test.c`, 256 KiB | aot | 13.9 MB | | 33 s | 3 120 348 | 6.92 G (146 s) |
+| `hello.c` | emu / aot | 0.68 / 0.67 MB | 30 M / 25 M | 3.2 / 3.5 s | 899 | 38 M / 28 M |
+| `cat.c` (9 bytes) | emu / aot | 0.69 / 0.72 MB | 30 M / 29 M | 3.1 / 3.8 s | 1 628 | 44 M / 33 M |
+| `fizzbuzz.c` (15) | emu / aot | 0.78 / 2.21 MB | 31 M / 65 M | 4.0 / 8.3 s | 6 740 | 92 M / 85 M |
+| `fizzbuzz.c` (2000) | emu / aot | | | | 848 167 | 8.00 G / 2.86 G |
+| `runtime_test.c`, 256 KiB | aot | 5.5 MB | 167 M | 21 s | 3 120 348 | 6.21 G |
 
-Without startup, fizzbuzz runs about 9 900 steps per guest instruction in emu mode and 3 650 in aot
-mode, 2.7 times faster; the runtime's self-check takes about 2 200 per instruction in aot mode,
+Without startup, fizzbuzz runs about 9 400 steps per guest instruction in emu mode and 3 300 in aot
+mode, 2.8 times faster; the runtime's self-check takes about 2 000 per instruction in aot mode,
 startup included, against rv-emu's 8 740 (section 8, at 1 MiB). The price is size: emu mode's
-program depends on the guest RAM only, while aot mode adds about 54 K characters of Malbolge text,
-and as many startup steps, per guest instruction (2.2 KB of `.malm`), so a program of about 250
-instructions is as large in both modes and fizzbuzz's 1 887 make 123 M characters. Issue #31 is
-about both.
+program depends on the guest RAM only, while aot mode adds about 24 K characters of Malbolge text,
+and as many startup steps, per guest instruction (0.94 KB of `.malm`; 54 K and 2.2 KB before the
+outlining and constants of issue #31), so a program of about 300 instructions has a `.malm` as
+large in both modes and fizzbuzz's 1 896 make 65 M characters.

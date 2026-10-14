@@ -38,6 +38,12 @@ struct Stop {
     std::string message; // Fault: one-line reason, e.g. "illegal instruction 0x00000000"
 };
 
+// The value that lui, auipc, an OP-IMM or an OP instruction at pc writes to rd, from the values a
+// and b of rs1 and rs2, as the emulator computes it; nullopt for any other instruction or a
+// reserved encoding (which faults). rv-aot folds constants with it.
+std::optional<std::uint32_t> compute(std::uint32_t insn, std::uint32_t pc, std::uint32_t a,
+                                     std::uint32_t b);
+
 class Machine {
   public:
     // Guest RAM [0, ram_size) zero-filled, then the image's segments copied in; pc = entry,

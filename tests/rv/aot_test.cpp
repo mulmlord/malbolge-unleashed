@@ -352,7 +352,10 @@ namespace {
 
 // Straight-line ALU code on random registers: every OP and OP-IMM form, lui and auipc, with x0
 // as an operand and as rd, the same register twice and the immediates aot treats specially.
-std::vector<std::uint8_t> alu_program(int n) {
+// aot knows the registers' initial constants, and folds everything computed from them, unless
+// `opaque`: then a jump separates them from the code, which computes in HLA (with the constants
+// of lui and auipc still folded).
+std::vector<std::uint8_t> alu_program(int n, bool opaque) {
     std::mt19937 gen(29);
     const auto rng = [&] { return static_cast<u32>(gen()); };
     const auto any = [&]() -> u32 {
@@ -369,6 +372,10 @@ std::vector<std::uint8_t> alu_program(int n) {
     Asm a;
     for (u32 r = 1; r < 32; ++r) {
         a.li32(r, any());
+    }
+    if (opaque) {
+        a.j(0, "code");
+        a.label("code");
     }
     for (int i = 0; i < n; ++i) {
         const u32 rd = reg(), rs1 = reg(), rs2 = rng() % 5 == 0 ? rs1 : reg();
@@ -412,22 +419,27 @@ std::vector<std::uint8_t> alu_program(int n) {
 } // namespace
 
 TEST_CASE("rv-aot: ALU instructions match the reference emulator" * kSlowInDebug) {
-    const auto elf = alu_program(kDebugBuild ? 60 : 200);
-    const Aot aot(elf, 8192);
-    check_same(reference(elf, 8192, "", 0), aot.run("", 0, 8192));
+    for (const bool opaque : {true, false}) {
+        INFO("opaque " << opaque);
+        const auto elf = alu_program(kDebugBuild ? 60 : 200, opaque);
+        const Aot aot(elf, 8192);
+        check_same(reference(elf, 8192, "", 0), aot.run("", 0, 8192));
+    }
 }
 
 namespace {
 
 // Loads and stores of every width at every alignment, branches, calls (direct, through a
 // resolved jalr and through the dispatch table), a jump table, a loop and the system calls.
-// The first input byte picks a case of the jump table; s0 accumulates what happened.
+// The first input byte picks a case of the jump table; s0 accumulates what happened. The loads
+// and stores up to the first branch use the base s1, a constant that aot knows unless `opaque`
+// (a jump between them): known addresses skip the range check.
 struct ControlProgram {
     std::vector<std::uint8_t> elf;
     static constexpr std::size_t kDataWords = 16;
 };
 
-ControlProgram control_program() {
+ControlProgram control_program(bool opaque) {
     Asm a;
     const auto mix = [&](u32 r) { // s0 := s0 * 3 + r
         a.put(op(0, 0, s0, s0, r));
@@ -435,6 +447,10 @@ ControlProgram control_program() {
         a.put(op(0, 0, s0, s0, t2));
     };
     a.li32(s1, kData);
+    if (opaque) {
+        a.j(0, "code");
+        a.label("code");
+    }
     // read(0, data + 48, 4)
     a.put(li(a0, 0));
     a.put(addi(a1, s1, 48));
@@ -569,14 +585,17 @@ ControlProgram control_program() {
 
 TEST_CASE("rv-aot: memory, branches, calls and system calls match the reference emulator" *
           kSlowInDebug) {
-    const ControlProgram p = control_program();
-    // Guest RAM not a power of two: the range checks are sltu.
-    constexpr u32 kRam = 8192 + 16;
-    const Aot aot(p.elf, kRam);
-    for (const std::string input : {"", "a", "\x01\x02\x03\x04", "xyz"}) {
-        INFO("input \"" << input << "\"");
-        check_same(reference(p.elf, kRam, input, ControlProgram::kDataWords),
-                   aot.run(input, ControlProgram::kDataWords, kRam));
+    for (const bool opaque : {true, false}) {
+        INFO("opaque " << opaque);
+        const ControlProgram p = control_program(opaque);
+        // Guest RAM not a power of two: the range checks are sltu.
+        constexpr u32 kRam = 8192 + 16;
+        const Aot aot(p.elf, kRam);
+        for (const std::string input : {"", "a", "\x01\x02\x03\x04", "xyz"}) {
+            INFO("input \"" << input << "\"");
+            check_same(reference(p.elf, kRam, input, ControlProgram::kDataWords),
+                       aot.run(input, ControlProgram::kDataWords, kRam));
+        }
     }
 }
 
@@ -709,39 +728,64 @@ TEST_CASE("rv-aot: faults and jumps out of the code stop like the reference emul
 
 // VM steps per guest instruction class (docs/rv.md 9 records them): each class is a run of the
 // same instruction, from one block to the next, measured by the arrivals at the blocks' labels.
+// Copy k writes the k-th register of kRd, so that no copy overwrites another's result (which aot
+// would leave out).
 TEST_CASE("rv-aot: the cost of instructions" * kSlowInDebug) {
     struct Class {
         std::string name;
         int repeat;
-        std::function<void(Asm&)> emit; // one instance
+        std::function<void(Asm&, u32 rd)> emit; // one instance
     };
+    static constexpr std::array<u32, 8> kRd = {t0, 14, 15, 16, 28, 29, 30, 31}; // t0 a4-a6 t3-t6
+    static constexpr u32 kDataHi = (kData + 0x800) >> 12; // kData = lui kDataHi + kDataLo
+    static constexpr std::int32_t kDataLo = static_cast<std::int32_t>(kData - (kDataHi << 12));
     const std::vector<Class> classes = {
-        {"lui", 8, [](Asm& a) { a.put(lui(t0, 0x12345)); }},
-        {"addi", 8, [](Asm& a) { a.put(addi(t0, t1, 77)); }},
-        {"addi rd, rs, 0 (mv)", 8, [](Asm& a) { a.put(addi(t0, t1, 0)); }},
-        {"ori", 8, [](Asm& a) { a.put(i_type(0x13, t0, 6, t1, 0x5A)); }},
-        {"srli 7", 8, [](Asm& a) { a.put(i_type(0x13, t0, 5, t1, 7)); }},
-        {"slli 7", 8, [](Asm& a) { a.put(i_type(0x13, t0, 1, t1, 7)); }},
-        {"slti", 8, [](Asm& a) { a.put(i_type(0x13, t0, 2, t1, -5)); }},
-        {"add", 8, [](Asm& a) { a.put(op(0, 0, t0, t1, t2)); }},
-        {"xor", 8, [](Asm& a) { a.put(op(4, 0, t0, t1, t2)); }},
-        {"sll", 8, [](Asm& a) { a.put(op(1, 0, t0, t1, t2)); }},
-        {"sltu", 8, [](Asm& a) { a.put(op(3, 0, t0, t1, t2)); }},
-        {"mul", 2, [](Asm& a) { a.put(op(0, 1, t0, t1, t2)); }},
-        {"divu", 2, [](Asm& a) { a.put(op(5, 1, t0, t1, t2)); }},
-        {"lw", 8, [](Asm& a) { a.put(load(2, t0, s1, 4)); }},
-        {"lb", 8, [](Asm& a) { a.put(load(0, t0, s1, 5)); }},
-        {"lbu", 8, [](Asm& a) { a.put(load(4, t0, s1, 5)); }},
-        {"sw", 8, [](Asm& a) { a.put(store(2, s1, t1, 8)); }},
-        {"sb", 8, [](Asm& a) { a.put(store(0, s1, t1, 9)); }},
-        {"beq not taken", 8, [](Asm& a) { a.put(branch(0, t1, t2, 8)); }},
-        {"beqz not taken", 8, [](Asm& a) { a.put(branch(0, t1, 0, 8)); }},
-        {"bltu not taken", 8, [](Asm& a) { a.put(branch(6, t1, t2, 8)); }},
-        {"bne taken", 8, [](Asm& a) { a.put(branch(1, t1, t2, 4)); }},
-        {"jal", 8, [](Asm& a) { a.put(jal(0, 4)); }},
-        {"jalr (call) + ret (both dispatched)", 4, [](Asm& a) { a.put(jalr(ra, a3, 0)); }},
+        {"lui", 8, [](Asm& a, u32 rd) { a.put(lui(rd, 0x12345)); }},
+        {"addi", 8, [](Asm& a, u32 rd) { a.put(addi(rd, t1, 77)); }},
+        {"addi rd, rs, 0 (mv)", 8, [](Asm& a, u32 rd) { a.put(addi(rd, t1, 0)); }},
+        {"ori", 8, [](Asm& a, u32 rd) { a.put(i_type(0x13, rd, 6, t1, 0x5A)); }},
+        {"srli 7", 8, [](Asm& a, u32 rd) { a.put(i_type(0x13, rd, 5, t1, 7)); }},
+        {"slli 7", 8, [](Asm& a, u32 rd) { a.put(i_type(0x13, rd, 1, t1, 7)); }},
+        {"slti", 8, [](Asm& a, u32 rd) { a.put(i_type(0x13, rd, 2, t1, -5)); }},
+        {"add", 8, [](Asm& a, u32 rd) { a.put(op(0, 0, rd, t1, t2)); }},
+        {"xor", 8, [](Asm& a, u32 rd) { a.put(op(4, 0, rd, t1, t2)); }},
+        {"sll", 8, [](Asm& a, u32 rd) { a.put(op(1, 0, rd, t1, t2)); }},
+        {"sltu", 8, [](Asm& a, u32 rd) { a.put(op(3, 0, rd, t1, t2)); }},
+        {"mul", 2, [](Asm& a, u32 rd) { a.put(op(0, 1, rd, t1, t2)); }},
+        {"divu", 2, [](Asm& a, u32 rd) { a.put(op(5, 1, rd, t1, t2)); }},
+        {"lui + addi (folded: li)", 4,
+         [](Asm& a, u32 rd) {
+             a.put(lui(rd, 0x12345));
+             a.put(addi(rd, rd, 0x678));
+         }},
+        {"lw", 8, [](Asm& a, u32 rd) { a.put(load(2, rd, s1, 4)); }},
+        {"lb", 8, [](Asm& a, u32 rd) { a.put(load(0, rd, s1, 5)); }},
+        {"lbu", 8, [](Asm& a, u32 rd) { a.put(load(4, rd, s1, 5)); }},
+        {"sw", 8, [](Asm& a, u32) { a.put(store(2, s1, t1, 8)); }},
+        {"sb", 8, [](Asm& a, u32) { a.put(store(0, s1, t1, 9)); }},
+        {"lui + lw (known address)", 4,
+         [](Asm& a, u32 rd) {
+             a.put(lui(rd, kDataHi));
+             a.put(load(2, rd, rd, kDataLo + 4));
+         }},
+        {"lui + lbu (known address)", 4,
+         [](Asm& a, u32 rd) {
+             a.put(lui(rd, kDataHi));
+             a.put(load(4, rd, rd, kDataLo + 5));
+         }},
+        {"lui + sw (known address)", 4,
+         [](Asm& a, u32 rd) {
+             a.put(lui(rd, kDataHi));
+             a.put(store(2, rd, t1, kDataLo + 8));
+         }},
+        {"beq not taken", 8, [](Asm& a, u32) { a.put(branch(0, t1, t2, 8)); }},
+        {"beqz not taken", 8, [](Asm& a, u32) { a.put(branch(0, t1, 0, 8)); }},
+        {"bltu not taken", 8, [](Asm& a, u32) { a.put(branch(6, t1, t2, 8)); }},
+        {"bne taken", 8, [](Asm& a, u32) { a.put(branch(1, t1, t2, 4)); }},
+        {"jal", 8, [](Asm& a, u32) { a.put(jal(0, 4)); }},
+        {"jalr (call) + ret (both dispatched)", 4, [](Asm& a, u32) { a.put(jalr(ra, a3, 0)); }},
         {"ecall brk, with li a0 and li a7", 2,
-         [](Asm& a) {
+         [](Asm& a, u32) {
              a.put(li(a0, 0));
              a.sys(214);
          }},
@@ -759,7 +803,7 @@ TEST_CASE("rv-aot: the cost of instructions" * kSlowInDebug) {
         starts.push_back(start);
         if (i < classes.size()) {
             for (int k = 0; k < classes[i].repeat; ++k) {
-                classes[i].emit(a);
+                classes[i].emit(a, kRd[static_cast<std::size_t>(k)]);
             }
         }
     }

@@ -91,7 +91,9 @@ into a pure `.malm` that runs it in emu mode, or with `--exe` into a native exec
 M4 (aot mode): rv-aot translates an RV32IM program instruction by instruction into HLA, with
 rv-emu's instruction semantics, a control-flow graph recovered from the ELF and a dispatch table
 for indirect jumps ([docs/rv.md](docs/rv.md) section 9). `malm build --mode aot` builds C programs
-and ELFs that way, about three times faster than emu mode. The three-way differential test runs
+and ELFs that way, about three times faster than emu mode, with programs about half the size of
+the first version's ([docs/aot-benchmarks.md](docs/aot-benchmarks.md), issue #31). The three-way
+differential test runs
 every riscv-test `rv32ui-p-*` and `rv32um-p-*` and the e2e programs on the reference emulator, in
 emu mode and in aot mode, and finds the same stdout, exit status and final registers (dumped by
 ecall 255) on all three, which is the M4 exit criterion (`fence_i`, which modifies its own code,

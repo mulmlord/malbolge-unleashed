@@ -409,9 +409,10 @@ void branch(Writer& w, Cond c, std::string_view x, std::string_view y, std::stri
     w.stmt(std::format("{} t, {}", zero ? "bz" : "bnz", taken));
 }
 
-void load(Writer& w, Width width, bool sign, std::string_view ret) {
+void load(Writer& w, Width width, bool sign, std::string_view ret, bool checked) {
     static constexpr std::array<std::string_view, 5> kSub = {"", "ld_b", "ld_h", "", "ld_w"};
-    const std::string_view sub = kSub[static_cast<std::size_t>(width)];
+    const std::string sub =
+        std::format("{}{}", kSub[static_cast<std::size_t>(width)], checked ? "" : "_in");
     if (!sign || width == Width::Word) {
         w.stmt(std::format("mov lkm, {}", ret));
         w.stmt(std::format("jmp {}", sub));
@@ -422,10 +423,10 @@ void load(Writer& w, Width width, bool sign, std::string_view ret) {
     w.stmt(std::format("jmp {}", ret));
 }
 
-void store(Writer& w, Width width, std::string_view ret) {
+void store(Writer& w, Width width, std::string_view ret, bool checked) {
     static constexpr std::array<std::string_view, 5> kSub = {"", "st_b", "st_h", "", "st_w"};
     w.stmt(std::format("mov lkm, {}", ret));
-    w.stmt(std::format("jmp {}", kSub[static_cast<std::size_t>(width)]));
+    w.stmt(std::format("jmp {}{}", kSub[static_cast<std::size_t>(width)], checked ? "" : "_in"));
 }
 
 void ecall(Writer& w, std::string_view ret) {

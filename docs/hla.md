@@ -1,7 +1,7 @@
 # malbolge-unleashed high-level assembly (`.mhl`)
 
 Status: language core (issue #19), calls, the stack, jump tables and RAM (issue #20), the
-arithmetic library (issue #21), multiplication and division (issue #22).
+arithmetic library (issue #21), multiplication and division (issue #22), outlining (issue #31).
 Sources:
 - the assembly language it lowers to: `docs/asm.md`
 - the word representation: `docs/adr/0001-hla-word-representation.md`; the arithmetic:
@@ -193,8 +193,9 @@ level, `log2(call sites)` levels, instead of the linear chain of one flag per si
 
 Register accesses use the flags `_AFk`; routines and tables (which perform register accesses
 themselves) use `_SFk`, so the two never interfere; the multiply and divide routines (which call
-the ALU and tables themselves) use `_MFk`. A caller's flags stay set while its callee runs, so a
-callee only calls callees of other families. Every flag that is tested is clear afterwards.
+the ALU and tables themselves) use `_MFk`, and the outlined statements (4.8), which call all of
+these, `_OFk`. A caller's flags stay set while its callee runs, so a callee only calls callees of
+other families. Every flag that is tested is clear afterwards.
 
 ### 4.4 Dispatch tables
 
@@ -398,6 +399,26 @@ characters of Malbolge text, 1.2 M startup steps); a program using `bz`, the byt
 table about 70 KB. Each RAM word adds about 620 characters of text (and startup steps), each stack
 frame 7.7 K (the default stack of 64 words about 0.5 M), each `switch` 320 K (its 256 entries);
 zstd compresses them well (`.malm`: 7.5 bytes per RAM word, 210 per frame, 4 KB per switch).
+
+### 4.8 Outlining
+
+A statement's lowering is long: `mov r, k` is 2 loads and 3 register accesses, `add` dozens, `bz`
+four lane dispatches, and every access adds a call line and a leaf to the register's return
+tree. A statement that occurs more than once in the program, with the same operands, is therefore
+lowered once, as a routine `_O<n>` (flags `_OFk`, 4.3), and each occurrence becomes a call of it:
+the call line and a landing pad, about 100 bytes of `.malm` instead of 350 for `mov r, k` and
+1 000 to 3 000 for arithmetic and `bz`. All `bz` and `bnz` on the same register share one routine
+with two exits, zero and nonzero, whose return trees lead to the call sites' targets.
+
+- **Outlined:** `mov` (except `mov r, r`), `out`, `load`, `store`, `bz`, `bnz` and the arithmetic
+  statements. Not outlined: `jmp`, `call`, `ret`, `push`, `pop`, `switch`, `in`, `halt`, which
+  transfer control otherwise or are cheap.
+- **Cost:** a call and a return through a tree over the occurrences, about 10 steps plus 2.5 per
+  tree level. It usually pays for itself in speed too: the registers' return trees shrink by the
+  occurrences that now share one call site, and a program with many register accesses gets faster
+  (rv-aot's fizzbuzz on a long input 11% fewer steps, rv-emu's 5%, docs/aot-benchmarks.md).
+- **Diagnostics** from the assembler point at the first occurrence of an outlined statement.
+- `hla::LowerOptions{.outline = false}` lowers every statement inline; the tests compare both.
 
 ## 5. Diagnostics
 

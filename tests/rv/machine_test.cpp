@@ -1,8 +1,10 @@
 #include <doctest/doctest.h>
 
+#include <array>
 #include <cstdint>
 #include <map>
 #include <optional>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -182,6 +184,41 @@ TEST_CASE("machine: immediate operations, lui and auipc") {
     CHECK(m.reg(25) == 0xfffffffd);
     CHECK(m.reg(26) == 0xfffff000);
     CHECK(m.reg(27) == 0x2028);
+}
+
+TEST_CASE("machine: compute gives what a step writes to rd, and nothing for other instructions") {
+    std::mt19937 gen(64);
+    const auto rng = [&] { return static_cast<u32>(gen()); };
+    StringIo io;
+    for (int i = 0; i < 4000; ++i) {
+        // Random fields of lui, auipc, OP-IMM and OP, with funct7 often one of the legal values.
+        static constexpr std::array<u32, 4> kOpcodes = {0x37, 0x17, 0x13, 0x33};
+        static constexpr std::array<u32, 4> kFunct7 = {0x00, 0x20, 0x01, 0x40};
+        u32 insn = (rng() & ~0x7fu) | kOpcodes[rng() % 4];
+        if (rng() % 4 != 0) {
+            insn = (insn & 0x01ffffff) | kFunct7[rng() % 3] << 25;
+        }
+        insn = (insn & ~(0x1fu << 15 | 0x1fu << 20)) | t0 << 15 | t1 << 20; // rs1 = t0, rs2 = t1
+        const u32 a = rng() % 2 ? rng() : rng() % 64;
+        const u32 b = rng() % 2 ? rng() : rng() % 64;
+        CAPTURE(insn);
+        const u32 rd = insn >> 7 & 0x1f;
+        Machine m(image_of(load_const(t0, a) + load_const(t1, b) + Code{insn}), kRam);
+        for (int s = 0; s < 4; ++s) {
+            REQUIRE_FALSE(m.step(io));
+        }
+        const u32 pc = m.pc();
+        const auto want = m.step(io);
+        const auto got = malm::rv::compute(insn, pc, a, b);
+        CHECK(got.has_value() == !want); // a fault: the encoding is reserved
+        if (got && rd != 0) {
+            CHECK(*got == m.reg(rd));
+        }
+    }
+    for (const u32 insn : {load(2, t2, t0, 0), store(2, t0, t1, 0), jal(1, 8), kEcall,
+                           b_type(0, t0, t1, 8), u32{0x0000000F}}) {
+        CHECK_FALSE(malm::rv::compute(insn, kCode, 1, 2));
+    }
 }
 
 TEST_CASE("machine: x0 is hardwired to zero") {
