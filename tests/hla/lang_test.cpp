@@ -125,6 +125,58 @@ TEST_CASE("labels: fall through, jump back, several on one statement") {
     CHECK(r.status == 3);
 }
 
+TEST_CASE("outlining: repeated statements share a routine and do what they did inline") {
+    // Every kind of statement that is outlined, each at least twice; bz and bnz on one register
+    // share a routine whose exits are the call sites' targets.
+    const std::string src = "reg a = 5, b = 0x12345678, c, z\n"
+                            "ram m[4]\n"
+                            "        mov c, m\n"
+                            "loop:   add a, a, -1\n"
+                            "        xor b, b, a\n"
+                            "        sll c, b, 3\n"
+                            "        srl c, b, a\n"
+                            "        store [m], b\n"
+                            "        load c, [m]\n"
+                            "        out \"<>\"\n"
+                            "        out a\n"
+                            "        bz a, done\n"
+                            "        bnz z, never\n"
+                            "        mov z, 0\n"
+                            "        bnz a, loop\n"
+                            "never:  halt 9\n"
+                            "done:   add a, a, -1\n"
+                            "        xor b, b, a\n"
+                            "        store [m], b\n"
+                            "        mov z, 0\n"
+                            "        out \"<>\"\n"
+                            "        load c, [m]\n"
+                            "        sll c, b, 3\n"
+                            "        bz z, end\n"
+                            "        halt 8\n"
+                            "end:    srl c, b, a\n"
+                            "        out a\n"
+                            "        bnz z, never\n"
+                            "        halt 7\n";
+    const Compiled inline_ = compile(src, {.outline = false});
+    const Compiled outlined = compile(src);
+    const Ran want = run(inline_.assembly);
+    const Ran got = run(outlined.assembly);
+    CHECK(want.status == 7);
+    CHECK(got.status == want.status);
+    CHECK(got.out == want.out);
+    for (const char* r : {"a", "b", "c", "z"}) {
+        CAPTURE(r);
+        CHECK(reg(outlined, got, r) == reg(inline_, want, r));
+    }
+    CHECK(ram_word(got, 0) == ram_word(want, 0));
+    CHECK(outlined.assembly.layout.labels.contains("_O0"));
+    CHECK(!inline_.assembly.layout.labels.contains("_O0"));
+    CHECK(outlined.assembly.startup.text.size() < inline_.assembly.startup.text.size());
+    // The first statement outlined: ENTRY is its call.
+    CHECK(run(compile("reg a\n        mov a, 4\n        mov a, 4\n        halt a\n").assembly)
+              .status == 4);
+}
+
 TEST_CASE("generated cells carry the source line of their statement") {
     assembler::MemoryLoader loader({{"t.mhl", "reg a = 1\n\n        out a\n        halt 3\n"}});
     assembler::Diagnostics diags;

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cassert>
+#include <format>
 #include <map>
 #include <optional>
 #include <set>
@@ -117,10 +118,11 @@ struct Stream {
 };
 
 // The families of return flags (docs/hla.md 4.3): register accesses (_AF), routines and tables
-// (_SF), and the multiply and divide routines (_MF), which call routines and tables themselves.
-// A callee's flags stay set while it runs, so it calls only callees of other families.
-enum class Flags : std::uint8_t { Access, Sub, Muldiv };
-constexpr std::size_t kFlagFamilies = 3;
+// (_SF), the multiply and divide routines (_MF), which call routines and tables themselves, and
+// the outlined statements (_OF, 4.8), which call all of these. A callee's flags stay set while it
+// runs, so it calls only callees of other families.
+enum class Flags : std::uint8_t { Access, Sub, Muldiv, Outline };
+constexpr std::size_t kFlagFamilies = 4;
 
 // A routine or register that returns to its call sites through a tree of flags (docs/hla.md 4.3).
 // Every exit has its own tree over the same call sites.
@@ -149,8 +151,8 @@ std::vector<unsigned> site_flags(std::size_t m, std::size_t site) {
 }
 
 std::string flag_name(Flags f, unsigned depth) {
-    return std::array<const char*, kFlagFamilies>{"_AF", "_SF",
-                                                  "_MF"}[static_cast<std::size_t>(f)] +
+    return std::array<const char*, kFlagFamilies>{"_AF", "_SF", "_MF",
+                                                  "_OF"}[static_cast<std::size_t>(f)] +
            std::to_string(depth);
 }
 
@@ -174,9 +176,19 @@ struct SwitchTable {
     std::vector<std::string> targets; // 256
 };
 
+// An outlined statement (docs/hla.md 4.8): its routine's callee, entry and body; a zero test's
+// body ends at the landing pads of its two exits.
+struct Outlined {
+    int callee = -1;
+    std::string entry;
+    Stream body;
+    std::string zero;
+    std::string nonzero;
+};
+
 class Lowerer {
   public:
-    explicit Lowerer(const Program& p) : p_(p) {}
+    Lowerer(const Program& p, const LowerOptions& options) : p_(p), options_(options) {}
 
     as::Program run() {
         out_.files = p_.files;
@@ -186,6 +198,13 @@ class Lowerer {
         }
         for (const RegDecl& r : p_.regs) {
             add_reg(reg_name(r.name), value_of(r.init), false, r.loc);
+        }
+        if (options_.outline) {
+            for (const Stmt& s : p_.stmts) {
+                if (const auto key = outline_key(s)) {
+                    ++occurrences_[*key];
+                }
+            }
         }
         main_.label("ENTRY", p_.stmts.empty() ? SourceLoc{0, 1, 1} : p_.stmts.front().loc);
         bool falls = true;
@@ -204,7 +223,13 @@ class Lowerer {
                 falls = true;
                 continue;
             }
-            falls = statement(p_.stmts[i]);
+            const auto key = options_.outline ? outline_key(p_.stmts[i]) : std::nullopt;
+            if (key && occurrences_.at(*key) > 1) {
+                outline_call(p_.stmts[i], *key);
+                falls = true;
+            } else {
+                falls = statement(p_.stmts[i]);
+            }
             ++i;
         }
         if (falls) {
@@ -504,21 +529,110 @@ class Lowerer {
     void zero_test(bool bz, int reg, const std::string& target, SourceLoc loc) {
         const Words w{loc};
         const std::string after = fresh();
-        const std::string& zero = bz ? target : after;
-        const std::string& nonzero = bz ? after : target;
-        for (unsigned lane = 0; lane < kLanes; ++lane) {
-            lane_index(main_, reg, lane, zero_tag(lane), loc);
-            const std::string next = lane + 1 < kLanes ? fresh() : zero;
-            const int c = zero_callee(lane, loc);
-            main_.line({w.ref(kMoved), w.ref(reg_at(index_reg(loc)).name + "__M")}, c,
-                       add_site(c, {next, nonzero}));
-            if (lane + 1 < kLanes) {
-                main_.label(next, loc);
-                main_.line({w.restore(kMoved)});
-            }
-        }
+        zero_lanes(main_, reg, bz ? target : after, bz ? after : target, loc);
         main_.label(after, loc);
         main_.line({w.restore(kMoved)});
+    }
+    // Continues at the landing pad `zero` or `nonzero`. Nothing follows the last dispatch line.
+    void zero_lanes(Stream& s, int reg, const std::string& zero, const std::string& nonzero,
+                    SourceLoc loc) {
+        const Words w{loc};
+        for (unsigned lane = 0; lane < kLanes; ++lane) {
+            lane_index(s, reg, lane, zero_tag(lane), loc);
+            const std::string next = lane + 1 < kLanes ? fresh() : zero;
+            const int c = zero_callee(lane, loc);
+            s.line({w.ref(kMoved), w.ref(reg_at(index_reg(loc)).name + "__M")}, c,
+                   add_site(c, {next, nonzero}));
+            if (lane + 1 < kLanes) {
+                s.label(next, loc);
+                s.line({w.restore(kMoved)});
+            }
+        }
+    }
+
+    // Outlining (docs/hla.md 4.8): a statement that occurs more than once is lowered once, as a
+    // routine of the family _OF, and every occurrence calls it. bz and bnz on the same register
+    // share one routine with two exits, zero and nonzero.
+
+    // The statements that can be outlined, by their operands: those that continue with the next
+    // statement (or branch on zero) and do nothing else with control.
+    std::optional<std::string> outline_key(const Stmt& s) const {
+        switch (s.op) {
+        case Op::Bz:
+        case Op::Bnz:
+            return "z " + s.args[0].name;
+        case Op::Mov:
+            if (is_reg(s.args[1]) && s.args[0].name == s.args[1].name) {
+                return std::nullopt; // nothing to do
+            }
+            break;
+        case Op::Out:
+        case Op::Load:
+        case Op::Store:
+            break;
+        default:
+            if (s.op < Op::Add) { // control, the stack, I/O
+                return std::nullopt;
+            }
+        }
+        std::string key = std::to_string(static_cast<int>(s.op));
+        for (const Operand& o : s.args) {
+            key += std::format(" {}{}{}:{}:{}", static_cast<int>(o.kind), o.mem ? "[" : "", o.imm,
+                               o.name, o.text.size());
+            key += o.text;
+        }
+        return key;
+    }
+
+    void outline_call(const Stmt& s, const std::string& key) {
+        const Words w{s.loc};
+        const bool zero = s.op == Op::Bz || s.op == Op::Bnz;
+        auto [it, first] = outline_ix_.try_emplace(key, outlined_.size());
+        if (first) {
+            Outlined o;
+            o.callee = new_callee(Flags::Outline, s.loc, zero ? 2 : 1);
+            o.entry = "_O" + std::to_string(outlined_.size());
+            o.body.label(o.entry, s.loc);
+            o.body.line({w.restore(kMoved)});
+            // The statement's lowering writes to main_: let it write the body. Labels pending in
+            // the main stream (ENTRY) stay there, for the call line.
+            std::swap(main_, o.body);
+            if (zero) {
+                o.zero = fresh();
+                o.nonzero = fresh();
+                zero_lanes(main_, reg_of(s.args[0]), o.zero, o.nonzero, s.loc);
+            } else {
+                statement(s);
+            }
+            std::swap(main_, o.body);
+            outlined_.push_back(std::move(o));
+        }
+        const Outlined& o = outlined_[it->second];
+        const std::string after = fresh();
+        std::vector<std::string> exits = {after};
+        if (zero) {
+            const std::string target = label_name(s.args[1].name);
+            exits = s.op == Op::Bz ? std::vector{target, after} : std::vector{after, target};
+        }
+        main_.line({w.ref(kMoved), w.ref(o.entry)}, o.callee, add_site(o.callee, exits));
+        main_.label(after, s.loc);
+        main_.line({w.restore(kMoved)});
+        use(kMoved);
+    }
+
+    // An outlined statement's routine: its body, then the return.
+    void outlined_routine(Outlined& o) {
+        Stream& s = o.body;
+        if (o.zero.empty()) {
+            tree(s, o.callee, 0);
+            return;
+        }
+        const Words w{callees_[static_cast<std::size_t>(o.callee)].loc};
+        for (std::size_t e = 0; e < 2; ++e) {
+            s.label(e == 0 ? o.zero : o.nonzero, w.loc);
+            s.line({w.restore(kMoved)});
+            tree(s, o.callee, e);
+        }
     }
 
     // `in`: reg := C1, then the input routine returns A = the operand that turns C1 into the word.
@@ -1835,6 +1949,9 @@ class Lowerer {
     }
 
     void finish() {
+        for (Outlined& o : outlined_) {
+            outlined_routine(o);
+        }
         Stream in_routine;
         if (in_ >= 0) {
             input_routine(in_routine);
@@ -1970,6 +2087,9 @@ class Lowerer {
         }
 
         block(main_);
+        for (Outlined& o : outlined_) {
+            block(o.body);
+        }
         if (in_ >= 0) {
             block(in_routine);
         }
@@ -2063,7 +2183,7 @@ class Lowerer {
         for (int p = 1; p <= max_path_; ++p) {
             code(path_flag(p), {CoreOp::Nop, CoreOp::MovD});
         }
-        for (const Flags f : {Flags::Access, Flags::Sub, Flags::Muldiv}) {
+        for (const Flags f : {Flags::Access, Flags::Sub, Flags::Muldiv, Flags::Outline}) {
             for (unsigned d = 0; d < depth_[static_cast<std::size_t>(f)]; ++d) {
                 code(flag_name(f, d), {CoreOp::Nop, CoreOp::MovD});
             }
@@ -2074,6 +2194,7 @@ class Lowerer {
     }
 
     const Program& p_;
+    const LowerOptions options_;
     as::Program out_;
     std::vector<as::Block> data_;
     Stream main_;
@@ -2116,23 +2237,28 @@ class Lowerer {
     std::unordered_map<std::string, std::uint32_t> code_ids_;
     std::vector<std::pair<std::string, SourceLoc>> code_pads_; // [id - 1]: the label, first use
     std::vector<SwitchTable> switches_;
+    std::unordered_map<std::string, std::size_t> occurrences_; // by outline_key
+    std::unordered_map<std::string, std::size_t> outline_ix_;  // outline_key -> outlined_
+    std::vector<Outlined> outlined_;
     unsigned next_ = 0;
     std::array<unsigned, kFlagFamilies> depth_{};
 };
 
 } // namespace
 
-assembler::Program lower(const Program& program) { return Lowerer(program).run(); }
+assembler::Program lower(const Program& program, const LowerOptions& options) {
+    return Lowerer(program, options).run();
+}
 
 assembler::Program translate(const std::string& path, assembler::FileLoader& loader,
-                             Diagnostics& diags) {
+                             Diagnostics& diags, const LowerOptions& options) {
     const Program p = parse_file(path, loader, diags);
     if (diags.has_errors()) {
         assembler::Program out;
         out.files = p.files;
         return out;
     }
-    assembler::Program out = lower(p);
+    assembler::Program out = lower(p, options);
     assembler::check_program(out, diags);
     return out;
 }

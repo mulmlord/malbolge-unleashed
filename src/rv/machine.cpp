@@ -85,6 +85,32 @@ std::optional<std::uint32_t> alu(unsigned funct3, bool alt, std::uint32_t a, std
 
 } // namespace
 
+std::optional<std::uint32_t> compute(std::uint32_t insn, std::uint32_t pc, std::uint32_t a,
+                                     std::uint32_t b) {
+    const unsigned funct3 = insn >> 12 & 7;
+    const unsigned funct7 = insn >> 25;
+    switch (insn & 0x7f) {
+    case 0x37: // lui
+        return imm_u(insn);
+    case 0x17: // auipc
+        return pc + imm_u(insn);
+    case 0x13: { // as in step
+        const bool shift = funct3 == 1 || funct3 == 5;
+        if (shift && funct7 != 0 && !(funct3 == 5 && funct7 == 0x20)) {
+            return std::nullopt;
+        }
+        return alu(funct3, shift && funct7 == 0x20, a, imm_i(insn));
+    }
+    case 0x33:
+        if (funct7 == 0x01) {
+            return muldiv(funct3, a, b);
+        }
+        return funct7 == 0 || funct7 == 0x20 ? alu(funct3, funct7 == 0x20, a, b) : std::nullopt;
+    default:
+        return std::nullopt;
+    }
+}
+
 Machine::Machine(const Image& image, std::uint32_t ram_size)
     : ram_(ram_size), pc_(image.entry), brk_(image.brk), brk_min_(image.brk) {
     for (const Segment& s : image.segments) {

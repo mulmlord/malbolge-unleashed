@@ -34,10 +34,10 @@ inline std::string diagnostics(const std::string& src) {
     return assembler::format_diagnostics(diags, p.files);
 }
 
-inline Compiled compile(const std::string& src) {
+inline Compiled compile(const std::string& src, const hla::LowerOptions& options = {}) {
     assembler::MemoryLoader loader({{"t.mhl", src}});
     assembler::Diagnostics diags;
-    assembler::Program p = hla::translate("t.mhl", loader, diags);
+    assembler::Program p = hla::translate("t.mhl", loader, diags, options);
     INFO(assembler::format_diagnostics(diags, p.files));
     REQUIRE(!diags.has_errors());
     auto a = assembler::assemble(p, diags);

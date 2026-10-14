@@ -273,7 +273,7 @@ Implementation: `src/driver/build_cmd.cpp` and `src/driver/toolchain.cpp`; tests
 | option | meaning |
 |---|---|
 | `--mode emu` | run the program in rv-emu, the RV32IM emulator (the default) |
-| `--mode aot` | translate the program ahead of time: about three times faster (rv.md section 9), and larger by about 54 K characters of Malbolge text per guest instruction; no self-modifying code |
+| `--mode aot` | translate the program ahead of time: about three times faster (rv.md section 9), and larger by about 24 K characters of Malbolge text per guest instruction; no self-modifying code |
 | `--ram <size>` | guest RAM in bytes, or with a `K` (KiB) or `M` (MiB) suffix; a multiple of 16 up to `4M` (HLA's RAM limit); default `1M` |
 | `--cc <compiler>` | the C compiler: a path, or a name looked up in `PATH`; default `clang`, else the newest `clang-N` in `PATH` |
 | `-o <out.malm>` | where to write the program, a `.malm` (zstd) with the `EXIT_A` flag; `-o -` writes it to stdout |
@@ -304,7 +304,7 @@ the output would overwrite an input; 2 for a usage error.
 The output passes the purity check of `malm asm`, and the same ELF and options give the same bytes.
 
 Building compiles the whole emulator: about 25 seconds with the default 1 MiB of guest RAM and 4 with
-64 KiB (release build); aot mode adds about 5 seconds per thousand guest instructions. Running needs about 5 GB of host memory with 1 MiB (rv.md section 8), so
+64 KiB (release build); aot mode adds about 2.5 seconds per thousand guest instructions. Running needs about 5 GB of host memory with 1 MiB (rv.md section 8), so
 small programs are better built with a smaller `--ram`. The heap ends `__stack_size` (64 KiB) below
 the stack (rv.md section 6): with 64 KiB of guest RAM a program that calls `malloc` needs
 `-- -Wl,--defsym=__stack_size=16384` or similar.

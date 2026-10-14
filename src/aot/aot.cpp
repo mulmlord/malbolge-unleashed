@@ -3,10 +3,12 @@
 #include <array>
 #include <format>
 #include <optional>
+#include <set>
 #include <vector>
 
 #include "aot/cfg.hpp"
 #include "hla/parser.hpp"
+#include "rv/machine.hpp"
 #include "rv/semantics.hpp"
 
 namespace malm::aot {
@@ -56,6 +58,7 @@ class Translator {
         declarations();
         w_.blank();
         w_.stmt(std::format("jmp {}", block(image_.entry)));
+        dead_ = dead_writes();
         std::optional<std::uint32_t> prev;
         for (const auto& [pc, in] : cfg_.code) {
             if (prev && *prev + 4 != pc) {
@@ -65,8 +68,17 @@ class Translator {
                 w_.blank();
                 w_.label(block(pc));
             }
-            w_.comment(std::format("0x{:X}: 0x{:08X}", pc, in.word));
-            instruction(pc, in);
+            if (cfg_.leaders.contains(pc) || prev != pc - 4) {
+                known_.fill(std::nullopt);
+                known_[0] = 0;
+            }
+            if (dead_.contains(pc)) {
+                w_.comment(std::format("0x{:X}: 0x{:08X} (overwritten in the block)", pc, in.word));
+            } else {
+                w_.comment(std::format("0x{:X}: 0x{:08X}", pc, in.word));
+                instruction(pc, in);
+            }
+            track(pc, in);
             prev = pc;
         }
         fall_through(*prev);
@@ -118,6 +130,91 @@ class Translator {
     }
 
     static std::string reg(unsigned i) { return i == 0 ? "zero" : std::format("x{}", i); }
+
+    // Constants (docs/rv.md 9): inside a block, the registers that lui, auipc and arithmetic on
+    // constants set are known, and so is anything computed from them alone.
+
+    // What a lui, auipc, OP-IMM or OP writes, if its operands are known (nullopt for anything
+    // else, and for an illegal encoding).
+    std::optional<std::uint32_t> fold(std::uint32_t pc, const Insn& in) const {
+        const unsigned op = in.opcode();
+        const bool rs1 = op == kOpImm || op == kOpOp;
+        const bool rs2 = op == kOpOp;
+        if ((rs1 && !known_[in.rs1()]) || (rs2 && !known_[in.rs2()])) {
+            return std::nullopt;
+        }
+        return rv::compute(in.word, pc, rs1 ? *known_[in.rs1()] : 0, rs2 ? *known_[in.rs2()] : 0);
+    }
+
+    void track(std::uint32_t pc, const Insn& in) {
+        switch (in.opcode()) {
+        case kOpLui:
+        case kOpAuipc:
+        case kOpImm:
+        case kOpOp:
+        case kOpLoad:
+        case kOpJal:
+        case kOpJalr:
+            known_[in.rd()] = fold(pc, in);
+            break;
+        case kOpSystem:
+            known_[10] = std::nullopt; // ecall's result
+            break;
+        default:
+            break;
+        }
+        known_[0] = 0;
+    }
+
+    // A pure instruction: one that only computes rd (it cannot stop).
+    static bool pure(const Insn& in) {
+        const unsigned op = in.opcode();
+        return (op == kOpLui || op == kOpAuipc || op == kOpImm || op == kOpOp) &&
+               rv::compute(in.word, 0, 0, 0).has_value();
+    }
+
+    // The pure instructions whose result is overwritten in their block before anything reads it
+    // and before anything that can stop or leave the block: they need no code.
+    std::set<std::uint32_t> dead_writes() const {
+        std::set<std::uint32_t> dead;
+        for (auto it = cfg_.code.begin(); it != cfg_.code.end(); ++it) {
+            const unsigned rd = it->second.rd();
+            if (!pure(it->second) || rd == 0) {
+                continue;
+            }
+            for (auto next = std::next(it); next != cfg_.code.end(); ++next) {
+                const Insn& in = next->second;
+                if (next->first != std::prev(next)->first + 4 ||
+                    cfg_.leaders.contains(next->first) || !pure(in)) {
+                    break;
+                }
+                const unsigned op = in.opcode();
+                if (((op == kOpImm || op == kOpOp) && in.rs1() == rd) ||
+                    (op == kOpOp && in.rs2() == rd)) {
+                    break;
+                }
+                if (in.rd() == rd) {
+                    dead.insert(it->first);
+                    break;
+                }
+            }
+        }
+        return dead;
+    }
+
+    // The address x[rs1] + offset, if x[rs1] is known and the `width` bytes there lie inside
+    // guest RAM.
+    std::optional<std::uint32_t> known_address(const Insn& in, std::uint32_t offset,
+                                               std::uint32_t width) const {
+        if (!known_[in.rs1()]) {
+            return std::nullopt;
+        }
+        const std::uint32_t ea = *known_[in.rs1()] + offset;
+        if (std::uint64_t{ea} + width > c_.ram_size) {
+            return std::nullopt;
+        }
+        return ea;
+    }
 
     // A stub in the cold section; returns its label.
     std::string stub(const std::vector<std::string>& stmts) {
@@ -233,24 +330,8 @@ class Translator {
                                                     Alu::Xor, Alu::Srl, Alu::Or,  Alu::And};
         const Alu alu = f3 == 5 && in.funct7() == 0x20 ? Alu::Sra : kOps[f3];
         const std::string d = reg(in.rd());
-        if (in.rs1() == 0) { // a constant
-            std::uint32_t v = 0;
-            switch (alu) {
-            case Alu::Add:
-            case Alu::Xor:
-            case Alu::Or:
-                v = k;
-                break;
-            case Alu::Slt:
-                v = static_cast<std::int32_t>(k) > 0;
-                break;
-            case Alu::Sltu:
-                v = k != 0;
-                break;
-            default: // and, shifts of 0
-                break;
-            }
-            w_.stmt(std::format("mov {}, {}", d, num(v)));
+        if (const auto v = fold(pc, in)) {
+            w_.stmt(std::format("mov {}, {}", d, num(*v)));
             return;
         }
         const std::string s = reg(in.rs1());
@@ -284,12 +365,16 @@ class Translator {
             return;
         }
         const std::string d = reg(in.rd());
+        if (const auto v = fold(pc, in)) {
+            w_.stmt(std::format("mov {}, {}", d, num(*v)));
+            return;
+        }
         // x op 0 = x for add, sub, the shifts, or and xor; 0 op y = y for add, or and xor.
         const bool keeps_x = alu == Alu::Add || alu == Alu::Sub || alu == Alu::Sll ||
                              alu == Alu::Srl || alu == Alu::Sra || alu == Alu::Or ||
                              alu == Alu::Xor;
         if (in.rs2() == 0 && keeps_x) {
-            w_.stmt(std::format("mov {}, {}", d, in.rs1() == 0 ? "0" : reg(in.rs1())));
+            w_.stmt(std::format("mov {}, {}", d, reg(in.rs1()))); // rs1 is not x0: folded
         } else if (in.rs1() == 0 && (alu == Alu::Add || alu == Alu::Or || alu == Alu::Xor)) {
             w_.stmt(std::format("mov {}, {}", d, reg(in.rs2())));
         } else {
@@ -315,6 +400,24 @@ class Translator {
         if (width == 0) {
             return illegal(pc, in);
         }
+        // A known address inside guest RAM cannot fault: an aligned word is one HLA load, the
+        // rest skip the subroutine's check.
+        if (const auto ea = known_address(in, in.imm_i(), static_cast<std::uint32_t>(width))) {
+            if (width == 4 && *ea % 4 == 0) {
+                if (in.rd() != 0) {
+                    w_.stmt(std::format("load x{}, [{}]", in.rd(), num(*ea)));
+                }
+                return;
+            }
+            w_.stmt(std::format("mov ea, {}", num(*ea)));
+            const std::string ret = w_.fresh("ret");
+            rv::sem::load(w_, static_cast<Width>(width), in.funct3() < 4, ret, false);
+            w_.label(ret);
+            if (in.rd() != 0) {
+                w_.stmt(std::format("mov x{}, r", in.rd()));
+            }
+            return;
+        }
         address(in, in.imm_i());
         w_.stmt(std::format("mov pc, {}", num(pc)));
         const std::string ret = w_.fresh("ret");
@@ -330,8 +433,22 @@ class Translator {
         if (in.funct3() > 2) {
             return illegal(pc, in);
         }
+        const std::string value = in.rs2() == 0 ? "0" : reg(in.rs2());
+        const std::uint32_t width = 1u << in.funct3();
+        if (const auto ea = known_address(in, in.imm_s(), width)) { // as in load
+            if (width == 4 && *ea % 4 == 0) {
+                w_.stmt(std::format("store [{}], {}", num(*ea), value));
+                return;
+            }
+            w_.stmt(std::format("mov ea, {}", num(*ea)));
+            w_.stmt(std::format("mov b, {}", value));
+            const std::string ret = w_.fresh("ret");
+            rv::sem::store(w_, static_cast<Width>(width), ret, false);
+            w_.label(ret);
+            return;
+        }
         address(in, in.imm_s());
-        w_.stmt(std::format("mov b, {}", in.rs2() == 0 ? "0" : reg(in.rs2())));
+        w_.stmt(std::format("mov b, {}", value));
         w_.stmt(std::format("mov pc, {}", num(pc)));
         const std::string ret = w_.fresh("ret");
         rv::sem::store(w_, static_cast<Width>(1u << in.funct3()), ret);
@@ -416,8 +533,10 @@ class Translator {
     const rv::sem::Config c_;
     const Cfg& cfg_;
     const Dispatch d_;
-    Writer w_;    // the blocks
-    Writer cold_; // the stubs (labels from w_.fresh)
+    std::array<std::optional<std::uint32_t>, 32> known_{}; // the known registers (track)
+    std::set<std::uint32_t> dead_;                         // dead_writes()
+    Writer w_;                                             // the blocks
+    Writer cold_;                                          // the stubs (labels from w_.fresh)
 };
 
 } // namespace
