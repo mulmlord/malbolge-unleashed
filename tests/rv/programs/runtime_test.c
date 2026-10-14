@@ -3,7 +3,9 @@
 // passed", then "atexit 2", "atexit 1" (no newline) from the atexit handlers, and exits with
 // status 42 through exit(); a failed check prints a FAIL line and the status is 1. With stdin
 // "assert\n" it fails an assert instead (status 134). The guest-only parts are under __riscv; the
-// rest also builds for the host, where libc checks the expected values.
+// rest also builds for the host, where libc checks the expected values. Built against the minimal
+// C library or picolibc (__PICOLIBC__, `malm build --libc picolibc`); MINIMAL_LIBC marks what only
+// the minimal one does.
 #include <assert.h>
 #include <ctype.h>
 #include <errno.h>
@@ -14,6 +16,15 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+
+// picolibc's headers define __PICOLIBC__.
+#if defined(__riscv) && !defined(__PICOLIBC__)
+#define MINIMAL_LIBC
+#else
+#include <math.h>
+#include <setjmp.h>
+#include <time.h>
+#endif
 
 static int checks;
 static int failures;
@@ -155,7 +166,10 @@ static void test_printf(void) {
     CHECK_FMT("|0", "%.0d|%d", 0, 0);
     CHECK_FMT("-2147483648 4294967295", "%d %u", INT_MIN, UINT_MAX);
     CHECK_FMT("ff FF 0xff 0XFF 0", "%x %X %#x %#X %#x", 255, 255, 255, 255, 0);
-    CHECK_FMT("17 017 0 0", "%o %#o %#o %#.0o", 15, 15, 0, 0);
+    CHECK_FMT("17 017 0", "%o %#o %#o", 15, 15, 0);
+#ifndef __PICOLIBC__
+    CHECK_FMT("0", "%#.0o", 0); // picolibc prints nothing
+#endif
     CHECK_FMT("-1 255 -1 65535", "%hhd %hhu %hd %hu", 255, 255, 65535, 65535);
     CHECK_FMT("-9223372036854775808", "%lld", LLONG_MIN);
     CHECK_FMT("18446744073709551615", "%llu", ULLONG_MAX);
@@ -170,7 +184,7 @@ static void test_printf(void) {
               null);
     CHECK_FMT("100% a-1b", "%d%% a%db", 100, -1);
     CHECK_FMT("0x1000", "%p", (void*)0x1000);
-#ifdef __riscv
+#ifdef MINIMAL_LIBC
     CHECK_FMT("%f 1", "%f %d", 1.5, 1); // unsupported, the argument is skipped
 #endif
 
@@ -179,6 +193,67 @@ static void test_printf(void) {
     CHECK(snprintf(NULL, 0, "%s", "abc") == 3);
     CHECK(sprintf(buf, "%s-%d", "ab", 1) == 4 && strcmp(buf, "ab-1") == 0);
 }
+
+#ifndef MINIMAL_LIBC
+// What the minimal C library lacks. Floating point: with picolibc, compiler-rt's soft-float
+// routines (operands volatile, so that clang cannot fold them), printf, scanf and strtod, and the
+// math library.
+static void test_float(void) {
+    volatile double two = 2.0;
+    volatile float half = 0.5f;
+    CHECK(two * 1.75 == 3.5 && two / 8 == 0.25 && two - 2.5 == -0.5 && two > 1.5);
+    CHECK(half * 3 == 1.5f && (double)half == 0.5 && (float)(two / 3) == 2.0f / 3);
+    CHECK((int)(two * -1.75) == -3 && (long long)(two * 1e15) == 2000000000000000LL);
+    CHECK((double)(int)two == two && (double)(1LL << 40) * two == 0x1p41);
+    CHECK_FMT("3.141593 -2.50 1.235e+04 0.0001 1e+100", "%f %.2f %.3e %g %g", 3.14159265358979,
+              -2.5, 12345.678, 0.0001, 1e100);
+    CHECK_FMT("  1.5|1.5  |001.5|+1.5", "%5.1f|%-5.1f|%05.1f|%+.1f", 1.5, 1.5, 1.5, 1.5);
+    CHECK_FMT("inf -inf nan 0x1.8p+1", "%f %f %f %a", INFINITY, -INFINITY, NAN, 3.0);
+    CHECK_FMT("1.4142135624 2.7182818285 0.5000000000", "%.10f %.10f %.10f", sqrt(two),
+              exp(two / 2), sin(two * 0.2617993877991494));
+    CHECK(fabs(pow(two, 0.5) - sqrt(two)) < 1e-15 && floor(-two / 4) == -1 &&
+          fmod(7.5, two) == 1.5);
+    CHECK(log(exp(two)) == two && atan2(two, two) * 4 == 3.141592653589793);
+
+    char* end;
+    CHECK(strtod("2.5e3x", &end) == 2500.0 && *end == 'x' && atof("-0.125") == -0.125);
+    CHECK(strtof("0.1", NULL) == 0.1f && strtod("0x1p-2", NULL) == 0.25);
+    int i = 0;
+    double d = 0;
+    char word[8] = "";
+    CHECK(sscanf("42 6.25 abc", "%d %lf %7s", &i, &d, word) == 3 && i == 42 && d == 6.25 &&
+          strcmp(word, "abc") == 0);
+}
+
+static jmp_buf jump;
+
+static void jump_back(int value) { longjmp(jump, value); }
+
+// setjmp returns 0, then longjmp's 7; any other value runs the inner if again.
+static void test_setjmp(void) {
+    volatile int calls = 0;
+    if (setjmp(jump) != 7) {
+        if (calls++ == 0) {
+            jump_back(7);
+        }
+    }
+    CHECK(calls == 1);
+}
+#endif
+
+#ifdef __PICOLIBC__
+// No files and no clock (picolibc/posix.c); time conversions work.
+static void test_no_files(void) {
+    errno = 0;
+    CHECK(fopen("file", "r") == NULL && errno == ENOSYS);
+    CHECK(remove("file") == -1 && time(NULL) == (time_t)-1 && clock() == (clock_t)-1);
+    CHECK(!isatty(STDIN_FILENO) && errno == ENOTTY);
+    const time_t t = 951782400; // 2000-02-29
+    char buf[32];
+    CHECK(strftime(buf, sizeof buf, "%Y-%m-%d %a", gmtime(&t)) == 14 &&
+          strcmp(buf, "2000-02-29 Tue") == 0);
+}
+#endif
 
 static void test_divdi3(void) {
     volatile long long a = -1234567890123LL;
@@ -368,6 +443,13 @@ int main(int argc, char** argv) {
     test_ctype();
     test_strtol();
     test_printf();
+#ifndef MINIMAL_LIBC
+    test_float();
+    test_setjmp();
+#endif
+#ifdef __PICOLIBC__
+    test_no_files();
+#endif
     test_divdi3();
     test_qsort();
     test_malloc();

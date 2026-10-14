@@ -31,6 +31,9 @@ if(MALM_SANITIZE)
         -fsanitize=address,undefined -fno-sanitize-recover=all)
 endif()
 
+include(cmake/RvToolchain.cmake)
+
+add_subdirectory(rv/runtime)
 add_subdirectory(src/core)
 add_subdirectory(src/asm)
 add_subdirectory(src/hla)

@@ -13,6 +13,19 @@ third-party material.
 reproduce Zstandard's copyright notice, conditions and disclaimer in the documentation or other materials provided
 with the distribution, e.g. by shipping `third_party/LICENSE-zstd.txt` alongside them.
 
+## Built into `malm` when it is built with picolibc (`MALM_PICOLIBC`), and linked into guest programs built with `malm build --libc picolibc`
+
+| Component | Version | Licence | Notes |
+|---|---|---|---|
+| [picolibc](https://github.com/picolibc/picolibc) | 1.8.12 | BSD-style (mostly BSD-2-Clause and BSD-3-Clause, per file) | the C library for RISC-V guests (`rv/runtime/CMakeLists.txt`), fetched at configure time. Full text: [`COPYING.picolibc`](https://github.com/picolibc/picolibc/blob/1.8.12/COPYING.picolibc) in its source |
+| [compiler-rt](https://github.com/llvm/llvm-project/tree/main/compiler-rt) builtins | 20.1.8 | Apache-2.0 WITH LLVM-exception | soft-float and 64-bit integer routines for RISC-V guests, fetched at configure time. Full text: [`third_party/LICENSE-compiler-rt.txt`](third_party/LICENSE-compiler-rt.txt) |
+
+Both are in `malm` as a library archive (about 0.8 MB, unpacked by `malm build`), and the parts a
+program uses are linked into it. **If you distribute such a `malm` binary**, ship the two licence
+texts with it. **If you distribute a program built with `--libc picolibc`** (a `.malm` or packed
+executable), picolibc's licences require its copyright notices with it; the LLVM exception waives
+compiler-rt's conditions for code embedded into a compiled program.
+
 ## Used only for building and testing (not part of any binary we ship)
 
 | Component | Licence | Location |

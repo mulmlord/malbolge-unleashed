@@ -1,8 +1,9 @@
 #!/bin/sh
-# `malm build` for C end to end (issues #28, #29): an example from examples/c built in emu or aot
-# mode into a .malm and, with --exe, a native executable; both run through real pipes and must give
-# the expected stdout and exit status.
+# `malm build` for C end to end (issues #28, #29, #32): an example from examples/c built in emu or
+# aot mode, with the minimal C library or picolibc, into a .malm and, with --exe, a native
+# executable; both run through real pipes and must give the expected stdout and exit status.
 # Usage: build_pipe_test.sh <malm> <cc> <examples-dir> <programs-dir> <case> [emu|aot]
+#            [minimal|picolibc]
 set -u
 malm=$1
 cc=$2
@@ -10,17 +11,16 @@ examples=$3
 programs=$4
 case_=$5
 mode=${6:-emu}
+libc=${7:-minimal}
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
 # build [compiler args...]: prog.malm and the executable prog. 64K of guest RAM keeps the builds
 # short.
 build() {
-    "$malm" build --mode "$mode" --ram 64K --cc "$cc" -o "$tmp/prog.malm" "$examples/$case_.c" \
-        -- "$@" || exit 1
-    "$malm" build --mode "$mode" --ram 64K --cc "$cc" --exe -o "$tmp/prog" "$examples/$case_.c" \
-        -- "$@" \
-        2> "$tmp/err" || { cat "$tmp/err"; exit 1; }
+    set -- --mode "$mode" --libc "$libc" --ram 64K --cc "$cc" "$examples/$case_.c" -- "$@"
+    "$malm" build -o "$tmp/prog.malm" "$@" || exit 1
+    "$malm" build --exe -o "$tmp/prog" "$@" 2> "$tmp/err" || { cat "$tmp/err"; exit 1; }
 }
 
 # check <input file> <want file> <want status>: `cat input | malm run prog.malm` and
@@ -75,6 +75,13 @@ sort)
     build -Wl,--defsym=__stack_size=16384
     printf 'pear\nApple\n\napple\n\303\244\npear\nfig' > "$tmp/in"
     LC_ALL=C sort < "$tmp/in" > "$tmp/want"
+    check "$tmp/in" "$tmp/want" 0
+    ;;
+stats)
+    # picolibc only: floating point, scanf and sqrt.
+    build
+    printf '1.5 -2.25\n1e3\n' > "$tmp/in"
+    printf 'count 3\nmin -2.25\nmax 1000\nmean 333.083\nstddev 471.584\n' > "$tmp/want"
     check "$tmp/in" "$tmp/want" 0
     ;;
 *)

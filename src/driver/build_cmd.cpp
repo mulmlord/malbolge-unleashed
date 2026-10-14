@@ -23,12 +23,15 @@ namespace {
 
 constexpr std::string_view kUsage =
     "usage: malm build [--mode emu|aot] [--ram <size>] [--cc <compiler>]\n"
+    "                  [--libc minimal|picolibc]\n"
     "                  (-o <out.malm> | --exe -o <out>) (<prog.c>... | <prog.elf>)\n"
     "                  [-- <compiler args>...]\n"
     "  --mode emu       run it in rv-emu, the RV32IM emulator (the default)\n"
     "  --mode aot       translate it to Malbolge ahead of time: faster, larger\n"
     "  --ram <size>     guest RAM in bytes, or with a K/M suffix (default 1M, at most 4M)\n"
     "  --cc <compiler>  the C compiler, clang with the riscv32 target (default: clang in PATH)\n"
+    "  --libc minimal   link C sources with malm's minimal C library (the default)\n"
+    "  --libc picolibc  link them with picolibc: the full C library, floating point\n"
     "  -o <out.malm>    write the program there (-o - writes to stdout)\n"
     "  --exe -o <out>   write a native executable instead (malm pack)\n"
     "  <prog.c>...      C sources, compiled and linked with malm's runtime (docs/rv.md)\n"
@@ -102,6 +105,7 @@ int build_command_with(std::span<const std::string_view> args, std::ostream& out
     std::span<const std::string_view> cc_args;
     std::string_view output;
     std::optional<std::string_view> cc;
+    std::optional<Libc> libc;
     bool exe = false;
     bool aot = false;
     std::uint32_t ram_size = rv::kDefaultRamSize;
@@ -141,6 +145,12 @@ int build_command_with(std::span<const std::string_view> args, std::ostream& out
                 return usage_error(err, "--cc needs a compiler");
             }
             cc = args[++i];
+        } else if (arg == "--libc") {
+            const std::string_view name = i + 1 < args.size() ? args[++i] : "";
+            if (name != "minimal" && name != "picolibc") {
+                return usage_error(err, "--libc needs minimal or picolibc");
+            }
+            libc = name == "picolibc" ? Libc::Picolibc : Libc::Minimal;
         } else if (arg == "--exe") {
             exe = true;
         } else if (arg.starts_with('-')) {
@@ -164,8 +174,8 @@ int build_command_with(std::span<const std::string_view> args, std::ostream& out
             return usage_error(err, "give C sources or one ELF executable");
         }
     }
-    if (!c && (cc || !cc_args.empty())) {
-        return usage_error(err, "--cc and compiler arguments need C sources");
+    if (!c && (cc || libc || !cc_args.empty())) {
+        return usage_error(err, "--cc, --libc and compiler arguments need C sources");
     }
     for (const std::string_view input : inputs) {
         if (same_file(output, input)) {
@@ -181,7 +191,7 @@ int build_command_with(std::span<const std::string_view> args, std::ostream& out
             err << "malm build: " << tools.error() << '\n';
             return 1;
         }
-        auto elf = compile_c(*tools, inputs, cc_args, err);
+        auto elf = compile_c(*tools, inputs, cc_args, err, libc.value_or(Libc::Minimal));
         if (!elf) {
             err << "malm build: " << elf.error() << '\n';
             return 1;

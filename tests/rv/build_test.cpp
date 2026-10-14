@@ -149,6 +149,9 @@ TEST_CASE("build: errors") {
              {"build", "-o", out, "a.c", elf},
              {"build", "-o", out, elf, "a.c"},
              {"build", "--cc", "clang", "-o", out, elf},
+             {"build", "--libc", "picolibc", "-o", out, elf},
+             {"build", "--libc", "glibc", "-o", out, "a.c"},
+             {"build", "-o", out, "a.c", "--libc"},
              {"build", "-o", out, elf, "--", "-O0"},
              {"build", "-o", out, "--", "a.c"}, // after --, a.c is a compiler argument
          }) {

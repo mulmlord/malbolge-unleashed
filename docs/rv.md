@@ -85,7 +85,9 @@ instructions from 1, the faulting one included. Reasons:
 ## 6. Runtime
 
 `rv/runtime` is what a C program needs to run as a guest: the entry point (`crt0.S`), the linker
-script (`link.ld`), the system call wrappers and a minimal C library (`include/`, `src/`).
+script (`link.ld`), the system call wrappers and a minimal C library (`include/`, `src/`), or
+instead [picolibc](https://github.com/picolibc/picolibc), the full C library (`malm build --libc
+picolibc`, below).
 
 ### Toolchain and linking
 
@@ -123,7 +125,7 @@ malm rvref prog.elf
 | addresses | contents |
 |---|---|
 | `[0, 0x1000)` | unused; nothing faults there, a null pointer reads zeros |
-| `0x1000` up | `.text` (`_start` first), `.rodata`, `.init_array`, `.data`, `.bss`, up to `_end` |
+| `0x1000` up | `.text` (`_start` first), `.rodata`, `.init_array`, `.fini_array`, `.data`, `.bss`, up to `_end` |
 | `_end` up | the heap, grown through `brk` |
 | below `ram_size` | the stack, growing down from the initial `sp` |
 
@@ -167,7 +169,48 @@ aligns `sp` to 16 and records it for the heap limit, runs the `.init_array` cons
   real abort).
 
 Everything else in the C library (`scanf`, string to floating-point conversion, files, time,
-locales, wide characters, `setjmp`, signals) is missing; picolibc is planned for that.
+locales, wide characters, `setjmp`, signals) is missing; picolibc has it.
+
+### picolibc
+
+`malm build --libc picolibc` compiles the program against picolibc 1.8.12 instead and links it
+with picolibc's `libc.a` (which includes the math library), compiler-rt's builtins
+(`libclang_rt.builtins.a`: soft-float arithmetic and conversions, 64-bit division) and `libmalm.a`,
+the system interface that picolibc builds on (`rv/runtime/picolibc`), with the same crt0 and linker
+script. Floating point works in software: `float` and `double` arithmetic, `printf` with `f e g a`,
+`scanf`, `strtod` and `math.h`. `long double` (128 bits on riscv32) has no arithmetic routines, as
+in compiler-rt for riscv32: a program that computes with it fails to link.
+
+These are built when `malm` is built, with the RISC-V toolchain of section 7 (and `llvm-ar` or
+`ar`): `rv/runtime/CMakeLists.txt` fetches picolibc and compiler-rt 20.1.8 (pinned release
+tarballs), cross-compiles both with CMake (`-O2`; picolibc without thread-local storage and
+locking, so `errno` is a plain global) and packs headers and libraries into a zstd-compressed tar,
+about 0.8 MB, that is built into `malm`. `malm build` unpacks it into its temporary directory. The
+CMake cache variable `MALM_PICOLIBC` controls this like `MALM_RV_TESTS`: `AUTO` (default) builds
+it when the toolchain is found and otherwise builds `malm` without it, with a warning; `ON` makes a
+missing toolchain a configure error; `OFF` leaves it out. A `malm` without picolibc rejects
+`--libc picolibc`.
+
+`libmalm.a` keeps the minimal runtime's behaviour:
+
+- **Streams.** `stdin`, `stdout` and `stderr` are picolibc streams over `read` and `write`
+  (`picolibc/stdio.c`) with the minimal runtime's buffering: `stdout` is line-buffered (1024
+  bytes) and flushed before a read from `stdin` and before every byte of `stderr`, `stdin` reads
+  one byte per `read`. `exit` runs the `atexit` functions, then the destructors, then flushes
+  `stdout` (a destructor of priority 101, run last through `.fini_array`).
+- **System calls** are `src/syscalls.c` (`read`, `write`, `_exit`, `brk`, `sbrk`; also the
+  register dump of `__malm_dump_regs`), so the heap limit is the same.
+- **Everything else** fails (`picolibc/posix.c`): there are no files and no clock, so `fopen`,
+  `remove` and `open` fail with `ENOSYS`, `time` and `clock` return -1; `lseek` on the standard
+  streams gives `ESPIPE`, `isatty` 0. `raise` ends the program with status 128 + the signal, so
+  `abort` exits with 134. A failed `assert` prints picolibc's message (`assertion "expr" failed:
+  file "f.c", line 3, function: main`) on stderr and aborts.
+
+**Size and speed.** picolibc's `printf` handles floating point whether or not the program uses
+it: a hello world with `puts` is 0.8 KB of code, with `printf("%d")` 13 KB (900 and 1 200 guest
+instructions). Linking with `-- -Wl,--defsym=vfprintf=__i_vfprintf` selects picolibc's
+integer-only `printf` (3.4 KB). In emu mode the size of the code hardly matters (section 8), in aot
+mode it does (section 9). A `printf("%f")` takes about 3 000 guest instructions.
 
 ## 7. Tests
 
@@ -176,12 +219,17 @@ locales, wide characters, `setjmp`, signals) is missing; picolibc is planned for
 on `malm rvref`, and C programs through real pipes with their output and exit status checked:
 `tests/rv/programs/hello.c` and `cat.c` without the runtime (for the initial and final machine
 state), and on the runtime the examples in `examples/c` (hello, cat, wc, fizzbuzz, sort) and
-`tests/rv/programs/runtime_test.c`, a self-check of crt0 and the library.
+`tests/rv/programs/runtime_test.c`, a self-check of crt0 and the library. The same programs, the
+self-check and `examples/c/stats.c` (which needs floating point) also run linked with picolibc
+(`rvref_picolibc_*`; the self-check then also checks floating point, `scanf`, `setjmp` and the
+missing files and clock).
 `rv_toolchain_test` compiles C with `malm build`'s toolchain code and the runtime built into
-`malm` and runs the result on the reference emulator; the `build_c_*` and `build_c_aot_*` tests
+`malm`, with either C library, and runs the result on the reference emulator; `rv_test` unpacks
+the picolibc sysroot and hand-made archives (`sysroot_test.cpp`); the `build_c_*` and `build_c_aot_*` tests
 (`tests/rv/build_pipe_test.sh`) build each example with `malm build` in emu and aot mode, as a
 `.malm` and with `--exe`, and run both through real pipes (`cat` is `fast`, the rest `slow`; they
-need `MALM_BUILD_EMU`).
+need `MALM_BUILD_EMU`); `build_c_picolibc_*` do the same with picolibc in emu mode, and stats
+(`fast`).
 `rv_emu_test` runs rv-emu against the reference emulator one instruction at a time (section 8).
 `rv_aot_test` checks rv-aot's control-flow graph and runs translated hand-assembled programs
 (random ALU code; loads, stores, branches, calls, a jump table and the system calls; every fault
@@ -223,10 +271,12 @@ that needs no CSRs or trap handler. A test starts at `_start` and exits through 
 status 0 on pass and the failing test number (mod 256, never 0) on fail. Every test ELF is linked
 with `rv/runtime/link.ld`.
 
-The CMake cache variable `MALM_RV_TESTS` controls these toolchain-built tests: `AUTO` (default)
+The CMake cache variable `MALM_RV_TESTS` controls these toolchain-built tests (the picolibc ones
+also need `MALM_PICOLIBC`): `AUTO` (default)
 builds them when clang with the riscv32 target and ld.lld are found and otherwise skips them with
 a warning, `ON` makes a missing toolchain a configure error (CI), `OFF` skips them. The
-toolchain is found as `MALM_RV_CC` and `MALM_RV_LD`, which can also be set by hand.
+toolchain is found as `MALM_RV_CC`, `MALM_RV_LD` and `MALM_RV_AR` (`cmake/RvToolchain.cmake`),
+which can also be set by hand.
 
 ## 8. rv-emu
 

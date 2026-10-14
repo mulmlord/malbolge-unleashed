@@ -1,5 +1,5 @@
 // The RISC-V toolchain behind `malm build` for C (docs/rv.md 6): clang with the riscv32 target
-// compiles the program and the runtime built into malm (runtime_files.hpp), ld.lld links them.
+// compiles the program, ld.lld links it with a runtime built into malm (runtime_files.hpp).
 #pragma once
 
 #include <cstdint>
@@ -25,14 +25,19 @@ struct Toolchain {
 // missing.
 core::Result<Toolchain, std::string> find_toolchain(std::string_view cc, std::string_view path_env);
 
-// Compiles the C `sources` with the runtime and links an RV32IM ELF executable, in a temporary
-// directory. `args` are the user's compiler arguments (`--` in `malm build`): `-Wl,a,b` passes `a`
-// and `b` to the linker, everything else goes to the compiler for `sources` (after the default
-// -O2, so it can override it). The tools' output (diagnostics, also warnings) is copied to `err`;
-// the error is a one-line summary. Fails with a message naming the compiler if it cannot compile
-// for riscv32.
+// The C library a program is linked with (docs/rv.md 6): the minimal runtime, whose sources are
+// compiled with the program, or picolibc, prebuilt.
+enum class Libc { Minimal, Picolibc };
+
+// Compiles the C `sources` against `libc` and links an RV32IM ELF executable with the runtime's
+// crt0 and linker script, in a temporary directory. `args` are the user's compiler arguments (`--`
+// in `malm build`): `-Wl,a,b` passes `a` and `b` to the linker, everything else goes to the
+// compiler for `sources` (after the default -O2, so it can override it). The tools' output
+// (diagnostics, also warnings) is copied to `err`; the error is a one-line summary. Fails with a
+// message naming the compiler if it cannot compile for riscv32, and for picolibc if malm was built
+// without it.
 core::Result<std::vector<std::uint8_t>, std::string>
 compile_c(const Toolchain& tools, std::span<const std::string_view> sources,
-          std::span<const std::string_view> args, std::ostream& err);
+          std::span<const std::string_view> args, std::ostream& err, Libc libc = Libc::Minimal);
 
 } // namespace malm

@@ -37,13 +37,13 @@ jobs:
       - name: Reset ccache statistics
         run: ccache --zero-stats
       - name: Configure
-        run: cmake --preset debug -DMALM_RV_TESTS=ON
+        run: cmake --preset debug -DMALM_RV_TESTS=ON -DMALM_PICOLIBC=ON
       - name: Build
         run: cmake --build --preset debug
       - name: Test
         run: ctest --preset debug -L fast --no-tests=error
       - name: Configure (release)
-        run: cmake --preset release -DMALM_RV_TESTS=ON
+        run: cmake --preset release -DMALM_RV_TESTS=ON -DMALM_PICOLIBC=ON
       - name: Build (release)
         run: cmake --build --preset release
       - name: Test (release)

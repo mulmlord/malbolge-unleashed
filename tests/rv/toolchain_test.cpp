@@ -12,6 +12,7 @@
 #include <string_view>
 #include <vector>
 
+#include "driver/runtime_files.hpp"
 #include "driver/toolchain.hpp"
 #include "rv/elf.hpp"
 #include "rv/machine.hpp"
@@ -41,11 +42,12 @@ struct Compiled {
     std::vector<std::uint8_t> elf;
 };
 
-Compiled compile(std::vector<std::string_view> sources, std::vector<std::string_view> args = {}) {
+Compiled compile(std::vector<std::string_view> sources, std::vector<std::string_view> args = {},
+                 malm::Libc libc = malm::Libc::Minimal) {
     const auto tools = malm::find_toolchain(MALM_RV_CC, "");
     REQUIRE(tools.has_value());
     std::ostringstream diags;
-    auto elf = malm::compile_c(*tools, sources, args, diags);
+    auto elf = malm::compile_c(*tools, sources, args, diags, libc);
     Compiled c;
     c.ok = elf.has_value();
     c.diags = diags.str();
@@ -142,4 +144,42 @@ TEST_CASE("toolchain: compiler and linker errors") {
     c = compile({(dir.path / "missing.c").string()});
     CHECK(!c.ok);
     CHECK(c.error == "compilation failed");
+}
+
+TEST_CASE("toolchain: picolibc") {
+    if (malm::picolibc_sysroot().empty()) {
+        MESSAGE("malm is built without picolibc (MALM_PICOLIBC)");
+        return;
+    }
+    const Compiled stats = compile({MALM_EXAMPLES_DIR "/stats.c"}, {}, malm::Libc::Picolibc);
+    INFO(stats.diags);
+    REQUIRE(stats.ok);
+    CHECK(stats.diags.empty());
+    rvtest::StringIo io;
+    io.in = "2 4 4 4 5 5 7 9";
+    malm::rv::Stop stop = run(stats.elf, io);
+    CHECK(stop.exit_code == 0);
+    CHECK(io.out == "count 8\nmin 2\nmax 9\nmean 5\nstddev 2\n");
+
+    // The minimal C library has no math.h.
+    const Compiled minimal = compile({MALM_EXAMPLES_DIR "/stats.c"});
+    CHECK(!minimal.ok);
+
+    // Linker arguments reach the link with picolibc too.
+    const TempDir dir;
+    const std::string main_c = dir.write("main.c", R"(#include <stdint.h>
+#include <stdio.h>
+extern char answer[];
+int main(void) {
+    printf("%.2f\n", (double)(uintptr_t)answer / 8);
+    return (int)(uintptr_t)answer;
+}
+)");
+    const Compiled c = compile({main_c}, {"-Wl,--defsym=answer=42"}, malm::Libc::Picolibc);
+    INFO(c.diags);
+    REQUIRE(c.ok);
+    io = {};
+    stop = run(c.elf, io);
+    CHECK(io.out == "5.25\n");
+    CHECK(stop.exit_code == 42);
 }
