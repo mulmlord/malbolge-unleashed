@@ -2,7 +2,7 @@
 # (issue #26), docs/rv.md. Unit tests need no RISC-V toolchain; the riscv-tests suite and the C test
 # programs are built with clang (riscv32 target) and ld.lld when they are found (MALM_RV_TESTS).
 malm_add_test(NAME rv_test LABEL fast SOURCES elf_test.cpp machine_test.cpp rvref_test.cpp
-    build_test.cpp LIBS malm_rv malm_driver)
+    build_test.cpp sysroot_test.cpp LIBS malm_rv malm_driver)
 # rv-emu (issue #25): single instructions against the reference emulator. A debug build spends
 # about 3 minutes compiling the emulator, so there its cases are slow.
 malm_add_test(NAME rv_emu_test LABEL fast SOURCES emu_test.cpp LIBS malm_rv malm_hla TIMEOUT 1800)
@@ -25,31 +25,8 @@ if(MALM_RV_TESTS STREQUAL "OFF")
     return()
 endif()
 
-# clang with the riscv32 target compiles, ld.lld links (called directly, so no driver linker
-# search is involved). Versioned names cover Ubuntu's clang-18 / lld-18.
-find_program(MALM_RV_CC NAMES clang clang-22 clang-21 clang-20 clang-19 clang-18)
-if(MALM_RV_CC)
-    file(REAL_PATH "${MALM_RV_CC}" rv_cc_real)
-    cmake_path(GET rv_cc_real PARENT_PATH rv_cc_dir)
-endif()
-find_program(MALM_RV_LD NAMES ld.lld ld.lld-22 ld.lld-21 ld.lld-20 ld.lld-19 ld.lld-18
-    HINTS "${rv_cc_dir}")
-set(rv_flags --target=riscv32-unknown-elf -march=rv32im_zifencei -mabi=ilp32)
-set(rv_ok FALSE)
-if(MALM_RV_CC AND MALM_RV_LD)
-    set(probe "${CMAKE_CURRENT_BINARY_DIR}/probe")
-    file(WRITE "${probe}.S" "_start: ecall\n")
-    execute_process(COMMAND "${MALM_RV_CC}" ${rv_flags} -c "${probe}.S" -o "${probe}.o"
-        RESULT_VARIABLE cc_rc OUTPUT_QUIET ERROR_QUIET)
-    if(cc_rc EQUAL 0)
-        execute_process(COMMAND "${MALM_RV_LD}" "${probe}.o" -o "${probe}.elf"
-            RESULT_VARIABLE ld_rc OUTPUT_QUIET ERROR_QUIET)
-        if(ld_rc EQUAL 0)
-            set(rv_ok TRUE)
-        endif()
-    endif()
-endif()
-if(NOT rv_ok)
+set(rv_flags ${MALM_RV_FLAGS})
+if(NOT MALM_RV_TOOLCHAIN_OK)
     set(msg "RISC-V tests need clang with the riscv32 target and ld.lld \
 (found: MALM_RV_CC=${MALM_RV_CC}, MALM_RV_LD=${MALM_RV_LD})")
     if(MALM_RV_TESTS STREQUAL "ON")
@@ -97,11 +74,18 @@ foreach(src IN LISTS rt_sources)
     list(APPEND rt_libc "${obj}")
 endforeach()
 
-# rv_elf(<name> <source> [RUNTIME] [DEPENDS <files>...] [FLAGS <flags>...] [LDFLAGS <flags>...]):
-# compile and link one test ELF; RUNTIME builds it against the runtime's headers and links crt0 and
-# the libc.
+# picolibc (issue #32), as built into malm (rv/runtime/CMakeLists.txt).
+if(TARGET picolibc_sysroot)
+    get_target_property(pl_sysroot picolibc_sysroot MALM_SYSROOT)
+    set(pl_libs "${pl_sysroot}/lib/libmalm.a" "${pl_sysroot}/lib/libc.a"
+        "${pl_sysroot}/lib/libclang_rt.builtins.a")
+endif()
+
+# rv_elf(<name> <source> [RUNTIME | PICOLIBC] [DEPENDS <files>...] [FLAGS <flags>...]
+#        [LDFLAGS <flags>...]): compile and link one test ELF; RUNTIME builds it against the
+# runtime's headers and links crt0 and the libc, PICOLIBC the same with picolibc.
 function(rv_elf name src)
-    cmake_parse_arguments(ARG "RUNTIME" "" "DEPENDS;FLAGS;LDFLAGS" ${ARGN})
+    cmake_parse_arguments(ARG "RUNTIME;PICOLIBC" "" "DEPENDS;FLAGS;LDFLAGS" ${ARGN})
     set(obj "${rv_elf_dir}/${name}.o")
     set(elf "${rv_elf_dir}/${name}.elf")
     set(inputs "${obj}")
@@ -110,6 +94,12 @@ function(rv_elf name src)
         list(PREPEND ARG_FLAGS ${rt_cflags})
         list(APPEND ARG_DEPENDS ${rt_headers} "${rt_crt0}" ${rt_libc})
         set(inputs "${rt_crt0}" "${obj}" --start-lib ${rt_libc} --end-lib)
+        list(APPEND ld_flags --gc-sections)
+    elseif(ARG_PICOLIBC)
+        list(PREPEND ARG_FLAGS -O2 -nostdlibinc -isystem "${pl_sysroot}/include" -ffunction-sections
+            -fdata-sections)
+        list(APPEND ARG_DEPENDS picolibc_sysroot "${rt_crt0}" ${pl_libs})
+        set(inputs "${rt_crt0}" "${obj}" ${pl_libs})
         list(APPEND ld_flags --gc-sections)
     endif()
     add_custom_command(OUTPUT "${elf}"
@@ -174,6 +164,18 @@ endforeach()
 rv_elf(dump_runtime_test "${CMAKE_CURRENT_SOURCE_DIR}/programs/runtime_test.c" RUNTIME
     FLAGS -Wall -Wextra -Werror LDFLAGS --defsym=__malm_dump_regs=1)
 
+# The same with picolibc, and the example that needs it.
+set(rv_picolibc_cases "")
+if(TARGET picolibc_sysroot)
+    foreach(prog hello cat fizzbuzz wc sort stats)
+        rv_elf(picolibc_example_${prog} "${PROJECT_SOURCE_DIR}/examples/c/${prog}.c" PICOLIBC
+            FLAGS -Wall -Wextra -Werror)
+    endforeach()
+    rv_elf(picolibc_runtime_test "${CMAKE_CURRENT_SOURCE_DIR}/programs/runtime_test.c" PICOLIBC
+        FLAGS -Wall -Wextra -Werror)
+    set(rv_picolibc_cases example_hello example_cat fizzbuzz wc sort stats runtime runtime_assert)
+endif()
+
 add_custom_target(rv_test_elfs ALL DEPENDS ${rv_elfs})
 
 foreach(name IN LISTS rv_suite_tests)
@@ -186,6 +188,12 @@ foreach(case hello cat trace regs example_hello example_cat fizzbuzz wc sort run
         COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/rvref_pipe_test.sh" $<TARGET_FILE:malm>
             "${rv_elf_dir}" "${PROJECT_SOURCE_DIR}/tests/programs" ${case})
     set_tests_properties(rvref_program_${case} PROPERTIES LABELS fast TIMEOUT 60)
+endforeach()
+foreach(case IN LISTS rv_picolibc_cases)
+    add_test(NAME rvref_picolibc_${case}
+        COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/rvref_pipe_test.sh" $<TARGET_FILE:malm>
+            "${rv_elf_dir}" "${PROJECT_SOURCE_DIR}/tests/programs" ${case} picolibc)
+    set_tests_properties(rvref_picolibc_${case} PROPERTIES LABELS fast TIMEOUT 60)
 endforeach()
 
 # The three-way differential test (issue #30): each program on the reference emulator and built
@@ -237,6 +245,20 @@ foreach(case hello cat wc fizzbuzz sort)
             ${case} aot)
     set_tests_properties(build_c_aot_${case} PROPERTIES LABELS ${label} TIMEOUT 1800)
 endforeach()
+# With picolibc (issue #32), in emu mode; stats needs it and is fast.
+if(TARGET picolibc_sysroot)
+    foreach(case hello cat wc fizzbuzz sort stats)
+        set(label slow)
+        if(case STREQUAL "stats")
+            set(label fast)
+        endif()
+        add_test(NAME build_c_picolibc_${case}
+            COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/build_pipe_test.sh" $<TARGET_FILE:malm>
+                "${MALM_RV_CC}" "${PROJECT_SOURCE_DIR}/examples/c"
+                "${PROJECT_SOURCE_DIR}/tests/programs" ${case} emu picolibc)
+        set_tests_properties(build_c_picolibc_${case} PROPERTIES LABELS ${label} TIMEOUT 1800)
+    endforeach()
+endif()
 
 # riscv-tests (issues #27, #29, #30): each test on the reference emulator and built in emu and aot
 # mode (8K of guest RAM: every test ends below 0x2000 and uses no stack), with the three-way

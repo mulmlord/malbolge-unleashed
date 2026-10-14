@@ -17,6 +17,14 @@ SECTIONS
         KEEP(*(.init_array))
         PROVIDE_HIDDEN(__init_array_end = .);
     }
+    /* Run last to first by picolibc's exit; .fini_array_onexit (its atexit functions) runs first. */
+    .fini_array : {
+        PROVIDE_HIDDEN(__fini_array_start = .);
+        KEEP(*(SORT_BY_INIT_PRIORITY(.fini_array.*)))
+        KEEP(*(.fini_array))
+        KEEP(*(.fini_array_onexit))
+        PROVIDE_HIDDEN(__fini_array_end = .);
+    }
     .data : { *(.data .data.* .sdata .sdata.*) }
     .bss : {
         . = ALIGN(16);

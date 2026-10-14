@@ -17,6 +17,7 @@
 #include <utility>
 
 #include "driver/runtime_files.hpp"
+#include "driver/sysroot.hpp"
 
 extern char** environ;
 
@@ -136,13 +137,14 @@ bool run(const std::vector<std::string>& argv, const fs::path& log, std::ostream
     return job.pid >= 0 && finish(job, err);
 }
 
-std::vector<std::string> target_flags(const fs::path& dir) {
+// `include` is the C library's headers.
+std::vector<std::string> target_flags(const fs::path& include) {
     return {"--target=riscv32-unknown-elf",
             "-march=rv32im",
             "-mabi=ilp32",
             "-nostdlibinc",
             "-isystem",
-            (dir / "include").string(),
+            include.string(),
             "-ffunction-sections",
             "-fdata-sections",
             "-O2"};
@@ -193,8 +195,11 @@ core::Result<Toolchain, std::string> find_toolchain(std::string_view cc,
 
 core::Result<std::vector<std::uint8_t>, std::string>
 compile_c(const Toolchain& tools, std::span<const std::string_view> sources,
-          std::span<const std::string_view> args, std::ostream& err) {
+          std::span<const std::string_view> args, std::ostream& err, Libc libc) {
     using R = core::Result<std::vector<std::uint8_t>, std::string>;
+    if (libc == Libc::Picolibc && picolibc_sysroot().empty()) {
+        return R::err("this malm is built without picolibc (MALM_PICOLIBC)");
+    }
     const TempDir tmp;
     if (!tmp.ok()) {
         return R::err(std::string("cannot create a temporary directory: ") + std::strerror(errno));
@@ -207,8 +212,22 @@ compile_c(const Toolchain& tools, std::span<const std::string_view> sources,
         fs::create_directories(p.parent_path(), ec);
         std::ofstream(p, std::ios::binary)
             .write(f.text.data(), static_cast<std::streamsize>(f.text.size()));
-        if (f.path.starts_with("src/")) {
+        if (libc == Libc::Minimal && f.path.starts_with("src/")) {
             libc_sources.push_back(p);
+        }
+    }
+    // picolibc: its headers and libraries, and libmalm.a, its system interface.
+    fs::path include = dir / "include";
+    std::vector<std::string> libs;
+    if (libc == Libc::Picolibc) {
+        const fs::path sysroot = dir / "picolibc";
+        const std::string unpacked = unpack_tar_zst(picolibc_sysroot(), sysroot);
+        if (!unpacked.empty()) {
+            return R::err("internal error: the picolibc sysroot: " + unpacked);
+        }
+        include = sysroot / "include";
+        for (const char* lib : {"libmalm.a", "libc.a", "libclang_rt.builtins.a"}) {
+            libs.push_back((sysroot / "lib" / lib).string());
         }
     }
 
@@ -227,7 +246,7 @@ compile_c(const Toolchain& tools, std::span<const std::string_view> sources,
 
     // crt0 first and alone: if the compiler cannot target riscv32, this is where it says so.
     std::string error;
-    const std::vector<std::string> target = target_flags(dir);
+    const std::vector<std::string> target = target_flags(include);
     const fs::path crt0 = dir / "crt0.o";
     std::vector<std::string> argv{tools.cc};
     argv.insert(argv.end(), target.begin(), target.end());
@@ -242,7 +261,7 @@ compile_c(const Toolchain& tools, std::span<const std::string_view> sources,
                                  "with the RISC-V target)");
     }
 
-    // The libc and the program's sources in parallel; the libc's output only if it fails.
+    // The minimal libc and the program's sources in parallel; the libc's output only if it fails.
     struct Compile {
         Job job;
         bool runtime;
@@ -297,9 +316,13 @@ compile_c(const Toolchain& tools, std::span<const std::string_view> sources,
     argv.insert(argv.end(), ld_args.begin(), ld_args.end());
     argv.push_back(crt0.string());
     argv.insert(argv.end(), objects.begin(), objects.end());
-    argv.emplace_back("--start-lib");
-    argv.insert(argv.end(), libc_objects.begin(), libc_objects.end());
-    argv.insert(argv.end(), {"--end-lib", "-o", elf.string()});
+    if (!libc_objects.empty()) {
+        argv.emplace_back("--start-lib");
+        argv.insert(argv.end(), libc_objects.begin(), libc_objects.end());
+        argv.emplace_back("--end-lib");
+    }
+    argv.insert(argv.end(), libs.begin(), libs.end());
+    argv.insert(argv.end(), {"-o", elf.string()});
     if (!run(argv, dir / "ld.log", err, error)) {
         return R::err(error.empty() ? "linking failed" : error);
     }

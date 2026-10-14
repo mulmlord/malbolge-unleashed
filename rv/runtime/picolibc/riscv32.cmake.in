@@ -1,0 +1,10 @@
+# CMake toolchain file for the picolibc runtime (rv/runtime/CMakeLists.txt): rv32im, ilp32.
+set(CMAKE_SYSTEM_NAME Generic)
+set(CMAKE_SYSTEM_PROCESSOR riscv)
+set(CMAKE_C_COMPILER "@MALM_RV_CC@")
+set(CMAKE_C_COMPILER_TARGET riscv32-unknown-elf)
+set(CMAKE_ASM_COMPILER_TARGET riscv32-unknown-elf)
+set(CMAKE_AR "@MALM_RV_AR@")
+set(CMAKE_C_FLAGS_INIT "-march=rv32im -mabi=ilp32")
+set(CMAKE_ASM_FLAGS_INIT "-march=rv32im -mabi=ilp32")
+set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)

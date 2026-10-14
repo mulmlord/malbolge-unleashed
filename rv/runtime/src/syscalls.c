@@ -1,11 +1,14 @@
-// ecall wrappers (docs/rv.md section 4) and the program break.
+// ecall wrappers (docs/rv.md section 4) and the program break. Also part of the picolibc build
+// (picolibc/CMakeLists.txt), whose libc defines errno.
 #include <errno.h>
 #include <stdint.h>
 #include <unistd.h>
 
 enum { SYS_read = 63, SYS_write = 64, SYS_exit = 93, SYS_brk = 214, SYS_dump_regs = 255 };
 
+#ifndef __PICOLIBC__
 int errno;
+#endif
 char* __malm_stack_top; // the initial sp, set by crt0
 
 extern char __stack_size[]; // link.ld
