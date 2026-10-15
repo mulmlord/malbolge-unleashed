@@ -110,7 +110,7 @@ RV32IM ELF ──┬─ emu mode: emu.malm + startup code that builds the RAM im
 ## 4. `.malm` format and native executables
 
 - **Container:** magic `MALM`, format version, mode (`unleashed` | `classic`), flags (`EXIT_A`), codec, cell count, CRC32, then the payload.
-- **Payload:** the program in *normalized* form (8 symbols, 3 bits per cell, packed), compressed with zstd. zstd comes via CMake FetchContent and is statically linked. Denormalization on load reproduces the exact program text. The container holds the program and nothing else; it carries no data `[R §4.1, §5d]`.
+- **Payload:** the program in *normalized* form (8 symbols), compressed with zstd, one symbol per byte (issue #39; 3 bits per cell, packed, before it). zstd comes via CMake FetchContent and is statically linked. Denormalization on load reproduces the exact program text. The container holds the program and nothing else; it carries no data `[R §4.1, §5d]`.
 - `malm run` also accepts plain Malbolge text (`.mal`, `.mu`, or any file without the `MALM` magic).
 - **Native executable:** `malm pack` copies the running `malm` binary (`/proc/self/exe`; built statically) and appends the `.malm` file plus a trailer (`MALMEXE1`, payload offset, length). At startup, `malm` checks its own tail. If a trailer is present, it runs the attached program with the process's stdin and stdout and ignores the CLI. No C++ compiler is needed at pack time.
 - **Exit status:** `A mod 256` on halt when `EXIT_A` is set; otherwise 0 on halt. 1 on a VM error.

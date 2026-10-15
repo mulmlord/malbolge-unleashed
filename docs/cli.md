@@ -177,12 +177,14 @@ they were produced from the executable model of the spec, not from the VM.
 ## `malm export`
 
 ```
-usage: malm export (--text|--malm) [--classic] [--exit-a] [--codec packed|zstd]
-                   [--max-cells N] -o <out> [--] <in>
+usage: malm export (--text|--malm) [--classic] [--exit-a]
+                   [--codec packed|zstd|zstd-packed] [--max-cells N] -o <out> [--] <in>
        (-o - writes to stdout; --exit-a and --codec apply to --malm only)
 ```
 
-`--malm` writes a `.malm` (default codec `zstd`; `--exit-a` sets the header flag), `--text` writes
+`--malm` writes a `.malm` (default codec `zstd`, codec 2 of [malm-format.md](malm-format.md);
+`zstd-packed` is codec 1, which malm versions before codec 2 read; `--exit-a` sets the header
+flag), `--text` writes
 the program as Malbolge text with one trailing newline. Converting a `.malm` that is classic or has
 `EXIT_A` to text prints a warning, because text cannot carry either. Exit codes as above.
 
