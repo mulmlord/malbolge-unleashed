@@ -1,10 +1,13 @@
 // The rest of the POSIX interface picolibc builds on, for a machine with stdin and stdout and
-// nothing else (docs/rv.md section 6): there are no files and no clock, so fopen, remove, time and
-// clock link and fail at run time. stdin and stdout are pipes. Every signal ends the program like
-// an uncaught signal in a shell, with status 128 + sig (abort: 134, as in the minimal runtime).
+// nothing else (docs/rv.md section 6): there are no files, no clock and no processes, so fopen,
+// remove, rename, time, clock and system link and fail at run time. stdin and stdout are pipes.
+// Every signal ends the program like an uncaught signal in a shell, with status 128 + sig (abort:
+// 134, as in the minimal runtime).
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <sys/time.h>
 #include <sys/times.h>
 #include <unistd.h>
@@ -39,6 +42,15 @@ int unlink(const char* path) {
     (void)path;
     return fail(ENOSYS);
 }
+
+int rename(const char* from, const char* to) {
+    (void)from;
+    (void)to;
+    return fail(ENOSYS);
+}
+
+// No shell: system(NULL) says so. picolibc's would fork, which needs more than ENOSYS stubs.
+int system(const char* command) { return command == NULL ? 0 : fail(ENOSYS); }
 
 int gettimeofday(struct timeval* restrict tv, void* restrict tz) {
     (void)tv;

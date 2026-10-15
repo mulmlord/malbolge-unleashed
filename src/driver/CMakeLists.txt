@@ -1,7 +1,7 @@
 configure_file(version.hpp.in "${CMAKE_CURRENT_BINARY_DIR}/generated/version.hpp" @ONLY)
 
 # The RISC-V runtime as byte arrays (runtime_files.hpp), for `malm build` of C, C++, Rust and Zig
-# sources.
+# sources and Lua scripts.
 set(rt_dir "${PROJECT_SOURCE_DIR}/rv/runtime")
 file(GLOB rt_files CONFIGURE_DEPENDS "${rt_dir}/include/*.h" "${rt_dir}/src/*.c"
     "${rt_dir}/rust/*.rs" "${rt_dir}/zig/*.zig")
@@ -10,7 +10,7 @@ add_custom_command(OUTPUT "${rt_embed}"
     COMMAND "${CMAKE_COMMAND}" -DRUNTIME_DIR=${rt_dir} -DOUTPUT=${rt_embed}
         -P "${PROJECT_SOURCE_DIR}/cmake/EmbedRuntime.cmake"
     DEPENDS "${PROJECT_SOURCE_DIR}/cmake/EmbedRuntime.cmake" "${rt_dir}/crt0.S" "${rt_dir}/link.ld"
-        ${rt_files}
+        "${rt_dir}/lua/script.S" ${rt_files}
     COMMENT "Embedding the RISC-V runtime"
     VERBATIM)
 

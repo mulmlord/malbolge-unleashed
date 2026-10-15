@@ -88,7 +88,8 @@ instructions from 1, the faulting one included. Reasons:
 script (`link.ld`), the system call wrappers and a minimal C library (`include/`, `src/`), or
 instead [picolibc](https://github.com/picolibc/picolibc), the full C library (`malm build --libc
 picolibc`, below), which comes with libc++ for C++ (below). A Rust program needs the same linker
-script and the runtime crate `rust/malm.rs`, a Zig program the Zig runtime `zig/` (below).
+script and the runtime crate `rust/malm.rs`, a Zig program the Zig runtime `zig/`, a Lua script
+Lua's interpreter `lua/` (below).
 
 ### Toolchain and linking
 
@@ -186,14 +187,15 @@ These are built when `malm` is built, with the RISC-V toolchain of section 7 (an
 `ar`): `rv/runtime/CMakeLists.txt` fetches picolibc 1.8.12 and LLVM 20.1.8 (pinned release
 tarballs; of LLVM's 140 MB only compiler-rt's builtins and the C++ runtimes are extracted),
 cross-compiles them with CMake (`-O2`; picolibc without thread-local storage and locking, so
-`errno` is a plain global), and packs headers and libraries, libc++'s too, into a tar compressed
-with zstd's highest level (`cmake/PackSysroot.cmake`), about 1.9 MB, that is built into `malm`
-(4.3 MB with it, 2.3 MB without; `malm pack` copies all of it into every executable it makes).
+`errno` is a plain global), and packs headers and libraries, libc++'s and Lua's (below) too, into a
+tar compressed with zstd's highest level (`cmake/PackSysroot.cmake`), about 2.0 MB (0.19 MB of it
+Lua), that is built into `malm` (4.6 MB with it, 2.3 MB without; `malm pack` copies all of it into
+every executable it makes).
 `malm build` unpacks it into its temporary directory. The
 CMake cache variable `MALM_PICOLIBC` controls this like `MALM_RV_TESTS`: `AUTO` (default) builds
 it when the toolchain is found and otherwise builds `malm` without it, with a warning; `ON` makes a
 missing toolchain a configure error; `OFF` leaves it out. A `malm` without picolibc rejects
-`--libc picolibc` and C++.
+`--libc picolibc`, C++ and Lua.
 
 `libmalm.a` keeps the minimal runtime's behaviour:
 
@@ -207,8 +209,9 @@ missing toolchain a configure error; `OFF` leaves it out. A `malm` without picol
 - **memset** is the minimal runtime's (`picolibc/memset.c`), taken before picolibc's because
   `libmalm.a` comes first in the link: picolibc's assembly `memset` jumps into the middle of a
   table of stores, which aot mode cannot follow (section 9).
-- **Everything else** fails (`picolibc/posix.c`): there are no files and no clock, so `fopen`,
-  `remove` and `open` fail with `ENOSYS`, `time` and `clock` return -1; `lseek` on the standard
+- **Everything else** fails (`picolibc/posix.c`): there are no files, no clock and no processes,
+  so `fopen`, `remove`, `rename`, `open` and `system` fail with `ENOSYS` (`system(NULL)` is 0: no
+  shell), `time` and `clock` return -1; `lseek` on the standard
   streams gives `ESPIPE`, `isatty` 0. `raise` ends the program with status 128 + the signal, so
   `abort` exits with 134. A failed `assert` prints picolibc's message (`assertion "expr" failed:
   file "f.c", line 3, function: main`) on stderr and aborts.
@@ -388,6 +391,60 @@ Aot mode works too. **Size.** `examples/zig/hello.zig` is 6.6 KB of code, `cat.z
 guest RAM, sort's 36 KB and the default 64 KiB stack reserve leave no heap, a 16 KiB reserve none
 either; its tests use 8 KiB (`-- -Wl,--defsym=__stack_size=8192`).
 
+### Lua
+
+`malm build script.lua` builds a guest that runs a Lua script: [Lua](https://www.lua.org/) 5.5.1's
+interpreter with the script linked into it. Lua is built with picolibc (above) when `malm` is built
+(`rv/runtime/lua/CMakeLists.txt`; the pinned release tarball, Lua's ISO C configuration) into
+`lib/liblua.a` of the sysroot: Lua's core and standard libraries, and `lua/main.c`, the interpreter.
+`malm build` writes the script into its temporary directory as `script.lua`, with its chunk name
+(`@` and the script's file name) as `script.name`, assembles `lua/script.S`, which includes both
+(`.incbin`), with clang, and links that with `liblua.a`, picolibc, crt0 and `link.ld` with
+ld.lld; nothing is compiled. The arguments after `--` can only be linker arguments (`-Wl,...`).
+By hand, as the CMake build in `tests/rv` does it:
+
+```sh
+mkdir s && cp script.lua s/script.lua && printf '@script.lua' > s/script.name
+clang --target=riscv32-unknown-elf -march=rv32im -mabi=ilp32 -I s -c rv/runtime/lua/script.S -o script.o
+ld.lld -T rv/runtime/link.ld --gc-sections crt0.o script.o $sysroot/lib/liblua.a \
+    $sysroot/lib/libmalm.a $sysroot/lib/libc.a $sysroot/lib/libclang_rt.builtins.a -o script.elf
+```
+
+- **The interpreter** runs the script as `lua script.lua` does, without the stand-alone
+  interpreter's options, `LUA_INIT` and script arguments: all standard libraries, the global `arg`
+  with the script's name at index 0, the generational collector. An error, also a syntax error
+  (the script is first parsed when it runs), prints `lua: script.lua:3: message` and a stack
+  traceback on stderr, and the status is 1; `os.exit(n)` flushes stdout and ends with `n`, a script
+  that ends exits with 0.
+- **I/O** is picolibc's, with `libmalm.a`'s buffering (above): `print` and `io.write` go to stdout,
+  `io.read` and `io.lines` read stdin.
+- **Numbers** are standard Lua's: 64-bit integers and double-precision floats, both computed in
+  software (compiler-rt).
+- **The rest** fails as picolibc's does (above): `io.open`, `os.remove`, `os.rename` and
+  `os.execute(command)` return `nil` and `Function not implemented`, `os.execute()` is false (no
+  shell), `os.getenv` is nil, `io.popen` is not supported, and `require` finds nothing but
+  `package.preload`. There is no clock: `os.time()` raises an error, `os.date()` shows the second
+  before the epoch and `os.clock()` a huge number (`clock`'s `(clock_t)-1`). `math.random`'s
+  seed, from the clock and addresses, is the same on every run.
+
+Lua runs in emu mode only: its interpreter is 78 000 instructions (340 KB of code with its
+data), which aot mode (section 9) would turn into about 2 G characters of Malbolge, so `malm build
+--mode aot` refuses a `.lua`. In emu mode the code costs RAM, not text: the image is 350 KB, and with the heap Lua needs
+`--ram 512K` (the tests' size) or more.
+
+**Speed.** Lua's start-up (`luaL_newstate`, the standard libraries) runs 310 K guest instructions,
+`print('hi')` 322 K, a loop of 1 000 additions 426 K; in emu mode that is about 8 800 VM steps per
+instruction (section 8). `print('hi')`, release build, measured back to back on a desktop machine:
+
+| guest RAM | build | `.malm` | VM steps | run | host memory |
+|---|---|---|---|---|---|
+| 512 KiB | 14 s | 3.8 MB | 2.82 G | 59 s | 2.9 GB |
+| 1 MiB (the default) | 25 s | 4.5 MB | 2.92 G | 62 s | 5.3 GB |
+
+The packed executable (`--exe`, 512 KiB) prints `hi` in 53 s, as fast as `malm run`. That is about 5 500 guest instructions
+per second; an iteration of `for i = 1, n do s = s + i end` is 104 of them, so about 50 iterations
+per second: a script that does real work runs for minutes to hours.
+
 ## 7. Tests
 
 `tests/rv/`: unit tests for the loader and every instruction class (`rv_test`), the official
@@ -406,7 +463,12 @@ the self-check also with exceptions and RTTI (`rvref_cxx_eh_*`). The Rust exampl
 runtime (the allocator, `alloc`'s collections, 64- and 128-bit arithmetic, soft floating point and
 its formatting; with input `panic`, `error` or `exit` its panic, an `Err` from `main` and
 `process::exit`), run as `rvref_rust_*`; the Zig examples (`examples/zig`: hello, cat, sort) and
-`tests/rv/programs/zig_test.zig`, the same for the Zig runtime, as `rvref_zig_*`.
+`tests/rv/programs/zig_test.zig`, the same for the Zig runtime, as `rvref_zig_*`; the Lua examples
+(`examples/lua`: hello, cat, sort) and `tests/rv/programs/lua_test.lua`, a self-check of Lua on
+picolibc (64-bit integers and floating point, strings and `string.pack`, tables, coroutines,
+errors, the collector and the missing files and clock; with input `panic`, `error` or `exit` an
+error with its traceback and `os.exit`), linked with the interpreter as `malm build` links them,
+as `rvref_lua_*`.
 `rv_toolchain_test` compiles C with `malm build`'s toolchain code and the runtime built into
 `malm`, with either C library, and C++, and runs the result on the reference emulator; `rv_test` unpacks
 the picolibc sysroot and hand-made archives (`sysroot_test.cpp`); the `build_c_*` and `build_c_aot_*` tests
@@ -416,8 +478,9 @@ need `MALM_BUILD_EMU`); `build_c_picolibc_*` do the same with picolibc in emu mo
 (`fast`); `build_cpp_*` and `build_cpp_aot_*` build the C++ examples, the M5 criterion for C++
 (`build_cpp_sort` is `fast`); `build_rust_*` and `build_rust_aot_*` build the Rust examples, the M5
 criterion for Rust (`build_rust_cat` is `fast`), `build_zig_*` and `build_zig_aot_*` the Zig
-examples, the M5 criterion for Zig (`build_zig_cat` is `fast`), and `rv_toolchain_test` also
-compiles Rust and Zig.
+examples, the M5 criterion for Zig (`build_zig_cat` is `fast`), `build_lua_*` the Lua examples in
+emu mode with 512 KiB of guest RAM, the M5 criterion for Lua (`print` in hello; all `slow`, about a
+minute per run), and `rv_toolchain_test` also compiles Rust and Zig, and builds Lua scripts.
 `rv_emu_test` runs rv-emu against the reference emulator one instruction at a time (section 8).
 `rv_aot_test` checks rv-aot's control-flow graph and runs translated hand-assembled programs
 (random ALU code; loads, stores, branches, calls, a jump table and the system calls; every fault
@@ -454,6 +517,8 @@ riscv-tests, that the reference emulator passes (status 0).
 - `rvdiff_program_rust_*`, `rvdiff_program_zig_*`: the Rust and Zig examples hello (`fast`), cat
   and sort with 64 KiB, and the runtimes' self-checks with 256 KiB on their four inputs (42, the
   panic's 101 or 134, 1 and 7), about two and a half minutes each.
+- `rvdiff_program_lua_hello`: Lua's hello with 512 KiB, in emu mode only (`slow`, about a
+  minute).
 
 They need `MALM_BUILD_EMU`, so the debug preset leaves them out. The `build_c_*` and
 `build_c_aot_*` tests check the same examples against fixed expected output, built from C by

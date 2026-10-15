@@ -1,10 +1,10 @@
 #!/bin/sh
 # Real-pipe tests for `malm rvref` on the clang-built test programs, bare and on the runtime, with
 # the minimal C library or with picolibc (the programs named picolibc_*), the C++ programs with
-# libc++ (cxx_*), also with exceptions and RTTI (cxx_eh_*), and the Rust and Zig programs (rust_*,
-# zig_*).
+# libc++ (cxx_*), also with exceptions and RTTI (cxx_eh_*), the Rust and Zig programs (rust_*,
+# zig_*) and the Lua scripts with Lua's interpreter (lua_*).
 # Usage: rvref_pipe_test.sh <malm> <elf-dir> <programs-dir> <case>
-#            [minimal|picolibc|cxx|cxx_eh|rust|zig]
+#            [minimal|picolibc|cxx|cxx_eh|rust|zig|lua]
 set -u
 malm=$1
 elf=$2
@@ -147,7 +147,7 @@ abort)
     test "$(cat "$tmp/out")" = "$want" || exit 1
     ;;
 checks)
-    # Rust and Zig: the runtime's self-check, ending with main's 42.
+    # Rust, Zig and Lua: the runtime's self-check, ending with main's 42 (Lua: os.exit(42)).
     status=0
     "$malm" rvref "$elf/${p}test.elf" < /dev/null > "$tmp/out" || status=$?
     if [ "$status" != 42 ]; then
@@ -158,12 +158,18 @@ checks)
     test "$(wc -l < "$tmp/out")" = 1 || exit 1
     ;;
 panic)
-    # Rust and Zig: what stdout has buffered, then the panic: for Rust its location and message
-    # and status 101, for Zig its message and abort's 134.
+    # Rust, Zig and Lua: what stdout has buffered, then the panic: for Rust its location and
+    # message and status 101, for Zig its message and abort's 134, for Lua the error (indexing nil)
+    # with a traceback and status 1.
     status=0
     echo panic | "$malm" rvref "$elf/${p}test.elf" > "$tmp/out" || status=$?
     sed -n 1p "$tmp/out" | grep -qx 'before the panic' || exit 1
-    if [ "$libc" = zig ]; then
+    if [ "$libc" = lua ]; then
+        test "$status" = 1 || exit 1
+        sed -n 2p "$tmp/out" | grep -Eqx \
+            "lua: lua_test\.lua:[0-9]+: attempt to index a nil value \(local 't'\)" || exit 1
+        test "$(sed -n 3p "$tmp/out")" = 'stack traceback:' || exit 1
+    elif [ "$libc" = zig ]; then
         test "$status" = 134 || exit 1
         test "$(sed -n '2,$p' "$tmp/out")" = 'panic: index out of bounds: index 5, len 3' || exit 1
     else
@@ -175,8 +181,15 @@ panic)
     ;;
 error)
     # Rust and Zig: main returns an error: on stderr its Debug form (Rust) or name (Zig), status 1.
+    # Lua: error() with a traceback, status 1.
     status=0
     echo error | "$malm" rvref "$elf/${p}test.elf" > "$tmp/out" || status=$?
+    if [ "$libc" = lua ]; then
+        test "$status" = 1 || exit 1
+        sed -n 1p "$tmp/out" | grep -Eqx 'lua: lua_test\.lua:[0-9]+: asked for it' || exit 1
+        test "$(sed -n 2p "$tmp/out")" = 'stack traceback:' || exit 1
+        exit 0
+    fi
     want='Error: "asked for it"'
     if [ "$libc" = zig ]; then
         want='error: AskedForIt'
@@ -184,7 +197,7 @@ error)
     test "$status" = 1 && test "$(cat "$tmp/out")" = "$want" || exit 1
     ;;
 exit)
-    # Rust and Zig: process::exit (malm.exit) writes what stdout has buffered (no newline), then
+    # Rust, Zig and Lua: process::exit (malm.exit, os.exit) writes what stdout has buffered (no newline), then
     # ends with its status.
     status=0
     echo exit | "$malm" rvref "$elf/${p}test.elf" > "$tmp/out" || status=$?

@@ -1,11 +1,11 @@
-# The picolibc runtime (issue #32, docs/rv.md 6) for `malm build --libc picolibc` and C++ (issue
-# #33): picolibc, compiler-rt's builtins, picolibc/'s system interface and libc++ with libc++abi
-# (and libunwind for exceptions), cross-compiled with the RISC-V toolchain (cmake/RvToolchain.cmake)
+# The picolibc runtime (issue #32, docs/rv.md 6) for `malm build --libc picolibc`, C++ (issue #33)
+# and Lua (issue #36): picolibc, compiler-rt's builtins, picolibc/'s system interface, libc++ with
+# libc++abi (and libunwind for exceptions) and Lua's interpreter (lua/), cross-compiled with the RISC-V toolchain (cmake/RvToolchain.cmake)
 # into a sysroot (include/, lib/) that is packed into picolibc.tar.zst and built into malm
 # (src/driver). The minimal runtime here (crt0, link.ld, include/, src/) needs no build step: malm
 # embeds its sources (cmake/EmbedRuntime.cmake).
-set(MALM_PICOLIBC AUTO CACHE STRING "Build picolibc and libc++ into malm (malm build --libc \
-picolibc, C++): AUTO (if the RISC-V toolchain is found), ON, OFF")
+set(MALM_PICOLIBC AUTO CACHE STRING "Build picolibc, libc++ and Lua into malm (malm build --libc \
+picolibc, C++, Lua): AUTO (if the RISC-V toolchain is found), ON, OFF")
 set_property(CACHE MALM_PICOLIBC PROPERTY STRINGS AUTO ON OFF)
 if(MALM_PICOLIBC STREQUAL "OFF")
     return()
@@ -27,6 +27,12 @@ FetchContent_Declare(picolibc
     URL_HASH SHA256=64e8c412e1c40fa6eb1a72d2b5cdbcbfe6ceca4cbea454edbad54557ffc747fa
     DOWNLOAD_EXTRACT_TIMESTAMP ON
     SOURCE_SUBDIR none)
+# Lua 5.5.1 for `malm build script.lua`, built into liblua.a below.
+FetchContent_Declare(lua
+    URL https://www.lua.org/ftp/lua-5.5.1.tar.gz
+    URL_HASH SHA256=1c4b4068d67061f2a2231ad2b5422e77acea1487ea9890f6320af614f4373dce
+    DOWNLOAD_EXTRACT_TIMESTAMP ON
+    SOURCE_SUBDIR none)
 # LLVM's whole source (140 MB), of which only compiler-rt's builtins and the C++ runtimes with what
 # their build needs (runtimes/, cmake/, llvm/cmake and LLVM libc's headers, which libc++'s
 # floating-point from_chars uses) are extracted, once.
@@ -35,7 +41,7 @@ FetchContent_Declare(llvm_project
     URL_HASH SHA256=6898f963c8e938981e6c4a302e83ec5beb4630147c7311183cf61069af16333d
     DOWNLOAD_NO_EXTRACT ON
     SOURCE_SUBDIR none)
-FetchContent_MakeAvailable(picolibc llvm_project)
+FetchContent_MakeAvailable(picolibc lua llvm_project)
 set(llvm_parts compiler-rt/lib/builtins libcxx libcxxabi libunwind runtimes cmake llvm/cmake
     libc/shared libc/src/__support libc/src/errno libc/hdr libc/include)
 set(llvm_dir "${CMAKE_CURRENT_BINARY_DIR}/llvm-project")
@@ -60,7 +66,7 @@ configure_file(picolibc/riscv32.cmake.in "${toolchain}" @ONLY)
 set(cross_args -DCMAKE_TOOLCHAIN_FILE=${toolchain} -DCMAKE_INSTALL_PREFIX=${sysroot}
     -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS_RELEASE=-O2)
 set(libs lib/libc.a lib/libmalm.a lib/libclang_rt.builtins.a lib/libc++.a lib/libc++abi.a
-    lib/eh/libc++.a lib/eh/libc++abi.a lib/eh/libunwind.a)
+    lib/eh/libc++.a lib/eh/libc++abi.a lib/eh/libunwind.a lib/liblua.a)
 
 # One hart and no thread pointer: errno is a plain global, stdio takes no locks.
 ExternalProject_Add(picolibc_libc
@@ -75,6 +81,14 @@ ExternalProject_Add(picolibc_runtime
     DEPENDS picolibc_libc
     BUILD_ALWAYS ON
     BUILD_BYPRODUCTS "${sysroot}/lib/libmalm.a" "${sysroot}/lib/libclang_rt.builtins.a")
+# Lua and its interpreter's main, built every time like the runtime above.
+ExternalProject_Add(picolibc_lua
+    SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/lua"
+    CMAKE_ARGS ${cross_args} -DSYSROOT=${sysroot} -DLUA_DIR=${lua_SOURCE_DIR}
+        -DWERROR=${MALM_WERROR}
+    DEPENDS picolibc_libc
+    BUILD_ALWAYS ON
+    BUILD_BYPRODUCTS "${sysroot}/lib/liblua.a")
 
 # libc++ and libc++abi for C++ (docs/rv.md 6), twice: in lib/ without exceptions (the default), in
 # lib/eh/ with them and libunwind (`-fexceptions`). One hart, no files, clock or locales (so no
@@ -135,7 +149,7 @@ string(JOIN "|" paths include ${libs})
 add_custom_command(OUTPUT "${archive}"
     COMMAND "${CMAKE_COMMAND}" -DARCHIVE=${archive} -DPATHS=${paths}
         -P "${PROJECT_SOURCE_DIR}/cmake/PackSysroot.cmake"
-    DEPENDS picolibc_runtime picolibc_libcxx picolibc_libcxx_eh ${libs_abs}
+    DEPENDS picolibc_runtime picolibc_lua picolibc_libcxx picolibc_libcxx_eh ${libs_abs}
         "${PROJECT_SOURCE_DIR}/cmake/PackSysroot.cmake"
     WORKING_DIRECTORY "${sysroot}"
     COMMENT "Packing the picolibc sysroot"

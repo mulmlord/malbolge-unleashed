@@ -1,7 +1,7 @@
 // The RISC-V toolchains behind `malm build` (docs/rv.md 6): for C and C++ clang with the riscv32
 // target compiles the program, ld.lld links it with a runtime built into malm (runtime_files.hpp);
 // for Rust rustc compiles and links it with the runtime crate, for Zig zig with the Zig runtime,
-// both also built into malm.
+// both also built into malm. A Lua script is linked by ld.lld with Lua's interpreter.
 #pragma once
 
 #include <cstdint>
@@ -28,11 +28,12 @@ struct Toolchain {
 core::Result<Toolchain, std::string> find_toolchain(std::string_view cc, std::string_view path_env);
 
 // A C source ends in .c, a C++ source in .cpp, .cc or .cxx, a Rust source in .rs, a Zig source
-// in .zig.
+// in .zig, a Lua script in .lua.
 bool is_c_source(std::string_view path);
 bool is_cxx_source(std::string_view path);
 bool is_rust_source(std::string_view path);
 bool is_zig_source(std::string_view path);
+bool is_lua_source(std::string_view path);
 
 // Whether the compiler arguments turn C++ exceptions on: the last of -fexceptions and
 // -fno-exceptions is -fexceptions.
@@ -53,6 +54,17 @@ enum class Libc { Minimal, Picolibc };
 core::Result<std::vector<std::uint8_t>, std::string>
 compile_c(const Toolchain& tools, std::span<const std::string_view> sources,
           std::span<const std::string_view> args, std::ostream& err, Libc libc = Libc::Minimal);
+
+// Builds an RV32IM ELF executable that runs the Lua script `script`, in a temporary directory:
+// clang assembles the script into an object (lua/script.S, with its file name as the chunk name),
+// which ld.lld links with Lua's interpreter (liblua.a in the picolibc sysroot: Lua and
+// rv/runtime/lua/main.c), picolibc, crt0 and the linker script. `args` are the user's arguments
+// (`--` in `malm build`): `-Wl,a,b` passes `a` and `b` to the linker; anything else is an error, as
+// nothing is compiled. The output, the error and the failures are as compile_c's; it also fails if
+// malm was built without picolibc or the script cannot be read.
+core::Result<std::vector<std::uint8_t>, std::string>
+compile_lua(const Toolchain& tools, std::string_view script, std::span<const std::string_view> args,
+            std::ostream& err);
 
 // The Rust target malm builds for.
 inline constexpr std::string_view kRustTarget = "riscv32im-unknown-none-elf";

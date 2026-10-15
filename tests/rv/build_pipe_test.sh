@@ -1,12 +1,12 @@
 #!/bin/sh
-# `malm build` for C, C++, Rust and Zig end to end (issues #28, #29, #32-#35): an example from
-# examples/c, examples/cpp, examples/rust or examples/zig (<case>.c, .cpp, .rs or .zig) built in
-# emu or aot mode, with the minimal C library or picolibc, or as Rust or Zig, into a .malm and, with
-# --exe, a native executable; both run through real pipes and must give the expected stdout and
-# exit status.
+# `malm build` for C, C++, Rust, Zig and Lua end to end (issues #28, #29, #32-#36): an example
+# from examples/c, examples/cpp, examples/rust, examples/zig or examples/lua (<case>.c, .cpp, .rs,
+# .zig or .lua) built in emu or aot mode, with the minimal C library or picolibc, or as Rust, Zig
+# or Lua, into a .malm and, with --exe, a native executable; both run through real pipes and must
+# give the expected stdout and exit status.
 # Usage: build_pipe_test.sh <malm> <compiler> <examples-dir> <programs-dir> <case> [emu|aot]
-#            [minimal|picolibc|rust|zig]
-#   <compiler>  clang, or rustc for rust, zig for zig
+#            [minimal|picolibc|rust|zig|lua]
+#   <compiler>  clang (also for lua), or rustc for rust, zig for zig
 set -u
 malm=$1
 cc=$2
@@ -24,12 +24,15 @@ fi
 case "$libc" in
 rust) src=$examples/$case_.rs ;;
 zig) src=$examples/$case_.zig ;;
+lua) src=$examples/$case_.lua ;;
 esac
 
 # build [compiler args...]: prog.malm and the executable prog. 64K of guest RAM keeps the builds
-# short.
+# short; Lua's interpreter (350 KB of code) and its heap need 512K.
 build() {
-    if [ "$libc" = rust ]; then
+    if [ "$libc" = lua ]; then
+        set -- --mode "$mode" --ram 512K --cc "$cc" "$src" -- "$@"
+    elif [ "$libc" = rust ]; then
         set -- --mode "$mode" --ram 64K --rustc "$cc" "$src" -- "$@"
     elif [ "$libc" = zig ]; then
         set -- --mode "$mode" --ram 64K --zig "$cc" "$src" -- "$@"
@@ -88,8 +91,11 @@ fizzbuzz)
     ;;
 sort)
     # The heap stays __stack_size (default 64K) below the stack, which would leave sort no heap in
-    # 64K of guest RAM; Zig's (ReleaseSafe) code is 36 KB, which leaves room only for 8K.
-    if [ "$libc" = zig ]; then
+    # 64K of guest RAM; Zig's (ReleaseSafe) code is 36 KB, which leaves room only for 8K. Lua has
+    # 512K.
+    if [ "$libc" = lua ]; then
+        build
+    elif [ "$libc" = zig ]; then
         build -Wl,--defsym=__stack_size=8192
     else
         build -Wl,--defsym=__stack_size=16384

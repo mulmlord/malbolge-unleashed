@@ -1,7 +1,7 @@
-// malm build's C, C++, Rust and Zig toolchains (issues #28, #32-#35): compile_c with the real
-// clang and ld.lld and the runtime built into malm, compile_rust and compile_zig with the real
-// rustc and zig and their runtimes, the ELF run on the reference emulator. Fast, also in the debug
-// build: no emulator is compiled.
+// malm build's C, C++, Rust and Zig toolchains and Lua scripts (issues #28, #32-#36): compile_c
+// and compile_lua with the real clang and ld.lld and the runtime built into malm, compile_rust and
+// compile_zig with the real rustc and zig and their runtimes, the ELF run on the reference
+// emulator. Fast, also in the debug build: no emulator is compiled.
 
 #include <doctest/doctest.h>
 #include <unistd.h>
@@ -457,6 +457,85 @@ pub fn main() void {
     CHECK(c.error == "compilation failed");
 }
 
+namespace {
+
+Compiled compile_lua(std::string_view script, std::vector<std::string_view> args = {}) {
+    const auto tools = malm::find_toolchain(MALM_RV_CC, "");
+    REQUIRE(tools.has_value());
+    std::ostringstream diags;
+    auto elf = malm::compile_lua(*tools, script, args, diags);
+    Compiled c;
+    c.ok = elf.has_value();
+    c.diags = diags.str();
+    if (c.ok) {
+        c.elf = std::move(*elf);
+    } else {
+        c.error = elf.error();
+    }
+    return c;
+}
+
+} // namespace
+
+TEST_CASE("toolchain: Lua") {
+    if (malm::picolibc_sysroot().empty()) {
+        MESSAGE("malm is built without picolibc (MALM_PICOLIBC)");
+        return;
+    }
+    const Compiled hello = compile_lua(MALM_LUA_EXAMPLES_DIR "/hello.lua");
+    INFO(hello.diags);
+    REQUIRE(hello.ok);
+    CHECK(hello.diags.empty());
+    rvtest::StringIo io;
+    malm::rv::Stop stop = run(hello.elf, io);
+    CHECK(stop.exit_code == 0);
+    CHECK(io.out == "Hello, world!\n");
+
+    const Compiled sort = compile_lua(MALM_LUA_EXAMPLES_DIR "/sort.lua");
+    REQUIRE(sort.ok);
+    io = {};
+    io.in = "pear\napple\n\nfig";
+    stop = run(sort.elf, io);
+    CHECK(stop.exit_code == 0);
+    CHECK(io.out == "\napple\nfig\npear\n");
+
+    // The chunk name is the script's file name; an error has a traceback and status 1. Linker
+    // arguments reach the link: the exit dumps the registers.
+    const TempDir dir;
+    const std::string boom = dir.write("boom.lua", "error('boom')\n");
+    Compiled c = compile_lua(boom, {"-Wl,--defsym=__malm_dump_regs=1"});
+    INFO(c.diags);
+    REQUIRE(c.ok);
+    io = {};
+    stop = run(c.elf, io);
+    CHECK(stop.exit_code == 1);
+    CHECK(io.out.starts_with("lua: boom.lua:1: boom\nstack traceback:\n\t[C]: in global 'error'\n"
+                             "\tboom.lua:1: in main chunk\n\t[C]: in ?\n== registers ==\n"));
+
+    // A syntax error shows when the script runs, without a traceback.
+    const std::string bad = dir.write("bad.lua", "print(");
+    c = compile_lua(bad);
+    REQUIRE(c.ok);
+    io = {};
+    stop = run(c.elf, io);
+    CHECK(stop.exit_code == 1);
+    CHECK(io.out == "lua: bad.lua:1: unexpected symbol near <eof>\n");
+
+    // Nothing is compiled, so only linker arguments; and the linker's errors.
+    c = compile_lua(boom, {"-O2"});
+    CHECK(!c.ok);
+    CHECK(c.error == "unsupported argument '-O2' for Lua (only -Wl,<linker arguments>)");
+    c = compile_lua(boom, {"-Wl,--bogus"});
+    CHECK(!c.ok);
+    CHECK(c.error == "linking failed");
+    CHECK(c.diags.find("--bogus") != std::string::npos);
+
+    const std::string missing = (dir.path / "missing.lua").string();
+    c = compile_lua(missing);
+    CHECK(!c.ok);
+    CHECK(c.error == "cannot read '" + missing + "': No such file or directory");
+}
+
 TEST_CASE("toolchain: source kinds and exceptions") {
     CHECK(malm::is_c_source("a.c"));
     CHECK(!malm::is_c_source(".c"));
@@ -473,6 +552,9 @@ TEST_CASE("toolchain: source kinds and exceptions") {
     CHECK(malm::is_zig_source("src/main.zig"));
     CHECK(!malm::is_zig_source(".zig"));
     CHECK(!malm::is_zig_source("build.zig.zon"));
+    CHECK(malm::is_lua_source("scripts/hello.lua"));
+    CHECK(!malm::is_lua_source(".lua"));
+    CHECK(!malm::is_lua_source("a.luac"));
     using Args = std::vector<std::string_view>;
     CHECK(!malm::wants_exceptions(Args{}));
     CHECK(malm::wants_exceptions(Args{"-O1", "-fexceptions"}));

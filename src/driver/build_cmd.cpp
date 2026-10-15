@@ -29,7 +29,8 @@ constexpr std::string_view kUsage =
     "  --mode emu       run it in rv-emu, the RV32IM emulator (the default)\n"
     "  --mode aot       translate it to Malbolge ahead of time: faster, larger\n"
     "  --ram <size>     guest RAM in bytes, or with a K/M suffix (default 1M, at most 4M)\n"
-    "  --cc <compiler>  the compiler, clang with the riscv32 target (default: clang in PATH)\n"
+    "  --cc <compiler>  the compiler, clang with the riscv32 target (default: clang in PATH),\n"
+    "                   also for Lua\n"
     "  --libc minimal   link C sources with malm's minimal C library (the default for C)\n"
     "  --libc picolibc  link them with picolibc: the full C library, floating point,\n"
     "                   and libc++ (the default and only choice for C++)\n"
@@ -41,7 +42,8 @@ constexpr std::string_view kUsage =
     "  --exe -o <out>   write a native executable instead (malm pack)\n"
     "  <source>...      C (.c) and C++ (.cpp, .cc, .cxx) sources, or the root of a Rust\n"
     "                   crate (.rs) or a Zig program (.zig), compiled and linked with\n"
-    "                   malm's runtime (docs/rv.md)\n"
+    "                   malm's runtime (docs/rv.md), or a Lua script (.lua), linked with\n"
+    "                   Lua's interpreter (emu mode only)\n"
     "  <prog.elf>       an RV32IM ELF executable\n"
     "  -- <args>...     the rest goes to the compiler; -Wl,<args> to the linker\n";
 
@@ -51,7 +53,7 @@ int usage_error(std::ostream& err, std::string_view msg) {
 }
 
 // What `malm build` builds from.
-enum class Input { C, Rust, Zig, Elf };
+enum class Input { C, Rust, Zig, Lua, Elf };
 
 Input input_kind(std::string_view path) {
     if (is_c_source(path) || is_cxx_source(path)) {
@@ -60,7 +62,10 @@ Input input_kind(std::string_view path) {
     if (is_rust_source(path)) {
         return Input::Rust;
     }
-    return is_zig_source(path) ? Input::Zig : Input::Elf;
+    if (is_zig_source(path)) {
+        return Input::Zig;
+    }
+    return is_lua_source(path) ? Input::Lua : Input::Elf;
 }
 
 bool is_elf(const std::vector<std::uint8_t>& bytes) {
@@ -203,13 +208,16 @@ int build_command_with(std::span<const std::string_view> args, std::ostream& out
     bool cxx = false;
     for (const std::string_view input : inputs) {
         if (input_kind(input) != kind || (!c && inputs.size() > 1)) {
-            return usage_error(err, "give C or C++ sources, one Rust or Zig source or one ELF "
-                                    "executable");
+            return usage_error(err, "give C or C++ sources, one Rust or Zig source, one Lua "
+                                    "script or one ELF executable");
         }
         cxx = cxx || is_cxx_source(input);
     }
-    if (!c && (cc || libc)) {
-        return usage_error(err, "--cc and --libc need C or C++ sources");
+    if (!c && libc) {
+        return usage_error(err, "--libc needs C or C++ sources");
+    }
+    if (!c && kind != Input::Lua && cc) {
+        return usage_error(err, "--cc needs C or C++ sources or a Lua script");
     }
     if (kind != Input::Rust && rustc) {
         return usage_error(err, "--rustc needs a Rust source");
@@ -235,16 +243,23 @@ int build_command_with(std::span<const std::string_view> args, std::ostream& out
         err << "malm build: C++ exceptions (-fexceptions) are not supported in aot mode\n";
         return 1;
     }
+    // Lua's interpreter is 78 000 instructions, about 2 G characters of Malbolge in aot mode.
+    if (kind == Input::Lua && aot) {
+        err << "malm build: Lua scripts run in emu mode only (Lua's interpreter is too large for "
+               "aot mode)\n";
+        return 1;
+    }
 
     std::vector<std::uint8_t> bytes;
-    if (c) {
+    if (c || kind == Input::Lua) {
         const auto tools = find_toolchain(cc.value_or(""), path_env);
         if (!tools) {
             err << "malm build: " << tools.error() << '\n';
             return 1;
         }
-        auto elf = compile_c(*tools, inputs, cc_args, err,
-                             libc.value_or(cxx ? Libc::Picolibc : Libc::Minimal));
+        auto elf = c ? compile_c(*tools, inputs, cc_args, err,
+                                 libc.value_or(cxx ? Libc::Picolibc : Libc::Minimal))
+                     : compile_lua(*tools, inputs.front(), cc_args, err);
         if (!elf) {
             err << "malm build: " << elf.error() << '\n';
             return 1;
@@ -280,8 +295,8 @@ int build_command_with(std::span<const std::string_view> args, std::ostream& out
         }
         if (!is_elf(bytes)) {
             err << "malm build: " << inputs.front()
-                << ": neither a C, C++, Rust or Zig source (.c, .cpp, .cc, .cxx, .rs, .zig) nor "
-                   "an ELF executable\n";
+                << ": neither a C, C++, Rust or Zig source (.c, .cpp, .cc, .cxx, .rs, .zig), a Lua "
+                   "script (.lua) nor an ELF executable\n";
             return 1;
         }
     }

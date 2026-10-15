@@ -219,6 +219,40 @@ core::Result<std::vector<std::uint8_t>, std::string> read_elf(const fs::path& el
                                            std::istreambuf_iterator<char>()));
 }
 
+// Unpacks the picolibc sysroot into `dir`/picolibc and returns that path.
+core::Result<fs::path, std::string> unpack_picolibc(const fs::path& dir) {
+    using R = core::Result<fs::path, std::string>;
+    const fs::path sysroot = dir / "picolibc";
+    const std::string unpacked = unpack_tar_zst(picolibc_sysroot(), sysroot);
+    if (!unpacked.empty()) {
+        return R::err("internal error: the picolibc sysroot: " + unpacked);
+    }
+    return R::ok(sysroot);
+}
+
+// Assembles the runtime's crt0.S in `dir` into crt0.o there, first and alone: if the compiler
+// cannot target riscv32, this is where it says so.
+core::Result<fs::path, std::string> compile_crt0(const Toolchain& tools, const fs::path& dir,
+                                                 std::span<const std::string> target,
+                                                 std::ostream& err) {
+    using R = core::Result<fs::path, std::string>;
+    const fs::path crt0 = dir / "crt0.o";
+    std::vector<std::string> argv{tools.cc};
+    argv.insert(argv.end(), target.begin(), target.end());
+    argv.insert(argv.end(), {"-c", (dir / "crt0.S").string(), "-o", crt0.string()});
+    std::string error;
+    std::ostringstream probe;
+    if (!run(argv, dir / "crt0.log", probe, error)) {
+        if (!error.empty()) {
+            return R::err(error);
+        }
+        err << probe.str();
+        return R::err(tools.cc + " cannot compile for riscv32-unknown-elf (malm build needs clang "
+                                 "with the RISC-V target)");
+    }
+    return R::ok(crt0);
+}
+
 } // namespace
 
 bool is_c_source(std::string_view path) { return ends_with_any(path, {".c"}); }
@@ -228,6 +262,8 @@ bool is_cxx_source(std::string_view path) { return ends_with_any(path, {".cpp", 
 bool is_rust_source(std::string_view path) { return ends_with_any(path, {".rs"}); }
 
 bool is_zig_source(std::string_view path) { return ends_with_any(path, {".zig"}); }
+
+bool is_lua_source(std::string_view path) { return ends_with_any(path, {".lua"}); }
 
 bool wants_exceptions(std::span<const std::string_view> args) {
     bool on = false;
@@ -293,7 +329,7 @@ compile_c(const Toolchain& tools, std::span<const std::string_view> sources,
     }
     const fs::path& dir = tmp.path();
     const std::vector<fs::path> runtime_paths = write_runtime(dir, [](std::string_view path) {
-        return !path.starts_with("rust/") && !path.starts_with("zig/");
+        return !path.starts_with("rust/") && !path.starts_with("zig/") && !path.starts_with("lua/");
     });
     std::vector<fs::path> libc_sources;
     if (libc == Libc::Minimal) {
@@ -314,11 +350,11 @@ compile_c(const Toolchain& tools, std::span<const std::string_view> sources,
     fs::path cxx_include;
     std::vector<std::string> libs;
     if (libc == Libc::Picolibc) {
-        const fs::path sysroot = dir / "picolibc";
-        const std::string unpacked = unpack_tar_zst(picolibc_sysroot(), sysroot);
-        if (!unpacked.empty()) {
-            return R::err("internal error: the picolibc sysroot: " + unpacked);
+        const auto unpacked = unpack_picolibc(dir);
+        if (!unpacked) {
+            return R::err(unpacked.error());
         }
+        const fs::path& sysroot = *unpacked;
         include = sysroot / "include";
         cxx_include = include / "c++" / "v1";
         if (cxx) {
@@ -336,26 +372,16 @@ compile_c(const Toolchain& tools, std::span<const std::string_view> sources,
         }
     }
 
-    // crt0 first and alone: if the compiler cannot target riscv32, this is where it says so.
-    std::string error;
     const std::vector<std::string> target = target_flags({include});
-    const fs::path crt0 = dir / "crt0.o";
-    std::vector<std::string> argv{tools.cc};
-    argv.insert(argv.end(), target.begin(), target.end());
-    argv.insert(argv.end(), {"-c", (dir / "crt0.S").string(), "-o", crt0.string()});
-    std::ostringstream probe;
-    if (!run(argv, dir / "crt0.log", probe, error)) {
-        if (!error.empty()) {
-            return R::err(error);
-        }
-        err << probe.str();
-        return R::err(tools.cc + " cannot compile for riscv32-unknown-elf (malm build needs clang "
-                                 "with the RISC-V target)");
+    const auto crt0 = compile_crt0(tools, dir, target, err);
+    if (!crt0) {
+        return R::err(crt0.error());
     }
 
     // The minimal libc and the program's sources in parallel; the libc's output only if it fails.
     // C++ sources see libc++'s headers first, and by default neither exceptions nor RTTI;
     // -fbinutils-version=none lets ld.lld drop a function's exception table with the function.
+    std::string error;
     struct Compile {
         Job job;
         bool runtime;
@@ -411,9 +437,9 @@ compile_c(const Toolchain& tools, std::span<const std::string_view> sources,
     }
 
     const fs::path elf = dir / "prog.elf";
-    argv = {tools.ld, "-T", (dir / "link.ld").string(), "--gc-sections"};
+    std::vector<std::string> argv{tools.ld, "-T", (dir / "link.ld").string(), "--gc-sections"};
     argv.insert(argv.end(), ld_args.begin(), ld_args.end());
-    argv.push_back(crt0.string());
+    argv.push_back(crt0->string());
     argv.insert(argv.end(), objects.begin(), objects.end());
     if (!libc_objects.empty()) {
         argv.emplace_back("--start-lib");
@@ -421,6 +447,83 @@ compile_c(const Toolchain& tools, std::span<const std::string_view> sources,
         argv.emplace_back("--end-lib");
     }
     argv.insert(argv.end(), libs.begin(), libs.end());
+    argv.insert(argv.end(), {"-o", elf.string()});
+    if (!run(argv, dir / "ld.log", err, error)) {
+        return R::err(error.empty() ? "linking failed" : error);
+    }
+    return read_elf(elf);
+}
+
+core::Result<std::vector<std::uint8_t>, std::string>
+compile_lua(const Toolchain& tools, std::string_view script, std::span<const std::string_view> args,
+            std::ostream& err) {
+    using R = core::Result<std::vector<std::uint8_t>, std::string>;
+    if (picolibc_sysroot().empty()) {
+        return R::err("this malm is built without picolibc (MALM_PICOLIBC), which Lua needs");
+    }
+    std::vector<std::string> cc_args;
+    std::vector<std::string> ld_args;
+    split_args(args, cc_args, ld_args);
+    if (!cc_args.empty()) {
+        return R::err("unsupported argument '" + cc_args.front() +
+                      "' for Lua (only -Wl,<linker arguments>)");
+    }
+    const TempDir tmp;
+    if (!tmp.ok()) {
+        return R::err(std::string("cannot create a temporary directory: ") + std::strerror(errno));
+    }
+    const fs::path& dir = tmp.path();
+    write_runtime(dir, [](std::string_view path) {
+        return path == "crt0.S" || path == "link.ld" || path.starts_with("lua/");
+    });
+
+    // The script and its chunk name next to script.S, which includes them.
+    const fs::path source{std::string(script)};
+    std::error_code ec;
+    if (!fs::is_regular_file(source, ec)) {
+        return R::err("cannot read '" + std::string(script) +
+                      "': " + (ec ? ec.message() : "not a regular file"));
+    }
+    fs::copy_file(source, dir / "lua" / "script.lua", ec);
+    if (ec) {
+        return R::err("cannot read '" + std::string(script) + "': " + ec.message());
+    }
+    std::ofstream(dir / "lua" / "script.name", std::ios::binary)
+        << '@' << source.filename().string();
+
+    const auto sysroot = unpack_picolibc(dir);
+    if (!sysroot) {
+        return R::err(sysroot.error());
+    }
+    const std::vector<std::string> target = target_flags({*sysroot / "include"});
+    const auto crt0 = compile_crt0(tools, dir, target, err);
+    if (!crt0) {
+        return R::err(crt0.error());
+    }
+    std::string error;
+    const fs::path obj = dir / "script.o";
+    std::vector<std::string> argv{tools.cc};
+    argv.insert(argv.end(), target.begin(), target.end());
+    argv.insert(argv.end(), {"-I", (dir / "lua").string(), "-c",
+                             (dir / "lua" / "script.S").string(), "-o", obj.string()});
+    std::ostringstream log;
+    if (!run(argv, dir / "script.log", log, error)) {
+        if (!error.empty()) {
+            return R::err(error);
+        }
+        err << log.str();
+        return R::err("internal error: the Lua script's wrapper does not assemble with " +
+                      tools.cc);
+    }
+
+    // The interpreter's main, in liblua.a, is what crt0 calls.
+    const fs::path elf = dir / "prog.elf";
+    argv = {tools.ld, "-T", (dir / "link.ld").string(), "--gc-sections"};
+    argv.insert(argv.end(), ld_args.begin(), ld_args.end());
+    argv.insert(argv.end(), {crt0->string(), obj.string()});
+    for (const char* lib : {"liblua.a", "libmalm.a", "libc.a", "libclang_rt.builtins.a"}) {
+        argv.push_back((*sysroot / "lib" / lib).string());
+    }
     argv.insert(argv.end(), {"-o", elf.string()});
     if (!run(argv, dir / "ld.log", err, error)) {
         return R::err(error.empty() ? "linking failed" : error);
