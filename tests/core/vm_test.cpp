@@ -626,3 +626,118 @@ TEST_CASE("the step loop matches a plain reference step across the ...222 -> 0 w
             program, {static_cast<ClassicWord>(rng() % 300), cc, cd}, cpokes, input, 2000);
     }
 }
+
+TEST_CASE("run_pure stops before the first In, Out or Hlt") {
+    for (const char* ops : {"oo<v", "oo/v", "oov", "jo*p<v"}) {
+        CAPTURE(ops);
+        const auto p = prog(ops);
+        Vm vm(p);
+        const RunResult r = vm.run_pure();
+        CHECK(r.kind == RunResult::Kind::BeforeIo);
+        CHECK_FALSE(r.fault.has_value());
+        CHECK(vm.steps() == std::string(ops).find_first_of("</v"));
+        CHECK_FALSE(vm.halted());
+        // The rest of the run is the run from the start.
+        StrIo io1;
+        StrIo io2;
+        io1.in = io2.in = "x";
+        Vm fresh(p);
+        const RunResult r1 = fresh.run(io1);
+        const RunResult r2 = vm.run(io2);
+        CHECK(r1.kind == r2.kind);
+        CHECK(io1.out == io2.out);
+        CHECK(fresh.steps() == vm.steps());
+        CHECK(fresh.a() == vm.a());
+    }
+    Vm first(prog("<v"));
+    CHECK(first.run_pure().kind == RunResult::Kind::BeforeIo);
+    CHECK(first.steps() == 0);
+}
+
+TEST_CASE("run_pure: step limit, fault, after a halt, classic mode") {
+    {
+        Vm vm(prog("ooooov"));
+        CHECK(vm.run_pure(3).kind == RunResult::Kind::StepLimit);
+        CHECK(vm.steps() == 3);
+        CHECK(vm.run_pure(3).kind == RunResult::Kind::StepLimit); // the limit is a total
+        CHECK(vm.run_pure().kind == RunResult::Kind::BeforeIo);
+        CHECK(vm.steps() == 5);
+        CHECK(vm.run_pure().kind == RunResult::Kind::BeforeIo); // stays before the Hlt
+        CHECK(vm.steps() == 5);
+    }
+    {
+        Vm vm(cells("DCB")); // E_EXEC at step 4
+        const RunResult r = vm.run_pure();
+        REQUIRE(r.kind == RunResult::Kind::Fault);
+        CHECK(r.fault->error == Error::Exec);
+        CHECK(r.fault->steps == 4);
+        CHECK(vm.run_pure().kind == RunResult::Kind::Fault);
+    }
+    {
+        Vm vm(prog("ov"));
+        StrIo io;
+        REQUIRE(vm.run(io).kind == RunResult::Kind::Halted);
+        CHECK(vm.run_pure().kind == RunResult::Kind::Halted);
+    }
+    {
+        ClassicVm vm(cells("ubs`q^o\\mZG"));
+        CHECK(vm.run_pure().kind == RunResult::Kind::BeforeIo);
+        CHECK(vm.steps() == 0);
+    }
+}
+
+namespace {
+
+// run_pure's state is the state of run() after as many steps, which did no I/O; the program goes
+// on from it as from the start.
+template <class VmT>
+void check_pure_prefix(const std::vector<std::uint8_t>& program, const std::string& input) {
+    VmT pure(program);
+    const RunResult r = pure.run_pure(5000);
+    VmT plain(program);
+    StrIo io;
+    io.in = input;
+    const RunResult rp = plain.run(io, pure.steps());
+    if (r.kind == RunResult::Kind::Fault) {
+        REQUIRE(rp.kind == RunResult::Kind::Fault);
+        CHECK(rp.fault->error == r.fault->error);
+        CHECK(rp.fault->steps == r.fault->steps);
+    } else {
+        REQUIRE(rp.kind == RunResult::Kind::StepLimit);
+    }
+    CHECK(io.reads == 0);
+    CHECK(io.out.empty());
+    CHECK(plain.a() == pure.a());
+    CHECK(plain.c() == pure.c());
+    CHECK(plain.d() == pure.d());
+    CHECK(plain.n() == pure.n());
+    for (unsigned i = 0; i < 300; ++i) {
+        CHECK(plain.memory().read(word_at<typename VmT::Word>(i)) ==
+              pure.memory().read(word_at<typename VmT::Word>(i)));
+    }
+    if (r.kind == RunResult::Kind::Fault) {
+        return;
+    }
+    StrIo io1;
+    StrIo io2;
+    io1.in = io2.in = input;
+    const RunResult r1 = plain.run(io1, 20000);
+    const RunResult r2 = pure.run(io2, 20000);
+    CHECK(r1.kind == r2.kind);
+    CHECK(io1.out == io2.out);
+    CHECK(plain.steps() == pure.steps());
+    CHECK(plain.a() == pure.a());
+    CHECK(plain.c() == pure.c());
+    CHECK(plain.n() == pure.n());
+}
+
+} // namespace
+
+TEST_CASE("run_pure is a prefix of run on random programs, both modes") {
+    std::mt19937_64 rng(38);
+    for (int i = 0; i < 300; ++i) {
+        const auto program = random_cells(rng, 2 + rng() % 400);
+        check_pure_prefix<Vm>(program, "in");
+        check_pure_prefix<ClassicVm>(program, "in");
+    }
+}

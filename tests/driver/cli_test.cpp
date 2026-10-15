@@ -16,11 +16,13 @@
 #include <vector>
 
 #include "container/container.hpp"
+#include "container/snapshot.hpp"
 #include "core/classic.hpp"
 #include "core/tables.hpp"
 #include "driver/cli.hpp"
 #include "driver/pack_cmd.hpp"
 #include "driver/packed_run.hpp"
+#include "driver/program_io.hpp"
 #include "pack/trailer.hpp"
 
 namespace {
@@ -39,8 +41,8 @@ Result run(std::vector<std::string_view> args, const std::string& input = "") {
     return {code, out.str(), err.str()};
 }
 
-constexpr std::array<std::string_view, 7> kSubcommands{"run",   "asm",  "hla",   "disasm",
-                                                       "build", "pack", "export"};
+constexpr std::array<std::string_view, 8> kSubcommands{"run",   "asm",  "hla",    "disasm",
+                                                       "build", "pack", "export", "snapshot"};
 
 } // namespace
 
@@ -125,8 +127,9 @@ TEST_CASE("run: usage errors exit 2") {
         const Result r = run(args);
         CHECK(r.code == 2);
         CHECK(r.out.empty());
-        CHECK(r.err.find("usage: malm run [--classic] [--exit-a] [--max-cells N] [--stats]") !=
-              std::string::npos);
+        CHECK(
+            r.err.find("usage: malm run [--classic] [--exit-a] [--max-cells N] [--no-snapshot]") !=
+            std::string::npos);
     }
 }
 
@@ -1335,4 +1338,135 @@ TEST_CASE("disasm: usage errors exit 2") {
         CHECK(r.out.empty());
         CHECK(r.err.find("usage: malm disasm") != std::string::npos);
     }
+}
+
+// Startup snapshots (issue #38).
+TEST_CASE("snapshot: usage errors exit 2") {
+    for (const auto& args : std::vector<std::vector<std::string_view>>{
+             {"snapshot"},
+             {"snapshot", "a", "b"},
+             {"snapshot", "--bogus", "a"},
+             {"snapshot", "--max-steps", "0", "a"},
+             {"snapshot", "--max-steps"},
+             {"snapshot", "--check", "--max-steps", "5", "a"},
+             {"snapshot", "--max-cells", "0", "a"}}) {
+        const Result r = run(args);
+        CHECK(r.code == 2);
+        CHECK(r.out.empty());
+        CHECK(r.err.find("usage: malm snapshot") != std::string::npos);
+    }
+}
+
+TEST_CASE("snapshot: write, check, and run uses it unless told not to") {
+    const TempDir d;
+    const std::string prog =
+        d.write("hello.mal", slurp(std::string(MALM_PROGRAMS_DIR) + "/hello.mal"));
+    const std::string snap = prog + ".snap";
+
+    Result r = run({"snapshot", prog});
+    CHECK(r.code == 0);
+    CHECK(r.err.empty());
+    CHECK(r.out.starts_with(snap + ": "));
+    CHECK(r.out.find(" steps (up to the first Out), 1 pages, ") != std::string::npos);
+    REQUIRE(std::filesystem::exists(snap));
+    r = run({"snapshot", "--check", prog});
+    CHECK(r.code == 0);
+    CHECK(r.out.starts_with(snap + ": matches the program at step "));
+    r = run({"run", prog});
+    CHECK(r.code == 0);
+    CHECK(r.out == "Hello, world.");
+    CHECK(r.err.empty());
+
+    // A valid snapshot of another state (A changed before the first Out) shows that run uses it,
+    // and --check catches it.
+    {
+        malm::LoadedProgram p;
+        std::ostringstream err;
+        REQUIRE(malm::load_program(prog, false, err, p, malm::core::kDefaultMaxCells, true) == 0);
+        malm::core::Vm vm(p.cells);
+        REQUIRE(vm.run_pure().kind == malm::core::RunResult::Kind::BeforeIo);
+        vm.set_registers({*malm::core::Value::natural('J'), vm.c(), vm.d()});
+        const auto bytes = malm::container::write_snapshot(vm, {*p.file_hash, p.cells});
+        std::ofstream(snap, std::ios::binary)
+            .write(reinterpret_cast<const char*>(bytes.data()),
+                   static_cast<std::streamsize>(bytes.size()));
+    }
+    r = run({"run", prog});
+    CHECK(r.code == 0);
+    CHECK(r.out.starts_with("J"));
+    CHECK(r.err.empty());
+    for (const std::string_view opt : {"--no-snapshot", "--stats", "--trace"}) {
+        r = run({"run", opt, prog});
+        CHECK(r.code == 0);
+        CHECK(r.out == "Hello, world.");
+    }
+    r = run({"snapshot", "--check", prog});
+    CHECK(r.code == 1);
+    CHECK(r.err.find("does not match the program at step ") != std::string::npos);
+    CHECK(r.err.find(": A is 0t") != std::string::npos);
+    CHECK(r.err.ends_with(", the snapshot has 0t2202\n")); // 'J'
+
+    // --max-steps, and the check of a snapshot past the first I/O.
+    r = run({"snapshot", "--max-steps", "3", prog});
+    CHECK(r.code == 0);
+    CHECK(r.out == snap + ": 3 steps (--max-steps), 1 pages, " +
+                       std::to_string(std::filesystem::file_size(snap)) + " bytes\n");
+    CHECK(run({"snapshot", "--check", prog}).code == 0);
+    CHECK(run({"run", prog}).out == "Hello, world.");
+}
+
+TEST_CASE("snapshot: run ignores a snapshot it cannot use, with a note") {
+    const TempDir d;
+    const std::string prog =
+        d.write("hello.mal", slurp(std::string(MALM_PROGRAMS_DIR) + "/hello.mal"));
+    const std::string snap = prog + ".snap";
+    REQUIRE(run({"snapshot", prog}).code == 0);
+    const std::string good = slurp(snap);
+
+    // The same program in a different file (whitespace added): another hash.
+    d.write("hello.mal", slurp(prog) + "\n");
+    Result r = run({"run", prog});
+    CHECK(r.code == 0);
+    CHECK(r.out == "Hello, world.");
+    CHECK(r.err == "malm: note: ignoring snapshot '" + snap +
+                       "': made for another program file (SHA-256 differs)\n");
+    r = run({"snapshot", "--check", prog});
+    CHECK(r.code == 1);
+    CHECK(r.err.find("invalid snapshot") != std::string::npos);
+    CHECK(run({"run", "--no-snapshot", prog}).err.empty());
+
+    // A truncated snapshot.
+    REQUIRE(run({"snapshot", prog}).code == 0);
+    d.write("hello.mal.snap", slurp(snap).substr(0, 120));
+    r = run({"run", prog});
+    CHECK(r.out == "Hello, world.");
+    CHECK(r.err.starts_with("malm: note: ignoring snapshot '" + snap + "': "));
+
+    // A classic program.
+    d.write("hello.mal.snap", good);
+    r = run({"run", "--classic", prog});
+    CHECK(r.code == 0);
+    CHECK(r.err == "malm: note: ignoring snapshot '" + snap +
+                       "': snapshots are for unleashed-mode programs\n");
+}
+
+TEST_CASE("snapshot: programs it cannot snapshot") {
+    const TempDir d;
+    // Runs off its end before any I/O: E_EXEC at step 4.
+    const std::string fault = d.write("fault.mal", "DCB");
+    Result r = run({"snapshot", fault});
+    CHECK(r.code == 1);
+    CHECK(r.err == "malm snapshot: the program faults before its first I/O (E_EXEC at step 4: "
+                   "C=0t10 D=0t10 A=0t0 n=10); no snapshot written\n");
+    CHECK_FALSE(std::filesystem::exists(fault + ".snap"));
+    const std::string classic = d.path.string() + "/c.malm";
+    REQUIRE(run({"export", "--malm", "--classic", "-o", classic,
+                 std::string(MALM_PROGRAMS_DIR) + "/hello.mal"})
+                .code == 0);
+    r = run({"snapshot", classic});
+    CHECK(r.code == 1);
+    CHECK(r.err.find("is a classic-mode program") != std::string::npos);
+    r = run({"snapshot", "--check", fault});
+    CHECK(r.code == 1);
+    CHECK(r.err.find("cannot open") != std::string::npos);
 }

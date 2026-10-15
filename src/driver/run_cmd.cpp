@@ -1,9 +1,10 @@
 #include "driver/run_cmd.hpp"
 
-#include <charconv>
 #include <chrono>
+#include <concepts>
 #include <cstdint>
 #include <istream>
+#include <optional>
 #include <ostream>
 #include <string>
 #include <vector>
@@ -13,13 +14,14 @@
 #include "core/vm.hpp"
 #include "driver/debug_observer.hpp"
 #include "driver/program_io.hpp"
+#include "driver/snapshot_cmd.hpp"
 #include "driver/stream_io.hpp"
 
 namespace malm {
 namespace {
 
 constexpr std::string_view kUsage =
-    "usage: malm run [--classic] [--exit-a] [--max-cells N] [--stats]\n"
+    "usage: malm run [--classic] [--exit-a] [--max-cells N] [--no-snapshot] [--stats]\n"
     "                [--trace [--trace-from N] [--trace-to M]] [--] <file>\n";
 
 // Touched pages of the sparse memory; classic mode has a flat memory and reports none.
@@ -31,20 +33,16 @@ template <class VmT> std::optional<std::size_t> page_count(const VmT& vm) {
     }
 }
 
-// A positive decimal integer fitting 64 bits (steps are 1-based).
-std::optional<std::uint64_t> parse_step(std::string_view text) {
-    std::uint64_t v = 0;
-    const auto [end, ec] = std::from_chars(text.data(), text.data() + text.size(), v);
-    if (text.empty() || ec != std::errc{} || end != text.data() + text.size() || v == 0) {
-        return std::nullopt;
-    }
-    return v;
-}
-
 template <class VmT>
 int run_vm(std::span<const std::uint8_t> cells, std::istream& in, std::ostream& out,
-           std::ostream& err, bool exit_a, const DebugOptions& dbg) {
+           std::ostream& err, bool exit_a, const DebugOptions& dbg,
+           const container::Snapshot* snapshot) {
     VmT vm(cells);
+    if constexpr (std::same_as<VmT, core::Vm>) {
+        if (snapshot != nullptr) {
+            snapshot->restore(vm, cells);
+        }
+    }
     StreamIo io(in, out);
     if (!dbg.trace && !dbg.stats) {
         const core::RunResult r = vm.run(io);
@@ -72,10 +70,10 @@ int run_vm(std::span<const std::uint8_t> cells, std::istream& in, std::ostream& 
 } // namespace
 
 int run_loaded(const LoadedProgram& prog, bool exit_a, std::istream& in, std::ostream& out,
-               std::ostream& err, const DebugOptions& dbg) {
+               std::ostream& err, const DebugOptions& dbg, const container::Snapshot* snapshot) {
     exit_a = exit_a || prog.exit_a;
-    return prog.classic ? run_vm<core::ClassicVm>(prog.cells, in, out, err, exit_a, dbg)
-                        : run_vm<core::Vm>(prog.cells, in, out, err, exit_a, dbg);
+    return prog.classic ? run_vm<core::ClassicVm>(prog.cells, in, out, err, exit_a, dbg, nullptr)
+                        : run_vm<core::Vm>(prog.cells, in, out, err, exit_a, dbg, snapshot);
 }
 
 int run_command(std::span<const std::string_view> args, std::istream& in, std::ostream& out,
@@ -88,6 +86,7 @@ int run_command(std::span<const std::string_view> args, std::istream& in, std::o
     bool max_cells_given = false;
     DebugOptions dbg;
     bool window_given = false;
+    bool no_snapshot = false;
     for (std::size_t i = 0; i < args.size(); ++i) {
         const std::string_view arg = args[i];
         if (!options_done && arg == "--") {
@@ -105,12 +104,14 @@ int run_command(std::span<const std::string_view> args, std::istream& in, std::o
             ++i;
             max_cells = *v;
             max_cells_given = true;
+        } else if (!options_done && arg == "--no-snapshot") {
+            no_snapshot = true;
         } else if (!options_done && arg == "--stats") {
             dbg.stats = true;
         } else if (!options_done && arg == "--trace") {
             dbg.trace = true;
         } else if (!options_done && (arg == "--trace-from" || arg == "--trace-to")) {
-            const auto v = i + 1 < args.size() ? parse_step(args[i + 1]) : std::nullopt;
+            const auto v = i + 1 < args.size() ? parse_count(args[i + 1]) : std::nullopt;
             if (!v) {
                 err << "malm run: " << arg << " needs a positive integer\n" << kUsage;
                 return 2;
@@ -144,11 +145,15 @@ int run_command(std::span<const std::string_view> args, std::istream& in, std::o
             return 2;
         }
     }
+    // The trace and the statistics observe every step, so they run without a snapshot.
+    const bool snapshot = !no_snapshot && !dbg.trace && !dbg.stats && has_snapshot(path);
     LoadedProgram prog;
-    if (const int rc = load_program(path, classic, err, prog, max_cells); rc != 0) {
+    if (const int rc = load_program(path, classic, err, prog, max_cells, snapshot); rc != 0) {
         return rc;
     }
-    return run_loaded(prog, exit_a, in, out, err, dbg);
+    const std::optional<container::Snapshot> snap =
+        snapshot ? find_snapshot(path, prog, err) : std::nullopt;
+    return run_loaded(prog, exit_a, in, out, err, dbg, snap ? &*snap : nullptr);
 }
 
 } // namespace malm

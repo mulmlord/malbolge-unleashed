@@ -22,6 +22,11 @@ target_compile_definitions(container_test PRIVATE
     MALM_PROGRAMS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/programs"
     MALM_CORPUS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/corpus")
 
+# Startup snapshots (issue #38).
+malm_add_test(NAME snapshot_test LABEL fast SOURCES container/snapshot_test.cpp
+              LIBS malm_driver libzstd_static TIMEOUT 300)
+target_compile_definitions(snapshot_test PRIVATE MALM_EXAMPLES_DIR="${PROJECT_SOURCE_DIR}/examples")
+
 malm_add_test(NAME debug_test LABEL fast SOURCES driver/debug_test.cpp LIBS malm_driver TIMEOUT 600)
 target_compile_definitions(debug_test PRIVATE
     MALM_PROGRAMS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/programs"

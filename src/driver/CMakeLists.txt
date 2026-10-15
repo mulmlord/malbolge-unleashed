@@ -45,7 +45,7 @@ std::string_view malm::picolibc_sysroot() { return {}; }
 ]=])
 endif()
 
-add_library(malm_driver asm_cmd.cpp build_cmd.cpp hla_cmd.cpp cli.cpp disasm_cmd.cpp run_cmd.cpp debug_observer.cpp export_cmd.cpp pack_cmd.cpp packed_run.cpp program_io.cpp rvref_cmd.cpp rvemu_cmd.cpp rvaot_cmd.cpp sysroot.cpp toolchain.cpp "${rt_embed}" "${pl_embed}")
+add_library(malm_driver asm_cmd.cpp build_cmd.cpp hla_cmd.cpp cli.cpp disasm_cmd.cpp run_cmd.cpp snapshot_cmd.cpp debug_observer.cpp export_cmd.cpp pack_cmd.cpp packed_run.cpp program_io.cpp rvref_cmd.cpp rvemu_cmd.cpp rvaot_cmd.cpp sysroot.cpp toolchain.cpp "${rt_embed}" "${pl_embed}")
 target_include_directories(malm_driver
     PUBLIC "${PROJECT_SOURCE_DIR}/src"
     PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")

@@ -6,24 +6,35 @@
 
 namespace malm::core {
 
-Memory::Memory(std::span<const std::uint8_t> program) {
+namespace {
+
+Value program_cell(std::span<const std::uint8_t> program, std::size_t i) {
+    assert(program[i] >= 33 && program[i] <= 126);
+    return *Value::natural(program[i]);
+}
+
+} // namespace
+
+std::array<Value, 6> Memory::fill_pattern_of(std::span<const std::uint8_t> program) {
     const std::size_t len = program.size();
-    assert(len >= 2 && len <= pow3[38]);
-
-    const auto cell = [&](std::size_t i) {
-        assert(program[i] >= 33 && program[i] <= 126);
-        return *Value::natural(program[i]);
-    };
-
+    assert(len >= 2);
     // Fill pattern (spec 2.4): f(i) = crz(f(i-1), f(i-2)) for i >= L, P[i mod 6] = f(i).
-    Value prev2 = cell(len - 2);
-    Value prev1 = cell(len - 1);
+    std::array<Value, 6> fill{};
+    Value prev2 = program_cell(program, len - 2);
+    Value prev1 = program_cell(program, len - 1);
     for (std::size_t i = len; i < len + 6; ++i) {
         const Value f = crz(prev1, prev2);
-        fill_[i % 6] = f;
+        fill[i % 6] = f;
         prev2 = prev1;
         prev1 = f;
     }
+    return fill;
+}
+
+Memory::Memory(std::span<const std::uint8_t> program) : fill_(fill_pattern_of(program)) {
+    const std::size_t len = program.size();
+    assert(len >= 2 && len <= pow3[38]);
+    const auto cell = [&](std::size_t i) { return program_cell(program, i); };
 
     for (std::uint64_t phase = 0; phase < 2; ++phase) {
         auto page = std::make_shared<Page>();
@@ -68,6 +79,24 @@ std::uint64_t Memory::seek(Cursor& cur, Value addr) const {
     cur.page = find_page(idx);
     cur.fill = cur.page == fill_page(idx);
     return addr.raw() - cur.base;
+}
+
+std::vector<std::uint64_t> Memory::page_indices() const {
+    std::vector<std::uint64_t> idx;
+    idx.reserve(pages_.size());
+    for (const auto& [i, page] : pages_) {
+        idx.push_back(i);
+    }
+    std::ranges::sort(idx);
+    return idx;
+}
+
+std::span<Value, Memory::kPageCells> Memory::page_for_write(std::uint64_t idx) {
+    Page* p = find_page(idx);
+    if (p == fill_page(idx)) {
+        p = materialise(idx);
+    }
+    return p->cells;
 }
 
 Memory::Page* Memory::materialise(std::uint64_t idx) {

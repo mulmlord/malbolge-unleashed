@@ -3,6 +3,7 @@
 // machine.hpp for unleashed mode and classic.hpp for classic mode, spec 8).
 #pragma once
 
+#include <concepts>
 #include <cstdint>
 #include <optional>
 #include <span>
@@ -84,7 +85,8 @@ struct StepResult {
 };
 
 struct RunResult {
-    enum class Kind : std::uint8_t { Halted, Fault, StepLimit };
+    // BeforeIo: run_pure stopped before an In, Out or Hlt step.
+    enum class Kind : std::uint8_t { Halted, Fault, StepLimit, BeforeIo };
     Kind kind;
     std::optional<Fault> fault; // set iff kind == Fault
 };
@@ -127,6 +129,24 @@ template <class M> class BasicVm {
     // invariants of spec 2.2 (cell width below n) or of the loader (cells in 33..126).
     void poke(Word addr, Word v) { m_.write(M::normalize(addr), M::normalize(v)); }
 
+    // For startup snapshots (container/snapshot.hpp), unleashed mode only: the memory a snapshot
+    // writes its pages into, and the registers, step count and n it restores. Precondition: a VM
+    // that has not run; restore() leaves it as the run_pure that made the snapshot did (not halted,
+    // no fault, stdin not at EOF). Like set_registers, it does not check the invariants of spec 2.2
+    // (the snapshot reader does).
+    Memory& memory_for_restore() noexcept
+        requires std::same_as<M, UnleashedMachine>
+    {
+        return m_.memory();
+    }
+    void restore(const BasicRegisters<Word>& r, std::uint64_t steps, unsigned n) noexcept
+        requires std::same_as<M, UnleashedMachine>
+    {
+        set_registers(r);
+        steps_ = steps;
+        m_.memory().restore_n(n);
+    }
+
     // One step (spec 5). On Halted or Faulted the VM flushes `io`; a flush failure on halt turns
     // the halt into an E_IO fault. A stopped VM keeps returning its final result.
     StepResult step(Io& io);
@@ -136,6 +156,12 @@ template <class M> class BasicVm {
     RunResult run(Io& io, std::optional<std::uint64_t> max_steps = {});
     // The same loop (one shared implementation), reporting every step to `obs`.
     RunResult run(Io& io, StepObserver& obs, std::optional<std::uint64_t> max_steps = {});
+
+    // The steps that depend on the program alone: runs as run() does but stops before the first
+    // step that would execute In, Out or Hlt (BeforeIo), which is then the next step. Until then
+    // the program has read and written nothing, so the state does not depend on its input. Also
+    // stops at a fault and at `max_steps`; never halts.
+    RunResult run_pure(std::optional<std::uint64_t> max_steps = {});
 
   private:
     // The registers and step counter as the step loop works on them: a local copy that the

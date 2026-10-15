@@ -12,6 +12,7 @@
 #include <span>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 #include "core/value.hpp"
 
@@ -56,6 +57,8 @@ class Memory {
 
     // P[r] for r = address mod 6 (spec 2.4).
     const std::array<Value, 6>& fill_pattern() const noexcept { return fill_; }
+    // The fill pattern of a program, as the constructor computes it (same preconditions).
+    static std::array<Value, 6> fill_pattern_of(std::span<const std::uint8_t> program);
 
     // Any raw address is accepted; addressability is not enforced here (spec 2.2).
     Value read(Value addr) const {
@@ -97,6 +100,23 @@ class Memory {
     // Number of materialised pages (tests and stats).
     std::size_t page_count() const noexcept { return pages_.size(); }
 
+    // Pages as startup snapshots (container/snapshot.hpp) save and restore them: page `idx` holds
+    // the cells idx * 3^8 .. idx * 3^8 + 3^8 - 1 (raw addresses).
+    static constexpr std::uint64_t kPageCells = 6561;
+    // The materialised pages, ascending.
+    std::vector<std::uint64_t> page_indices() const;
+    // Precondition: page `idx` is materialised.
+    std::span<const Value, kPageCells> page(std::uint64_t idx) const {
+        return pages_.find(idx)->second->cells;
+    }
+    // Materialises page `idx` (from the fill pattern) if it is not, and returns its cells.
+    std::span<Value, kPageCells> page_for_write(std::uint64_t idx);
+    // Sets n as the growth rule left it. Precondition: n() <= n <= 39.
+    void restore_n(unsigned n) noexcept {
+        assert(n >= n_ && n <= static_cast<unsigned>(kMaxWidth));
+        set_n(n);
+    }
+
     unsigned n() const noexcept { return n_; }
 
     // n' = max(n, width(c)+1, width(d)+1). Returns false and leaves n unchanged if n' > 39 (the
@@ -122,7 +142,7 @@ class Memory {
     }
 
     // 3^8 divides 3^39 and 3^40, so a page never straddles a head change or the ...222 -> 0 wrap.
-    static constexpr std::uint64_t kPageCells = 6561;
+    static_assert(kPageCells == pow3[8]);
 
     // 8 bytes per cell: programs of hundreds of MB of cells need GBs of RAM.
     struct Page {

@@ -20,6 +20,7 @@ class UnleashedMachine {
     explicit UnleashedMachine(std::span<const std::uint8_t> cells) : mem_(cells) {}
 
     const Memory& memory() const noexcept { return mem_; }
+    Memory& memory() noexcept { return mem_; }
     Word read(Word a) const { return mem_.read(a); }
     void write(Word a, Word v) { mem_.write(a, v); }
     Word read(Word a, Port p) const { return mem_.read(a, p); }

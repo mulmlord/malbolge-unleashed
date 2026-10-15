@@ -12,6 +12,7 @@ usage: malm <command> [args...]
 | `run` | implemented | run a `.malm` or Malbolge text program |
 | `export` | implemented | convert between `.malm` and plain Malbolge text |
 | `pack` | implemented | pack a program into a native executable |
+| `snapshot` | implemented | write or check the startup snapshot of a program ([snapshot.md](snapshot.md)) |
 | `asm` | implemented | assemble a `.mua` file into a `.malm` or Malbolge text; check and pretty-print it |
 | `disasm` | implemented | turn a program back into readable assembly, or list it cell by cell |
 | `hla` | implemented | compile a high-level `.mhl` file into a `.malm` or Malbolge text; check it and print the generated assembly |
@@ -39,7 +40,7 @@ integer); it is combined with the format limit of the mode (3^38 unleashed, 5904
 ## `malm run`
 
 ```
-usage: malm run [--classic] [--exit-a] [--max-cells N] [--stats]
+usage: malm run [--classic] [--exit-a] [--max-cells N] [--no-snapshot] [--stats]
                 [--trace [--trace-from N] [--trace-to M]] [--] <file>
 ```
 
@@ -51,6 +52,7 @@ Runs the program on stdin and stdout (binary-safe). A fault prints
 | `--classic` | classic Malbolge (spec 8) |
 | `--exit-a` | a halt exits with `A mod 256` (OR-ed with the `.malm` flag) |
 | `--max-cells N` | reader cap on the program's cells |
+| `--no-snapshot` | do not start from the startup snapshot `<file>.snap` |
 | `--trace` | one line per step on stderr (below) |
 | `--trace-from N`, `--trace-to M` | inclusive 1-based window of steps to trace; each needs `--trace` |
 | `--stats` | a statistics block on stderr after the run (below) |
@@ -62,6 +64,11 @@ in any order.
 
 Stdout carries only the program's output, byte for byte as without these options, and the exit
 status is the same. Everything described here goes to stderr.
+
+If `<file>.snap` exists, an unleashed-mode run starts from that startup snapshot
+([snapshot.md](snapshot.md)) when it was made for this program file: the same run, without the
+steps before the program's first I/O. One that does not fit is ignored with a note on stderr.
+`--no-snapshot`, `--trace` and `--stats` run every step.
 
 A packed executable (`malm pack`) ignores its command line, so it has neither `--trace` nor
 `--stats`.
@@ -189,6 +196,19 @@ Writes a native executable: a copy of the running `malm` with the program append
 payload. The result runs the embedded program on stdin and stdout, ignores its command line and
 exits as `malm run` does. `-o -` is not supported. `pack` refuses to overwrite the running
 binary or the input.
+
+## `malm snapshot`
+
+```
+usage: malm snapshot [--max-steps N] [--max-cells N] [--] <file>
+       malm snapshot --check [--max-cells N] [--] <file>
+       (writes or checks <file>.snap)
+```
+
+Writes the startup snapshot of an unleashed-mode program, the VM state before its first `In`,
+`Out` or `Hlt` (or after `--max-steps N` steps), to `<file>.snap`, which `malm run <file>` then
+starts from. `--check` runs the program to the snapshot's step without it and compares the states.
+Messages, exit codes and the format: [snapshot.md](snapshot.md).
 
 ## `malm asm`
 
