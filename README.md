@@ -124,6 +124,10 @@ runtime crate (the entry point, a heap on `brk`, stdin and stdout, `println!`, p
 interpreter, built into `malm` with picolibc, in emu mode only and slowly (a minute for
 `print('hi')`): `malm build --ram 512K --exe -o hello examples/lua/hello.lua`.
 
+M6 (performance, in progress): the VM's step loop runs programs in unleashed mode, emu and aot mode
+included, 2.7 to 4 times as fast as at M3 (issue #37); `tests/bench/vm_bench.sh` is the benchmark
+([docs/benchmarks.md](docs/benchmarks.md)).
+
 ## License
 
 MIT, see [LICENSE](LICENSE). Third-party components and their licences are listed in

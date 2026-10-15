@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <optional>
 #include <random>
+#include <unordered_map>
 #include <vector>
 
 #include "core/memory.hpp"
@@ -468,4 +469,58 @@ TEST_CASE("move construction and assignment keep the destination intact") {
     dst.write(b, natural(5));
     CHECK(dst.read(b) == natural(5));
     CHECK(dst2.read(b) == natural(22));
+}
+
+TEST_CASE("port cursors: reads and writes through C and D agree with plain ones") {
+    using malm::core::Port;
+    std::mt19937_64 rng(3737);
+    for (int round = 0; round < 20; ++round) {
+        const auto prog = random_program(rng, 2 + rng() % 20000);
+        Memory m(prog);
+        std::unordered_map<std::uint64_t, Value> model; // written cells
+        for (std::size_t i = 0; i < prog.size(); ++i) {
+            model[i] = natural(prog[i]);
+        }
+        // Addresses near a few page boundaries in every head, so the ports change pages, share
+        // them, and meet pages that are absent, materialised by the other port or by a plain write.
+        std::vector<std::uint64_t> bases;
+        for (std::uint64_t h = 0; h < 3; ++h) {
+            for (const std::uint64_t k : std::array<std::uint64_t, 5>{0, 1, 2, 7, 1000}) {
+                bases.push_back(h * pow3[39] + k * kPage);
+            }
+        }
+        bases.push_back(pow3[kTrits] - kPage); // the last page, up to ...222
+        const auto pick = [&] {
+            const std::uint64_t b = bases[rng() % bases.size()];
+            const std::uint64_t off = rng() % 6 + (rng() % 2 == 0 ? 0 : kPage - 6);
+            return Value::from_raw(b + off);
+        };
+        for (int i = 0; i < 5000; ++i) {
+            const Value addr = pick();
+            const auto it = model.find(addr.raw());
+            const Value want = it == model.end() ? expected_fill(m, addr) : it->second;
+            switch (rng() % 6) {
+            case 0:
+                REQUIRE(m.read(addr) == want);
+                break;
+            case 1:
+                REQUIRE(m.read(addr, Port::C) == want);
+                break;
+            case 2:
+                REQUIRE(m.read(addr, Port::D) == want);
+                break;
+            default: {
+                const Value v = random_value(rng);
+                const unsigned how = static_cast<unsigned>(rng() % 3);
+                if (how == 0) {
+                    m.write(addr, v);
+                } else {
+                    m.write(addr, v, how == 1 ? Port::C : Port::D);
+                }
+                model[addr.raw()] = v;
+                break;
+            }
+            }
+        }
+    }
 }

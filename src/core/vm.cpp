@@ -1,5 +1,7 @@
 #include "core/vm.hpp"
 
+#include <utility>
+
 namespace malm::core {
 
 Io::~Io() = default;
@@ -51,100 +53,122 @@ std::string format_fault(const Fault& f) {
     return s;
 }
 
-template <class M>
-Status BasicVm<M>::fail(Error e, Word a, Word c, Word d, bool overflow) noexcept {
-    fault_ = Fault{e, M::to_value(c), M::to_value(d), M::to_value(a), m_.n(), steps_, overflow};
+template <class M> Status BasicVm<M>::fail(Error e, const Regs& r, bool overflow) noexcept {
+    fault_ =
+        Fault{e, M::to_value(r.c), M::to_value(r.d), M::to_value(r.a), m_.n(), r.steps, overflow};
     return Status::Faulted;
 }
 
-template <class M> template <class... Obs> Status BasicVm<M>::step_inner(Io& io, Obs&... obs) {
-    ++steps_;
+template <class M>
+template <class... Obs>
+inline Status BasicVm<M>::step_inner(Regs& r, Io& io, Obs&... obs) {
+    ++r.steps;
 
     // 1. Fetch check.
-    const Word cell = m_.read(c_);
+    const Word cell = m_.read(r.c, Port::C);
     if (!M::is_cell(cell)) {
         if constexpr (sizeof...(Obs) > 0) {
-            (obs.before({steps_, M::to_value(c_), M::to_value(cell), false, Op::Nop,
-                         M::to_value(d_), M::to_value(m_.read(d_)), M::to_value(a_), m_.n()}),
+            (obs.before({r.steps, M::to_value(r.c), M::to_value(cell), false, Op::Nop,
+                         M::to_value(r.d), M::to_value(m_.read(r.d)), M::to_value(r.a), m_.n()}),
              ...);
         }
-        return fail(Error::Exec, a_, c_, d_);
+        return fail(Error::Exec, r);
     }
 
     // 2. Decode.
-    const Op op = decode(M::mod94(c_), M::cell_code(cell));
+    const Op op = decode(r.c94, M::cell_code(cell));
     if constexpr (sizeof...(Obs) > 0) {
-        (obs.before({steps_, M::to_value(c_), M::to_value(cell), true, op, M::to_value(d_),
-                     M::to_value(m_.read(d_)), M::to_value(a_), m_.n()}),
+        (obs.before({r.steps, M::to_value(r.c), M::to_value(cell), true, op, M::to_value(r.d),
+                     M::to_value(m_.read(r.d)), M::to_value(r.a), m_.n()}),
          ...);
     }
 
-    // 3. Execute.
+    // 3. Execute. `target` is [C] afterwards: still the fetched cell (checked), unless the step
+    // jumps or writes [D] with D == C; only those read and check it again (step 4's check).
+    Word target = cell;
     switch (op) {
     case Op::Jmp:
-        c_ = m_.read(d_);
+        r.c = m_.read(r.d, Port::D);
+        r.c94 = M::mod94(r.c);
+        target = m_.read(r.c, Port::C);
+        if (!M::is_cell(target)) {
+            return fail(Error::Encrypt, r);
+        }
         break;
     case Op::Out:
-        if (!io.write_byte(static_cast<std::uint8_t>(M::mod256(a_)))) {
-            return fail(Error::Io, a_, c_, d_);
+        if (!io.write_byte(static_cast<std::uint8_t>(M::mod256(r.a)))) {
+            return fail(Error::Io, r);
         }
         break;
     case Op::In: {
         if (!io.flush()) {
-            return fail(Error::Io, a_, c_, d_);
+            return fail(Error::Io, r);
         }
         int b = kEof;
         if (!eof_) {
             b = io.read_byte();
             if (b == kIoError) {
-                return fail(Error::Io, a_, c_, d_);
+                return fail(Error::Io, r);
             }
         }
         if (b == kEof) {
             eof_ = true;
-            a_ = M::eof();
+            r.a = M::eof();
         } else {
-            a_ = M::from_byte(static_cast<std::uint8_t>(b));
+            r.a = M::from_byte(static_cast<std::uint8_t>(b));
         }
         break;
     }
     case Op::Rot:
-        a_ = m_.rotr(m_.read(d_));
-        m_.write(d_, a_);
+        r.a = m_.rotr(m_.read(r.d, Port::D));
+        m_.write(r.d, r.a, Port::D);
+        if (r.d == r.c) {
+            target = r.a;
+            if (!M::is_cell(target)) {
+                return fail(Error::Encrypt, r);
+            }
+        }
         break;
     case Op::MovD:
-        d_ = m_.read(d_);
+        r.d = m_.read(r.d, Port::D);
         break;
     case Op::Opr:
-        a_ = M::crz(a_, m_.read(d_));
-        m_.write(d_, a_);
+        r.a = M::crz(r.a, m_.read(r.d, Port::D));
+        m_.write(r.d, r.a, Port::D);
+        if (r.d == r.c) {
+            target = r.a;
+            if (!M::is_cell(target)) {
+                return fail(Error::Encrypt, r);
+            }
+        }
         break;
     case Op::Nop:
         break;
     case Op::Hlt:
         halted_ = true;
         return Status::Halted;
+    default: // decode only yields the 8 ops; no range check before the jump table
+        std::unreachable();
     }
 
     // 4. Encrypt the cell at the current C.
-    const Word target = m_.read(c_);
-    if (!M::is_cell(target)) {
-        return fail(Error::Encrypt, a_, c_, d_);
-    }
-    m_.write(c_, M::encrypted(target));
+    m_.write(r.c, M::encrypted(target), Port::C);
 
     // 5. Increment C and D.
-    const std::optional<Word> nc = M::incremented(c_);
-    const std::optional<Word> nd = M::incremented(d_);
+    const std::optional<Word> nc = M::incremented(r.c);
+    const std::optional<Word> nd = M::incremented(r.d);
     if (!nc || !nd) {
-        return fail(Error::Width, a_, c_, d_, true);
+        return fail(Error::Width, r, true);
     }
-    c_ = *nc;
-    d_ = *nd;
+    r.c = *nc;
+    r.d = *nd;
+    // The remainder rule is continuous under +1 except at the wrap to 0 (...222 has remainder 16
+    // mod 94 in unleashed mode, as 59048 has in classic mode).
+    r.c94 = r.c == Word{} || r.c94 == 93 ? 0 : r.c94 + 1;
 
     // 6. Growth rule.
-    if (!m_.grow(c_, d_)) {
-        return fail(Error::Width, a_, c_, d_);
+    if (!m_.grow(r.c, r.d)) {
+        return fail(Error::Width, r);
     }
     return Status::Continue;
 }
@@ -153,7 +177,7 @@ template <class M> Status BasicVm<M>::finish(Io& io, Status s) {
     const bool flushed = io.flush();
     if (s == Status::Halted && !flushed) {
         halted_ = false;
-        return fail(Error::Io, a_, c_, d_);
+        return fail(Error::Io, load_regs());
     }
     return s;
 }
@@ -165,7 +189,9 @@ template <class M> StepResult BasicVm<M>::step(Io& io) {
     } else if (fault_) {
         s = Status::Faulted;
     } else {
-        s = step_inner(io);
+        Regs r = load_regs();
+        s = step_inner(r, io);
+        store_regs(r);
         if (s != Status::Continue) {
             s = finish(io, s);
         }
@@ -183,16 +209,18 @@ RunResult BasicVm<M>::run_impl(Io& io, std::optional<std::uint64_t> max_steps, O
         s = Status::Faulted;
     } else {
         const std::uint64_t limit = max_steps.value_or(~std::uint64_t{0});
-        while (steps_ < limit) {
-            s = step_inner(io, obs...);
+        Regs r = load_regs();
+        while (r.steps < limit) {
+            s = step_inner(r, io, obs...);
             if (s != Status::Continue) {
                 break;
             }
         }
+        store_regs(r);
         if (s == Status::Continue) { // step limit
             const bool flushed = io.flush();
             if (!flushed) {
-                s = fail(Error::Io, a_, c_, d_);
+                s = fail(Error::Io, r);
             } else {
                 return {RunResult::Kind::StepLimit, std::nullopt};
             }

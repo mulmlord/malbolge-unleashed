@@ -122,8 +122,9 @@ class Value {
         if (raw_ == pow3[kTrits] - 1) {
             return Value(0);
         }
+        // The head changes exactly where raw_ + 1 reaches 3^39 (head 0 -> 1) or 2 * 3^39 (1 -> 2).
         const std::uint64_t next = raw_ + 1;
-        if (next / pow3[kMaxWidth] != raw_ / pow3[kMaxWidth]) {
+        if (next == pow3[kMaxWidth] || next == 2 * pow3[kMaxWidth]) {
             return std::nullopt;
         }
         return Value(next);

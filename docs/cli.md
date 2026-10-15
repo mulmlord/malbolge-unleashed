@@ -135,7 +135,7 @@ runs, so tests compare the block without them.
 | `pages` | unleashed: the number of materialised memory pages (3^8 cells each; written pages only); classic: `-` |
 | `op <name>` | steps per decoded instruction, in the order `Jmp Out In Rot MovD Opr Nop Hlt`; a step that fails with `E_EXEC` is not decoded and so counted in `steps` only; every other step, including one that faults later, is counted. Without `E_EXEC` the counts add up to `steps` |
 | `wall` | wall-clock seconds of the run (excluding loading) |
-| `steps/s` | `steps` divided by `wall`, rounded down (0 if `wall` is 0); it measures the loop with the observer attached, a plain run is faster |
+| `steps/s` | `steps` divided by `wall`, rounded down (0 if `wall` is 0); it measures the loop with the observer attached, a plain run is faster ([benchmarks.md](benchmarks.md) times that) |
 
 Example of a fault with both options (`tests/corpus/exec_fault.mal`):
 

@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <random>
 #include <span>
 #include <string>
 #include <type_traits>
@@ -461,4 +462,167 @@ TEST_CASE("observer sees E_EXEC steps undecoded and honours the step limit") {
     Rec rec2;
     CHECK(lim.run(io, rec2, 2).kind == RunResult::Kind::StepLimit);
     CHECK(rec2.v.size() == 2);
+}
+
+namespace {
+
+// The step order of spec 5 written out plainly: the machine's plain read and write, [C] read again
+// for encryption, C mod 94 computed every step. The reference for the step loop (issue #37), which
+// keeps C mod 94 up to date incrementally, reads memory through per-register page cursors and
+// reads [C] again only when it can have changed.
+template <class M> struct RefVm {
+    using Word = typename M::Word;
+    M m;
+    Word a{};
+    Word c{};
+    Word d{};
+    bool eof = false;
+
+    explicit RefVm(std::span<const std::uint8_t> program) : m(program) {}
+
+    // Continue, Halted or Faulted (with `err` set).
+    Status step(StrIo& io, Error& err) {
+        const Word cell = m.read(c);
+        if (!M::is_cell(cell)) {
+            err = Error::Exec;
+            return Status::Faulted;
+        }
+        switch (kOpOfCode[(M::mod94(c) + M::cell_code(cell)) % 94]) {
+        case Op::Jmp:
+            c = m.read(d);
+            break;
+        case Op::Out:
+            io.write_byte(static_cast<std::uint8_t>(M::mod256(a)));
+            break;
+        case Op::In: {
+            const int b = eof ? kEof : io.read_byte();
+            eof = b == kEof;
+            a = eof ? M::eof() : M::from_byte(static_cast<std::uint8_t>(b));
+            break;
+        }
+        case Op::Rot:
+            a = m.rotr(m.read(d));
+            m.write(d, a);
+            break;
+        case Op::MovD:
+            d = m.read(d);
+            break;
+        case Op::Opr:
+            a = M::crz(a, m.read(d));
+            m.write(d, a);
+            break;
+        case Op::Nop:
+            break;
+        case Op::Hlt:
+            return Status::Halted;
+        }
+        const Word target = m.read(c);
+        if (!M::is_cell(target)) {
+            err = Error::Encrypt;
+            return Status::Faulted;
+        }
+        m.write(c, M::encrypted(target));
+        const auto nc = M::incremented(c);
+        const auto nd = M::incremented(d);
+        if (!nc || !nd || !m.grow(*nc, *nd)) {
+            err = Error::Width;
+            return Status::Faulted;
+        }
+        c = *nc;
+        d = *nd;
+        return Status::Continue;
+    }
+};
+
+// Runs `program` for up to `max_steps` steps on the VM and on RefVm, from registers (a, c, d) with
+// `pokes` written first, and requires the same registers, n and output after every step and the
+// same stop.
+template <class VmT, class M>
+void check_against_reference(
+    const std::vector<std::uint8_t>& program, BasicRegisters<typename M::Word> regs,
+    const std::vector<std::pair<typename M::Word, typename M::Word>>& pokes,
+    const std::string& input, int max_steps) {
+    VmT vm(program);
+    RefVm<M> ref(program);
+    for (const auto& [addr, val] : pokes) {
+        vm.poke(addr, val);
+        ref.m.write(M::normalize(addr), M::normalize(val));
+    }
+    vm.set_registers(regs);
+    ref.a = vm.a();
+    ref.c = vm.c();
+    ref.d = vm.d();
+    StrIo vio;
+    StrIo rio;
+    vio.in = rio.in = input;
+    for (int i = 0; i < max_steps; ++i) {
+        Error err{};
+        const Status want = ref.step(rio, err);
+        const StepResult got = vm.step(vio);
+        REQUIRE(got.status == want);
+        if (want == Status::Faulted) {
+            REQUIRE(got.fault->error == err);
+        }
+        REQUIRE(vio.out == rio.out);
+        if (want != Status::Continue) {
+            return;
+        }
+        REQUIRE(vm.a() == ref.a);
+        REQUIRE(vm.c() == ref.c);
+        REQUIRE(vm.d() == ref.d);
+        REQUIRE(vm.n() == ref.m.n());
+    }
+}
+
+std::vector<std::uint8_t> random_cells(std::mt19937_64& rng, std::size_t len) {
+    std::vector<std::uint8_t> p(len);
+    for (auto& x : p) {
+        x = static_cast<std::uint8_t>(33 + rng() % 94);
+    }
+    return p;
+}
+
+} // namespace
+
+TEST_CASE("the step loop matches a plain reference step, both modes") {
+    std::mt19937_64 rng(37);
+    const std::string input = "Hello\n";
+    for (int i = 0; i < 400; ++i) {
+        const auto program = random_cells(rng, 2 + rng() % 400);
+        check_against_reference<Vm, UnleashedMachine>(program, {}, {}, input, 3000);
+        check_against_reference<ClassicVm, ClassicMachine>(program, {}, {}, input, 3000);
+    }
+}
+
+TEST_CASE("the step loop matches a plain reference step across the ...222 -> 0 wrap") {
+    // C (and D) start a few cells below the wrap, on code cells, so the run crosses it: C mod 94
+    // jumps from 16 to 0 there instead of counting on.
+    std::mt19937_64 rng(3737);
+    const std::string input = "xyz";
+    for (int i = 0; i < 300; ++i) {
+        const auto program = random_cells(rng, 2 + rng() % 200);
+        const std::uint64_t below = 1 + rng() % 40;
+        const bool d_too = rng() % 2 == 0;
+
+        std::vector<std::pair<Value, Value>> upokes;
+        const std::uint64_t top = pow3[kTrits] - 1; // ...222
+        for (std::uint64_t k = 0; k <= below; ++k) {
+            upokes.emplace_back(Value::from_raw(top - k), nat(33 + rng() % 94));
+        }
+        const Value uc = Value::from_raw(top - below);
+        const Value ud = d_too ? Value::from_raw(top - rng() % 40) : nat(rng() % 200);
+        check_against_reference<Vm, UnleashedMachine>(program, {nat(rng() % 300), uc, ud}, upokes,
+                                                      input, 2000);
+
+        std::vector<std::pair<ClassicWord, ClassicWord>> cpokes;
+        for (std::uint64_t k = 0; k <= below; ++k) {
+            cpokes.emplace_back(static_cast<ClassicWord>(kClassicEof - k),
+                                static_cast<ClassicWord>(33 + rng() % 94));
+        }
+        const auto cc = static_cast<ClassicWord>(kClassicEof - below);
+        const auto cd = d_too ? static_cast<ClassicWord>(kClassicEof - rng() % 40)
+                              : static_cast<ClassicWord>(rng() % 200);
+        check_against_reference<ClassicVm, ClassicMachine>(
+            program, {static_cast<ClassicWord>(rng() % 300), cc, cd}, cpokes, input, 2000);
+    }
 }
