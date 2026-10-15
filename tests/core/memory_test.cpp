@@ -524,3 +524,37 @@ TEST_CASE("port cursors: reads and writes through C and D agree with plain ones"
         }
     }
 }
+
+TEST_CASE("snapshot API: page indices, page contents, page_for_write, restore_n") {
+    const std::vector<std::uint8_t> program = {'j', 'v'}; // as in spec 9.5
+    Memory m(program);
+    CHECK(m.fill_pattern() == Memory::fill_pattern_of(program));
+    CHECK(m.page_indices() == std::vector<std::uint64_t>{0});
+    const Value far = *Value::natural(5 * Memory::kPageCells + 7);
+    m.write(far, *Value::natural(99));
+    m.write(*Value::natural(2 * Memory::kPageCells), *Value::natural(98));
+    CHECK(m.page_indices() == std::vector<std::uint64_t>{0, 2, 5});
+    CHECK(m.page(5)[7] == *Value::natural(99));
+    CHECK(m.page(5)[8] == m.read(*Value::natural(5 * Memory::kPageCells + 8)));
+    CHECK(m.page(0)[0] == *Value::natural('j'));
+
+    // page_for_write materialises a page with the fill and writes through to reads.
+    const auto cells = m.page_for_write(9);
+    CHECK(m.page_count() == 4);
+    for (std::uint64_t i = 0; i < Memory::kPageCells; i += 997) {
+        CHECK(cells[i] == m.fill_pattern()[(9 * Memory::kPageCells + i) % 6]);
+    }
+    cells[3] = *Value::natural(42);
+    CHECK(m.read(*Value::natural(9 * Memory::kPageCells + 3)) == *Value::natural(42));
+    CHECK(m.read(*Value::natural(9 * Memory::kPageCells + 3), malm::core::Port::D) ==
+          *Value::natural(42));
+    CHECK(m.page_for_write(9).data() == cells.data()); // already there
+
+    CHECK(m.n() == 10);
+    m.restore_n(17);
+    CHECK(m.n() == 17);
+    CHECK(m.grow_for(*Value::natural(pow3[15]), *Value::natural(0)));
+    CHECK(m.n() == 17);
+    CHECK(m.grow_for(*Value::natural(pow3[16]), *Value::natural(0)));
+    CHECK(m.n() == 18);
+}

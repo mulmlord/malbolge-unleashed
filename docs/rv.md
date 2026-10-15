@@ -651,6 +651,10 @@ Program size and startup (the startup code writes the registers, RAM and tables,
 | 64 KiB | 0.72 MB | 30 M | about a second |
 | 1 MiB (the default) | 2.3 MB | 221 M | 6 to 60 seconds (idle to busy machine) |
 
+`malm snapshot prog.malm` saves the state after the startup code (and up to the program's first
+I/O), and `malm run` starts from it: identical, and with 1 MiB of guest RAM 0.4 s instead of 1.9 s
+of steps ([snapshot.md](snapshot.md), [benchmarks.md](benchmarks.md)).
+
 The 26 `switch` tables (320 K characters each), the arithmetic library and the register dump
 (section 4) make up the 20 M of the smallest; each word of guest RAM adds about 750 characters. `malm hla` compiles the 1 MiB
 emulator in about 25 seconds (release build). HLA's outlining (hla.md 4.8, issue #31) took the

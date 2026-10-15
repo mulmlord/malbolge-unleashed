@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "container/container.hpp"
+#include "container/sha256.hpp"
 #include "core/loader.hpp"
 
 namespace malm {
@@ -19,6 +20,7 @@ struct LoadedProgram {
     bool classic = false;
     bool exit_a = false; // from the .malm header; always false for text
     bool from_malm = false;
+    std::optional<container::Sha256> file_hash; // of the file's bytes, if load_program was asked
 };
 
 // Reads a whole regular file. On failure prints `malm: ...` to `err` and returns false.
@@ -38,6 +40,10 @@ bool write_output(std::string_view path, const std::vector<std::uint8_t>& bytes,
 bool is_pure(const std::vector<std::uint8_t>& text, const std::vector<std::uint8_t>& malm,
              bool exit_a);
 
+// Parses a positive decimal integer fitting 64 bits (step numbers and counts). Returns nullopt
+// otherwise.
+std::optional<std::uint64_t> parse_count(std::string_view text);
+
 // Parses a --max-cells value: a positive decimal integer. Returns nullopt otherwise.
 std::optional<std::size_t> parse_max_cells(std::string_view text);
 
@@ -51,10 +57,11 @@ std::vector<std::uint8_t> encode_malm(LoadedProgram&& prog, bool exit_a, contain
 // Loads `path`, autodetecting .malm by its magic. For a .malm the header's mode decides;
 // `classic_flag` (--classic) must agree with it. For text, `classic_flag` selects the mode and the
 // loader's cell limit. `max_cells` is the reader's resource cap (--max-cells); it is combined
-// with the format limit of the mode (the smaller one applies). Returns 0 on success, else the exit
+// with the format limit of the mode (the smaller one applies). With `hash_file`, out.file_hash is
+// the SHA-256 of the file (the key of startup snapshots). Returns 0 on success, else the exit
 // status (1: file/format error, 2: usage error such as --classic on an unleashed .malm) after
 // printing a diagnostic to `err`.
 int load_program(std::string_view path, bool classic_flag, std::ostream& err, LoadedProgram& out,
-                 std::size_t max_cells = core::kDefaultMaxCells);
+                 std::size_t max_cells = core::kDefaultMaxCells, bool hash_file = false);
 
 } // namespace malm

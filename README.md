@@ -8,7 +8,7 @@ and the [Malbolge research notes](docs/research/malbolge-research.md).
 The normative language reference is [docs/spec.md](docs/spec.md).
 The assembly language (`.mua`) is specified in [docs/asm.md](docs/asm.md).
 The high-level assembly language (`.mhl`) is specified in [docs/hla.md](docs/hla.md).
-The command line (`run`, `asm`, `hla`, `export`, `pack`, `--trace`, `--stats`) is documented in [docs/cli.md](docs/cli.md).
+The command line (`run`, `asm`, `hla`, `export`, `pack`, `snapshot`, `--trace`, `--stats`) is documented in [docs/cli.md](docs/cli.md).
 
 ## Prerequisites
 
@@ -47,7 +47,7 @@ Binaries land in `build/<preset>/src/driver/malm`. CMake options: `MALM_WERROR`,
 | Path | Contents |
 |---|---|
 | `src/core` | values, tables, sparse memory, loader, run loop |
-| `src/container` | `.malm` format ([docs/malm-format.md](docs/malm-format.md)) |
+| `src/container` | `.malm` format ([docs/malm-format.md](docs/malm-format.md)), startup snapshots ([docs/snapshot.md](docs/snapshot.md)) |
 | `src/asm` | assembler and disassembler |
 | `src/hla` | high-level assembler |
 | `src/aot` | RV32IM ELF to HLA ahead-of-time translator |
@@ -126,7 +126,11 @@ interpreter, built into `malm` with picolibc, in emu mode only and slowly (a min
 
 M6 (performance, in progress): the VM's step loop runs programs in unleashed mode, emu and aot mode
 included, 2.7 to 4 times as fast as at M3 (issue #37); `tests/bench/vm_bench.sh` is the benchmark
-([docs/benchmarks.md](docs/benchmarks.md)).
+([docs/benchmarks.md](docs/benchmarks.md)). `malm snapshot prog.malm` saves the state after the
+steps before the program's first I/O, its startup code, in `prog.malm.snap`, and `malm run` then
+starts from it: identical to running those steps (`malm snapshot --check` compares the two), and
+4.6 to 9.5 times as fast as them; a whole run of the 1 MiB emu-mode hello takes 3.0 s instead of
+4.3 s, most of it now loading the program (issue #38, [docs/snapshot.md](docs/snapshot.md)).
 
 ## License
 

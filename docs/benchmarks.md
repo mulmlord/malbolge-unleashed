@@ -126,4 +126,44 @@ across the `...222 -> 0` wrap; `memory_test` checks the cursors against plain ac
 - **Cells of 8 bytes.** Much of an emu-mode step is the load of [C] and the dispatch that depends
   on it, in a memory of about 100 000 pages (5 GB with 1 MiB of guest RAM, [rv.md](rv.md)).
   Denser pages (most cells hold 33..126) would need a second page format for the rest; not done.
-- **Startup** is steps like any others; the startup snapshot accelerator is issue #38.
+- **Startup** is steps like any others here; the startup snapshot (below) skips them.
+
+## Issue #38: startup snapshots
+
+A startup snapshot ([snapshot.md](snapshot.md)) replaces the steps before a program's first I/O
+by restoring the state they leave. Measured in process with `Vm::run_pure`, `write_snapshot`,
+`Snapshot::read` and `restore`, the fastest of three runs each (same machine and build as above):
+
+| program | steps before the first I/O | of all steps | pages | snapshot | the steps | restoring | speed-up |
+|---|---|---|---|---|---|---|---|
+| hla hello | 42 269 | 42 471 | 35 | 743 B | 0.001 s | under 0.001 s | |
+| hla rev | 3 177 408 | 3 194 233 | 1 283 | 7.9 KB | 0.037 s | 0.005 s | 7x |
+| C hello, emu, 64K | 37 349 343 | 37 993 705 | 10 673 | 46.7 KB | 0.398 s | 0.042 s | 9.5x |
+| C hello, emu, 1M | 225 429 287 | 226 073 739 | 100 778 | 47.3 KB | 1.942 s | 0.423 s | 4.6x |
+| C fizzbuzz, emu, 1M | 216 951 642 | 273 423 794 | 99 895 | 56.2 KB | 1.870 s | 0.364 s | 5.1x |
+| C hello, aot, 1M | 214 848 406 | 215 063 793 | 99 566 | 47.9 KB | 1.818 s | 0.372 s | 4.9x |
+
+"Restoring" is reading the snapshot (validation and decompression: 11 ms for the 1 MiB programs)
+and writing its pages into a VM that has loaded the program. The startup code of these programs
+runs every program cell once, so the snapshot of a 218 M-cell program is a few runs per page: the
+program encrypted once, about 880 000 other cells (rv-emu's registers and guest RAM, the tables),
+and 67 000 pages beyond the program. Restoring is mostly materialising those pages (3.5 GB) and
+encrypting the program's cells in place; the steps themselves are gone. Writing a snapshot costs
+about 1.1 s for the 1 MiB programs, once.
+
+`malm run` as a whole, with and without the snapshot (`--no-snapshot`), the fastest of three
+runs alternating the two, output to `/dev/null`:
+
+| program | without | with | speed-up |
+|---|---|---|---|
+| hla rev | 0.062 s | 0.044 s | 1.41x |
+| C hello, emu, 64K | 0.614 s | 0.377 s | 1.63x |
+| C hello, emu, 1M | 4.332 s | 3.031 s | 1.43x |
+| C fizzbuzz, emu, 1M | 4.679 s | 3.421 s | 1.37x |
+| C hello, aot, 1M | 4.217 s | 2.972 s | 1.42x |
+
+The snapshot saves what the steps cost beyond restoring, 1.2 to 1.3 s of a whole run of the
+1 MiB programs; the rest of a run is now loading. Profiled with the snapshot, 54% of `malm run` of the 1 MiB hello is unpacking the
+`.malm` (`Unpacker::feed`, 218 M cells denormalized one by one into a vector that grows by
+doubling), then the restore (9%) and building the VM's memory (4%), with the kernel's page faults
+for 5 GB of fresh memory and freeing it at exit. Loading faster is issue #39.

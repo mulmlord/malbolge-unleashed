@@ -90,6 +90,15 @@ bool read_file(std::string_view path, std::vector<std::uint8_t>& bytes, std::ost
     return true;
 }
 
+std::optional<std::uint64_t> parse_count(std::string_view text) {
+    std::uint64_t v = 0;
+    const auto [end, ec] = std::from_chars(text.data(), text.data() + text.size(), v);
+    if (text.empty() || ec != std::errc{} || end != text.data() + text.size() || v == 0) {
+        return std::nullopt;
+    }
+    return v;
+}
+
 std::optional<std::size_t> parse_max_cells(std::string_view text) {
     std::size_t v = 0;
     const auto r = std::from_chars(text.data(), text.data() + text.size(), v);
@@ -118,10 +127,14 @@ std::vector<std::uint8_t> encode_malm(LoadedProgram&& prog, bool exit_a, contain
 namespace {
 
 int load_program_impl(std::string_view path, bool classic_flag, std::ostream& err,
-                      LoadedProgram& out, std::size_t max_cells) {
+                      LoadedProgram& out, std::size_t max_cells, bool hash_file) {
     std::vector<std::uint8_t> bytes;
     if (!read_file(path, bytes, err)) {
         return 1;
+    }
+    std::optional<container::Sha256> hash;
+    if (hash_file) {
+        hash = container::sha256(bytes);
     }
     if (container::is_malm(bytes)) {
         auto p = container::read_malm(bytes, container::Limits{max_cells});
@@ -135,7 +148,7 @@ int load_program_impl(std::string_view path, bool classic_flag, std::ostream& er
                 << "' is an unleashed-mode .malm; --classic cannot be used with it\n";
             return 2;
         }
-        out = {std::move(p->cells), classic, p->exit_a, true};
+        out = {std::move(p->cells), classic, p->exit_a, true, hash};
         return 0;
     }
     const std::size_t format_max = classic_flag ? core::kClassicCells : core::kUnleashedMaxCells;
@@ -149,16 +162,16 @@ int load_program_impl(std::string_view path, bool classic_flag, std::ostream& er
         err << '\n';
         return 1;
     }
-    out = {std::move(*cells), classic_flag, false, false};
+    out = {std::move(*cells), classic_flag, false, false, hash};
     return 0;
 }
 
 } // namespace
 
 int load_program(std::string_view path, bool classic_flag, std::ostream& err, LoadedProgram& out,
-                 std::size_t max_cells) {
+                 std::size_t max_cells, bool hash_file) {
     try {
-        return load_program_impl(path, classic_flag, err, out, max_cells);
+        return load_program_impl(path, classic_flag, err, out, max_cells, hash_file);
     } catch (const std::bad_alloc&) {
         err << "malm: out of memory\n";
         return 1;

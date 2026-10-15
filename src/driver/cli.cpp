@@ -15,6 +15,7 @@
 #include "driver/rvaot_cmd.hpp"
 #include "driver/rvemu_cmd.hpp"
 #include "driver/rvref_cmd.hpp"
+#include "driver/snapshot_cmd.hpp"
 #include "version.hpp"
 
 namespace malm {
@@ -38,6 +39,8 @@ constexpr auto kCommands = std::to_array<Command>({
     {"disasm", "Disassemble a .malm or Malbolge text file", disasm_command},
     {"build", "Build a C program or an RV32IM ELF into a .malm or an executable", build_command},
     {"pack", "Pack a .malm into a native executable", pack_command},
+    {"snapshot", "Write or check the startup snapshot of a program (<file>.snap)",
+     snapshot_command},
     {"export", "Convert between .malm and plain Malbolge text (--text | --malm)", export_command},
     {"rvref", "Run an RV32IM ELF on the C++ reference emulator", rvref_command, true},
     {"rvemu", "Write the HLA program of rv-emu, the RV32IM emulator", rvemu_command, true},

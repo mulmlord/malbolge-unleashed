@@ -243,6 +243,47 @@ RunResult BasicVm<M>::run(Io& io, StepObserver& obs, std::optional<std::uint64_t
     return run_impl(io, max_steps, obs);
 }
 
+namespace {
+// run_pure's I/O: In and Out never execute, so only a fault's flush reaches it.
+struct NoIo final : Io {
+    int read_byte() override { return kIoError; }
+    bool write_byte(std::uint8_t) override { return false; }
+    bool flush() override { return true; }
+};
+} // namespace
+
+template <class M> RunResult BasicVm<M>::run_pure(std::optional<std::uint64_t> max_steps) {
+    NoIo io;
+    if (halted_ || fault_) {
+        return run(io, max_steps);
+    }
+    const std::uint64_t limit = max_steps.value_or(~std::uint64_t{0});
+    Regs r = load_regs();
+    Status s = Status::Continue;
+    bool before_io = false;
+    while (r.steps < limit) {
+        // The fetch and decode of the next step, which have no effects; step_inner repeats them.
+        const Word cell = m_.read(r.c, Port::C);
+        if (M::is_cell(cell)) {
+            const Op op = decode(r.c94, M::cell_code(cell));
+            if (op == Op::In || op == Op::Out || op == Op::Hlt) {
+                before_io = true;
+                break;
+            }
+        }
+        s = step_inner(r, io);
+        if (s != Status::Continue) {
+            break;
+        }
+    }
+    store_regs(r);
+    if (s == Status::Faulted) {
+        finish(io, s);
+        return {RunResult::Kind::Fault, fault_};
+    }
+    return {before_io ? RunResult::Kind::BeforeIo : RunResult::Kind::StepLimit, std::nullopt};
+}
+
 template class BasicVm<UnleashedMachine>;
 template class BasicVm<ClassicMachine>;
 

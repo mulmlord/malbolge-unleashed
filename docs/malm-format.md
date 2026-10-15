@@ -2,7 +2,9 @@
 
 A `.malm` file holds one Malbolge program: its cells, the mode it runs in and one flag. It is pure
 loading data: **the container never carries data** (no preloaded memory; spec 4, design spec 2.5).
-Implementation: `src/container/`; tests: `tests/container/container_test.cpp`.
+Implementation: `src/container/`; tests: `tests/container/container_test.cpp`. A startup snapshot,
+the state after a program's startup code, is a separate file next to it
+([snapshot.md](snapshot.md)); the `.malm` does not change.
 
 All integers are little-endian. A file is a fixed 32-byte header followed by the payload.
 

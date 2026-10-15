@@ -19,7 +19,7 @@ FetchContent_Declare(zstd
     SYSTEM)
 FetchContent_MakeAvailable(zstd)
 
-add_library(malm_container STATIC container.cpp)
+add_library(malm_container STATIC container.cpp sha256.cpp snapshot.cpp)
 target_include_directories(malm_container PUBLIC "${PROJECT_SOURCE_DIR}/src")
 target_link_libraries(malm_container PUBLIC malm_core PRIVATE malm_warnings libzstd_static)
 # zstd.h for the tests, which forge frames.

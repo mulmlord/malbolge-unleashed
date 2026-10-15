@@ -3,7 +3,9 @@
 # from examples/c, examples/cpp, examples/rust, examples/zig or examples/lua (<case>.c, .cpp, .rs,
 # .zig or .lua) built in emu or aot mode, with the minimal C library or picolibc, or as Rust, Zig
 # or Lua, into a .malm and, with --exe, a native executable; both run through real pipes and must
-# give the expected stdout and exit status.
+# give the expected stdout and exit status. The .malm also runs from its startup snapshot (issue
+# #38), which `malm snapshot --check` first finds identical to running the startup steps; with it
+# the output and status must be the same.
 # Usage: build_pipe_test.sh <malm> <compiler> <examples-dir> <programs-dir> <case> [emu|aot]
 #            [minimal|picolibc|rust|zig|lua]
 #   <compiler>  clang (also for lua), or rustc for rust, zig for zig
@@ -41,15 +43,25 @@ build() {
     fi
     "$malm" build -o "$tmp/prog.malm" "$@" || exit 1
     "$malm" build --exe -o "$tmp/prog" "$@" 2> "$tmp/err" || { cat "$tmp/err"; exit 1; }
+    "$malm" snapshot "$tmp/prog.malm" || exit 1
+    "$malm" snapshot --check "$tmp/prog.malm" || exit 1
 }
 
-# check <input file> <want file> <want status>: `cat input | malm run prog.malm` and
-# `cat input | ./prog` both write <want> and exit with <status>.
+# check <input file> <want file> <want status>: `cat input | malm run prog.malm`, without and with
+# the snapshot, and `cat input | ./prog` all write <want> and exit with <status>.
 check() {
-    for how in run exe; do
+    for how in run snapshot exe; do
         status=0
         if [ "$how" = run ]; then
-            cat "$1" | "$malm" run "$tmp/prog.malm" > "$tmp/out" || status=$?
+            cat "$1" | "$malm" run --no-snapshot "$tmp/prog.malm" > "$tmp/out" || status=$?
+        elif [ "$how" = snapshot ]; then
+            # stderr must be empty: a snapshot that is ignored says so there.
+            cat "$1" | "$malm" run "$tmp/prog.malm" > "$tmp/out" 2> "$tmp/err" || status=$?
+            if [ -s "$tmp/err" ]; then
+                cat "$tmp/err"
+                echo "snapshot: unexpected stderr"
+                exit 1
+            fi
         else
             cat "$1" | "$tmp/prog" > "$tmp/out" || status=$?
         fi
