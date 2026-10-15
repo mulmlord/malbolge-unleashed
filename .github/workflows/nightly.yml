@@ -23,8 +23,15 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y ninja-build lld-18
       - name: Install the Rust target
         run: rustup target add riscv32im-unknown-none-elf && rustc --version
+      # Zig 0.17, pinned: the Zig runtime is written against its standard library.
+      - name: Install Zig
+        run: |
+          curl -sSfL https://ziglang.org/download/0.17.0/zig-x86_64-linux-0.17.0.tar.xz -o "$RUNNER_TEMP/zig.tar.xz"
+          echo "1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026  $RUNNER_TEMP/zig.tar.xz" | sha256sum -c
+          mkdir -p "$HOME/zig" && tar -xJf "$RUNNER_TEMP/zig.tar.xz" -C "$HOME/zig" --strip-components=1
+          echo "$HOME/zig" >> "$GITHUB_PATH"
       - name: Configure
-        run: cmake --preset ${{ matrix.preset }} -DMALM_RV_TESTS=ON -DMALM_PICOLIBC=ON -DMALM_RUST_TESTS=ON
+        run: cmake --preset ${{ matrix.preset }} -DMALM_RV_TESTS=ON -DMALM_PICOLIBC=ON -DMALM_RUST_TESTS=ON -DMALM_ZIG_TESTS=ON
       - name: Build
         run: cmake --build --preset ${{ matrix.preset }}
       # ctest exits 0 when no tests match the label, so this is safe before any slow tests exist.

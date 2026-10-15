@@ -21,6 +21,8 @@ The command line (`run`, `asm`, `hla`, `export`, `pack`, `--trace`, `--stats`) i
 - For `malm build` of Rust programs and the Rust tests: rustc 1.85+ with the
   `riscv32im-unknown-none-elf` target (`rustup target add riscv32im-unknown-none-elf`); without it
   those tests are skipped with a configure warning (`MALM_RUST_TESTS`)
+- For `malm build` of Zig programs and the Zig tests: Zig 0.17 ([ziglang.org](https://ziglang.org/download/));
+  without it those tests are skipped with a configure warning (`MALM_ZIG_TESTS`)
 
 Arch: `sudo pacman -S --needed cmake ninja clang lld`
 
@@ -53,12 +55,13 @@ Binaries land in `build/<preset>/src/driver/malm`. CMake options: `MALM_WERROR`,
 | `src/pack` | native executable packer |
 | `src/rv` | RV32IM ELF loader, the C++ reference emulator (`malm rvref`) and the generator of rv-emu with its instruction semantics (`malm rvemu`, [docs/rv.md](docs/rv.md)) |
 | `rv/emu` | builds `emu.malm`, the RV32IM emulator written in HLA |
-| `rv/runtime` | RISC-V runtime: crt0, linker script, syscalls, minimal libc; picolibc and libc++ build and their system interface; the Rust runtime crate ([docs/rv.md](docs/rv.md)) |
+| `rv/runtime` | RISC-V runtime: crt0, linker script, syscalls, minimal libc; picolibc and libc++ build and their system interface; the Rust runtime crate and the Zig runtime ([docs/rv.md](docs/rv.md)) |
 | `examples/asm` | assembly examples: hello world, cat, halting cat, adder, digital root |
 | `examples/hla` | high-level assembly examples: hello world, cat, exit status, reverse (stack) |
 | `examples/c` | C examples for the RISC-V runtime: hello world, cat, wc, fizzbuzz, sort; stats (floating point, picolibc) |
 | `examples/cpp` | C++ examples (libc++): hello world, sort (`std::vector`, `std::sort`) |
 | `examples/rust` | Rust examples (`no_std` with `alloc`): hello world, cat, sort |
+| `examples/zig` | Zig examples: hello world, cat, sort |
 | `tests/` | doctest suites (labels `fast`, `slow`) |
 | `docs/` | spec, CLI reference, research and design decisions (`docs/adr`) |
 | `prototypes/` | throwaway spike code behind the ADRs; not built or tested |
@@ -114,7 +117,9 @@ with libc++ on picolibc, without exceptions and RTTI unless `-- -fexceptions` (e
 `-- -frtti` turns them on: `malm build --exe -o sort examples/cpp/sort.cpp`, then
 `printf 'b\na\n' | ./sort`. Rust programs are `no_std` crates with `alloc`, linked with malm's
 runtime crate (the entry point, a heap on `brk`, stdin and stdout, `println!`, panics):
-`malm build --ram 64K --exe -o cat examples/rust/cat.rs`, then `echo hi | ./cat`.
+`malm build --ram 64K --exe -o cat examples/rust/cat.rs`, then `echo hi | ./cat`. Zig programs
+(Zig 0.17) have a `pub fn main` and import `malm` for stdin, stdout and an allocator:
+`malm build --ram 64K --exe -o cat examples/zig/cat.zig`.
 
 ## License
 

@@ -227,6 +227,8 @@ bool is_cxx_source(std::string_view path) { return ends_with_any(path, {".cpp", 
 
 bool is_rust_source(std::string_view path) { return ends_with_any(path, {".rs"}); }
 
+bool is_zig_source(std::string_view path) { return ends_with_any(path, {".zig"}); }
+
 bool wants_exceptions(std::span<const std::string_view> args) {
     bool on = false;
     for (const std::string_view a : args) {
@@ -290,8 +292,9 @@ compile_c(const Toolchain& tools, std::span<const std::string_view> sources,
         return R::err(std::string("cannot create a temporary directory: ") + std::strerror(errno));
     }
     const fs::path& dir = tmp.path();
-    const std::vector<fs::path> runtime_paths =
-        write_runtime(dir, [](std::string_view path) { return !path.starts_with("rust/"); });
+    const std::vector<fs::path> runtime_paths = write_runtime(dir, [](std::string_view path) {
+        return !path.starts_with("rust/") && !path.starts_with("zig/");
+    });
     std::vector<fs::path> libc_sources;
     if (libc == Libc::Minimal) {
         for (const fs::path& p : runtime_paths) {
@@ -524,6 +527,96 @@ compile_rust(const std::string& rustc, std::string_view source,
             return R::err(error);
         }
         return R::err(diags.str().find("error: linking with") != std::string::npos
+                          ? "linking failed"
+                          : "compilation failed");
+    }
+    return read_elf(elf);
+}
+
+core::Result<std::string, std::string> find_zig(std::string_view zig, std::string_view path_env) {
+    using R = core::Result<std::string, std::string>;
+    if (!zig.empty()) {
+        return find_named(zig, path_env);
+    }
+    auto p = search_path("zig", path_env);
+    if (!p) {
+        return R::err("no Zig compiler: zig is not in PATH (install Zig " +
+                      std::string(kZigVersion) + ", or name the compiler with --zig)");
+    }
+    return R::ok(std::move(*p));
+}
+
+core::Result<std::vector<std::uint8_t>, std::string>
+compile_zig(const std::string& zig, std::string_view source, std::span<const std::string_view> args,
+            std::ostream& err) {
+    using R = core::Result<std::vector<std::uint8_t>, std::string>;
+    const TempDir tmp;
+    if (!tmp.ok()) {
+        return R::err(std::string("cannot create a temporary directory: ") + std::strerror(errno));
+    }
+    const fs::path& dir = tmp.path();
+
+    // The runtime uses std's I/O interfaces, which change from one Zig release to the next.
+    std::string error;
+    std::ostringstream version;
+    if (!run({zig, "version"}, dir / "version.log", version, error)) {
+        if (!error.empty()) {
+            return R::err(error);
+        }
+        err << version.str();
+        return R::err(zig + " version failed");
+    }
+    std::string found = version.str();
+    while (!found.empty() && (found.back() == '\n' || found.back() == '\r')) {
+        found.pop_back();
+    }
+    const std::string want = std::string(kZigVersion) + '.';
+    if (!found.starts_with(want)) {
+        return R::err(zig + " is Zig " + found + ", the Zig runtime needs Zig " +
+                      std::string(kZigVersion));
+    }
+
+    // Linker arguments: only symbol definitions, as assignments in the linker script, which take
+    // precedence over its PROVIDEs.
+    std::vector<std::string> zig_args;
+    std::vector<std::string> ld_args;
+    split_args(args, zig_args, ld_args);
+    std::string defsyms;
+    constexpr std::string_view kDefsym = "--defsym=";
+    for (const std::string& a : ld_args) {
+        const std::string_view def =
+            a.starts_with(kDefsym) ? std::string_view(a).substr(kDefsym.size()) : "";
+        const std::size_t eq = def.find('=');
+        if (eq == 0 || eq == std::string_view::npos || eq + 1 == def.size()) {
+            return R::err("unsupported linker argument '" + a +
+                          "' for Zig (only --defsym=<symbol>=<value>)");
+        }
+        defsyms += std::string(def.substr(0, eq)) + " = " + std::string(def.substr(eq + 1)) + ";\n";
+    }
+    write_runtime(
+        dir, [](std::string_view path) { return path == "link.ld" || path.starts_with("zig/"); });
+    std::ofstream(dir / "link.ld", std::ios::app) << defsyms;
+
+    const fs::path elf = dir / "prog.elf";
+    std::vector<std::string> argv{zig,     "build-exe",          "-target", std::string(kZigTarget),
+                                  "-mcpu", std::string(kZigCpu), "-O",      "ReleaseSafe"};
+    argv.insert(argv.end(), zig_args.begin(), zig_args.end());
+    // The local cache in the temporary directory, not .zig-cache in the working directory.
+    argv.insert(argv.end(), {"--cache-dir", (dir / "cache").string(), "--name", "prog", "-T",
+                             (dir / "link.ld").string(), "-femit-bin=" + elf.string()});
+    // The modules: the runtime's start.zig (the root), the program, malm.zig.
+    argv.insert(argv.end(), {"--dep", "malm", "--dep", "program",
+                             "-Mroot=" + (dir / "zig" / "start.zig").string(), "--dep", "malm",
+                             "-Mprogram=" + std::string(source),
+                             "-Mmalm=" + (dir / "zig" / "malm.zig").string()});
+    std::ostringstream diags;
+    const bool ok = run(argv, dir / "prog.log", diags, error);
+    err << diags.str();
+    if (!ok) {
+        if (!error.empty()) {
+            return R::err(error);
+        }
+        return R::err(diags.str().find("error: ld.lld:") != std::string::npos
                           ? "linking failed"
                           : "compilation failed");
     }

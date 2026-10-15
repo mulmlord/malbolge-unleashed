@@ -88,7 +88,7 @@ instructions from 1, the faulting one included. Reasons:
 script (`link.ld`), the system call wrappers and a minimal C library (`include/`, `src/`), or
 instead [picolibc](https://github.com/picolibc/picolibc), the full C library (`malm build --libc
 picolibc`, below), which comes with libc++ for C++ (below). A Rust program needs the same linker
-script and the runtime crate `rust/malm.rs` (below).
+script and the runtime crate `rust/malm.rs`, a Zig program the Zig runtime `zig/` (below).
 
 ### Toolchain and linking
 
@@ -329,6 +329,65 @@ Aot mode works too. **Size.** `examples/rust/hello.rs` is 5.7 KB of code, nearly
 `core::fmt`, which `println!` and the panic handler's message need: every program that can panic
 (an index out of bounds, an `unwrap`) carries it; `cat.rs` is 5.3 KB, `sort.rs` 21 KB.
 
+### Zig
+
+`malm build prog.zig` compiles a Zig program, given by its root file, with Zig 0.17 (the Zig
+runtime is written against that release's standard library; `malm build` checks `zig version`) for
+`riscv32-freestanding-none` with the CPU `generic_rv32+m`, and links it with `link.ld`, with zig's
+own linker; zig builds its compiler-rt itself (once, into its global cache). The runtime `zig/` is
+two modules: `start.zig` is the root module, which imports the program as the module `program`,
+and `malm.zig` is the module `malm`, which the program imports. Programs are compiled with `-O
+ReleaseSafe` (the arguments after `--` come later and apply to all three modules, so `-O
+ReleaseSmall` overrides it), and with the local cache in `malm build`'s temporary directory, not
+in `.zig-cache`. A program has a `pub fn main`, as on any other target:
+
+```zig
+const malm = @import("malm");
+
+pub fn main() void {
+    malm.print("Hello, world!\n", .{});
+}
+```
+
+By hand, as the CMake build in `tests/rv` does it:
+
+```sh
+zig build-exe -target riscv32-freestanding-none -mcpu=generic_rv32+m -O ReleaseSafe \
+    -T rv/runtime/link.ld --name prog -femit-bin=prog.elf \
+    --dep malm --dep program -Mroot=rv/runtime/zig/start.zig \
+    --dep malm -Mprogram=prog.zig -Mmalm=rv/runtime/zig/malm.zig
+```
+
+- **Entry and exit.** `_start` does what crt0 does, without constructors, then calls `main`.
+  `main` returns what std allows: `void` (status 0), a `u8` (the status), or either in an error
+  union, whose error prints `error: Name` on stderr and is status 1. `malm.exit(code)` flushes
+  stdout first, `malm.abort()` ends with 134 at once. zig has no `--defsym`: `malm build` turns `--
+  -Wl,--defsym=symbol=value` into an assignment in its copy of the linker script, and rejects any
+  other linker argument; with `__malm_dump_regs` the exit dumps the registers like C's `_exit`.
+- **I/O.** `malm.stdout` and `malm.stderr` are `std.Io.Writer`s, `malm.stdin` a `std.Io.Reader`,
+  with the C runtime's behaviour: stdout has a 1024-byte buffer, written when it is full, by
+  `flush`, before a read from stdin, before a write to stderr and by the exit; `malm.print` (to
+  stdout) flushes after a newline, `malm.eprint` writes to stderr. stdin reads one byte per `read`
+  (reading ahead would wait for input the program has not asked for yet, section 4); its 4 KiB
+  buffer holds what `takeDelimiter` and the like return, longer input can be streamed or
+  allocated (`allocRemaining`).
+- **The heap.** `malm.allocator` is a `std.mem.Allocator` with the C runtime's `malloc` (first
+  fit, address-ordered free list, 16-byte units) on `brk` and its limit (above); `resize` succeeds
+  within the block. Running out of memory returns `error.OutOfMemory`.
+- **Panics** (safety checks in `ReleaseSafe`, `@panic`, `unreachable`) print `panic: ` and the
+  message on stderr, after what stdout has buffered, and end the program with status 134, as std's
+  panic does by aborting. There is no stack trace.
+- **The rest** of std works where it needs no operating system: containers, formatting and
+  parsing (also floating point, in software), sorting, hashing, `std.math`; files, the clock,
+  threads, processes and `std.debug.print` do not compile or link. `malm.sys` has the system calls
+  of section 4.
+
+Aot mode works too. **Size.** `examples/zig/hello.zig` is 6.6 KB of code, `cat.zig` 8.9 KB,
+`sort.zig` 36 KB, most of it the panic handler's formatted messages for the safety checks; with
+`-- -O ReleaseSmall` (no safety checks) cat is 3.9 KB. Code counts against the heap: in 64 KiB of
+guest RAM, sort's 36 KB and the default 64 KiB stack reserve leave no heap, a 16 KiB reserve none
+either; its tests use 8 KiB (`-- -Wl,--defsym=__stack_size=8192`).
+
 ## 7. Tests
 
 `tests/rv/`: unit tests for the loader and every instruction class (`rv_test`), the official
@@ -346,7 +405,8 @@ the self-check also with exceptions and RTTI (`rvref_cxx_eh_*`). The Rust exampl
 (`examples/rust`: hello, cat, sort) and `tests/rv/programs/rust_test.rs`, a self-check of the Rust
 runtime (the allocator, `alloc`'s collections, 64- and 128-bit arithmetic, soft floating point and
 its formatting; with input `panic`, `error` or `exit` its panic, an `Err` from `main` and
-`process::exit`), run as `rvref_rust_*`.
+`process::exit`), run as `rvref_rust_*`; the Zig examples (`examples/zig`: hello, cat, sort) and
+`tests/rv/programs/zig_test.zig`, the same for the Zig runtime, as `rvref_zig_*`.
 `rv_toolchain_test` compiles C with `malm build`'s toolchain code and the runtime built into
 `malm`, with either C library, and C++, and runs the result on the reference emulator; `rv_test` unpacks
 the picolibc sysroot and hand-made archives (`sysroot_test.cpp`); the `build_c_*` and `build_c_aot_*` tests
@@ -355,7 +415,9 @@ the picolibc sysroot and hand-made archives (`sysroot_test.cpp`); the `build_c_*
 need `MALM_BUILD_EMU`); `build_c_picolibc_*` do the same with picolibc in emu mode, and stats
 (`fast`); `build_cpp_*` and `build_cpp_aot_*` build the C++ examples, the M5 criterion for C++
 (`build_cpp_sort` is `fast`); `build_rust_*` and `build_rust_aot_*` build the Rust examples, the M5
-criterion for Rust (`build_rust_cat` is `fast`), and `rv_toolchain_test` also compiles Rust.
+criterion for Rust (`build_rust_cat` is `fast`), `build_zig_*` and `build_zig_aot_*` the Zig
+examples, the M5 criterion for Zig (`build_zig_cat` is `fast`), and `rv_toolchain_test` also
+compiles Rust and Zig.
 `rv_emu_test` runs rv-emu against the reference emulator one instruction at a time (section 8).
 `rv_aot_test` checks rv-aot's control-flow graph and runs translated hand-assembled programs
 (random ALU code; loads, stores, branches, calls, a jump table and the system calls; every fault
@@ -389,9 +451,9 @@ riscv-tests, that the reference emulator passes (status 0).
 - `rvdiff_program_cxx_*`: the C++ examples hello (`fast`) and sort with 64 KiB, and libc++'s
   self-check with 256 KiB on empty input (exit 42) and `abort` (134), about a minute and a half;
   with exceptions in emu mode only (`--emu-only`), as aot mode does not support them (section 6).
-- `rvdiff_program_rust_*`: the Rust examples hello (`fast`), cat and sort with 64 KiB, and the
-  Rust runtime's self-check with 256 KiB on its four inputs (42, the panic's 101, 1 and 7), about
-  two and a half minutes.
+- `rvdiff_program_rust_*`, `rvdiff_program_zig_*`: the Rust and Zig examples hello (`fast`), cat
+  and sort with 64 KiB, and the runtimes' self-checks with 256 KiB on their four inputs (42, the
+  panic's 101 or 134, 1 and 7), about two and a half minutes each.
 
 They need `MALM_BUILD_EMU`, so the debug preset leaves them out. The `build_c_*` and
 `build_c_aot_*` tests check the same examples against fixed expected output, built from C by
@@ -405,7 +467,8 @@ with `rv/runtime/link.ld`.
 
 The CMake cache variable `MALM_RV_TESTS` controls these toolchain-built tests (the picolibc ones
 also need `MALM_PICOLIBC`, the Rust ones rustc with the riscv32im target, found as
-`MALM_RV_RUSTC` in `PATH` or `~/.cargo/bin`, and `MALM_RUST_TESTS`, which works the same way):
+`MALM_RV_RUSTC` in `PATH` or `~/.cargo/bin`, and `MALM_RUST_TESTS`, which works the same way, the
+Zig ones zig 0.17, found as `MALM_RV_ZIG` in `PATH`, and `MALM_ZIG_TESTS`):
 `AUTO` (default)
 builds them when clang with the riscv32 target and ld.lld are found and otherwise skips them with
 a warning, `ON` makes a missing toolchain a configure error (CI), `OFF` skips them. The

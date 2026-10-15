@@ -23,7 +23,7 @@ namespace {
 
 constexpr std::string_view kUsage =
     "usage: malm build [--mode emu|aot] [--ram <size>] [--cc <compiler>]\n"
-    "                  [--libc minimal|picolibc] [--rustc <compiler>]\n"
+    "                  [--libc minimal|picolibc] [--rustc <compiler>] [--zig <compiler>]\n"
     "                  (-o <out.malm> | --exe -o <out>) (<source>... | <prog.elf>)\n"
     "                  [-- <compiler args>...]\n"
     "  --mode emu       run it in rv-emu, the RV32IM emulator (the default)\n"
@@ -36,10 +36,12 @@ constexpr std::string_view kUsage =
     "  --rustc <compiler>\n"
     "                   the Rust compiler, rustc with the riscv32im-unknown-none-elf\n"
     "                   target (default: rustc in PATH)\n"
+    "  --zig <compiler> the Zig compiler, Zig 0.17 (default: zig in PATH)\n"
     "  -o <out.malm>    write the program there (-o - writes to stdout)\n"
     "  --exe -o <out>   write a native executable instead (malm pack)\n"
     "  <source>...      C (.c) and C++ (.cpp, .cc, .cxx) sources, or the root of a Rust\n"
-    "                   crate (.rs), compiled and linked with malm's runtime (docs/rv.md)\n"
+    "                   crate (.rs) or a Zig program (.zig), compiled and linked with\n"
+    "                   malm's runtime (docs/rv.md)\n"
     "  <prog.elf>       an RV32IM ELF executable\n"
     "  -- <args>...     the rest goes to the compiler; -Wl,<args> to the linker\n";
 
@@ -49,13 +51,16 @@ int usage_error(std::ostream& err, std::string_view msg) {
 }
 
 // What `malm build` builds from.
-enum class Input { C, Rust, Elf };
+enum class Input { C, Rust, Zig, Elf };
 
 Input input_kind(std::string_view path) {
     if (is_c_source(path) || is_cxx_source(path)) {
         return Input::C;
     }
-    return is_rust_source(path) ? Input::Rust : Input::Elf;
+    if (is_rust_source(path)) {
+        return Input::Rust;
+    }
+    return is_zig_source(path) ? Input::Zig : Input::Elf;
 }
 
 bool is_elf(const std::vector<std::uint8_t>& bytes) {
@@ -119,6 +124,7 @@ int build_command_with(std::span<const std::string_view> args, std::ostream& out
     std::string_view output;
     std::optional<std::string_view> cc;
     std::optional<std::string_view> rustc;
+    std::optional<std::string_view> zig;
     std::optional<Libc> libc;
     bool exe = false;
     bool aot = false;
@@ -164,6 +170,11 @@ int build_command_with(std::span<const std::string_view> args, std::ostream& out
                 return usage_error(err, "--rustc needs a compiler");
             }
             rustc = args[++i];
+        } else if (arg == "--zig") {
+            if (i + 1 >= args.size() || args[i + 1].empty()) {
+                return usage_error(err, "--zig needs a compiler");
+            }
+            zig = args[++i];
         } else if (arg == "--libc") {
             const std::string_view name = i + 1 < args.size() ? args[++i] : "";
             if (name != "minimal" && name != "picolibc") {
@@ -192,7 +203,8 @@ int build_command_with(std::span<const std::string_view> args, std::ostream& out
     bool cxx = false;
     for (const std::string_view input : inputs) {
         if (input_kind(input) != kind || (!c && inputs.size() > 1)) {
-            return usage_error(err, "give C or C++ sources, one Rust source or one ELF executable");
+            return usage_error(err, "give C or C++ sources, one Rust or Zig source or one ELF "
+                                    "executable");
         }
         cxx = cxx || is_cxx_source(input);
     }
@@ -201,6 +213,9 @@ int build_command_with(std::span<const std::string_view> args, std::ostream& out
     }
     if (kind != Input::Rust && rustc) {
         return usage_error(err, "--rustc needs a Rust source");
+    }
+    if (kind != Input::Zig && zig) {
+        return usage_error(err, "--zig needs a Zig source");
     }
     if (kind == Input::Elf && !cc_args.empty()) {
         return usage_error(err, "compiler arguments need sources");
@@ -247,14 +262,26 @@ int build_command_with(std::span<const std::string_view> args, std::ostream& out
             return 1;
         }
         bytes = std::move(*elf);
+    } else if (kind == Input::Zig) {
+        const auto found = find_zig(zig.value_or(""), path_env);
+        if (!found) {
+            err << "malm build: " << found.error() << '\n';
+            return 1;
+        }
+        auto elf = compile_zig(*found, inputs.front(), cc_args, err);
+        if (!elf) {
+            err << "malm build: " << elf.error() << '\n';
+            return 1;
+        }
+        bytes = std::move(*elf);
     } else {
         if (!read_file(inputs.front(), bytes, err)) {
             return 1;
         }
         if (!is_elf(bytes)) {
             err << "malm build: " << inputs.front()
-                << ": neither a C, C++ or Rust source (.c, .cpp, .cc, .cxx, .rs) nor an ELF "
-                   "executable\n";
+                << ": neither a C, C++, Rust or Zig source (.c, .cpp, .cc, .cxx, .rs, .zig) nor "
+                   "an ELF executable\n";
             return 1;
         }
     }

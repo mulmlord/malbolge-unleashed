@@ -1,9 +1,10 @@
 configure_file(version.hpp.in "${CMAKE_CURRENT_BINARY_DIR}/generated/version.hpp" @ONLY)
 
-# The RISC-V runtime as byte arrays (runtime_files.hpp), for `malm build` of C, C++ and Rust sources.
+# The RISC-V runtime as byte arrays (runtime_files.hpp), for `malm build` of C, C++, Rust and Zig
+# sources.
 set(rt_dir "${PROJECT_SOURCE_DIR}/rv/runtime")
 file(GLOB rt_files CONFIGURE_DEPENDS "${rt_dir}/include/*.h" "${rt_dir}/src/*.c"
-    "${rt_dir}/rust/*.rs")
+    "${rt_dir}/rust/*.rs" "${rt_dir}/zig/*.zig")
 set(rt_embed "${CMAKE_CURRENT_BINARY_DIR}/generated/runtime_files.cpp")
 add_custom_command(OUTPUT "${rt_embed}"
     COMMAND "${CMAKE_COMMAND}" -DRUNTIME_DIR=${rt_dir} -DOUTPUT=${rt_embed}
