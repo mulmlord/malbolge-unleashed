@@ -25,41 +25,63 @@ Memory::Memory(std::span<const std::uint8_t> program) {
         prev1 = f;
     }
 
+    for (std::uint64_t phase = 0; phase < 2; ++phase) {
+        auto page = std::make_shared<Page>();
+        for (std::size_t i = 0; i < kPageCells; ++i) {
+            page->cells[i] = fill_[(3 * phase + i) % 6];
+        }
+        fill_pages_[phase] = std::move(page);
+    }
+
     // Initial n = max(10, width(L-1) + 1).
-    n_ = std::max(10U, Value::natural(len - 1)->width() + 1);
+    set_n(std::max(10U, Value::natural(len - 1)->width() + 1));
     assert(n_ <= static_cast<unsigned>(kMaxWidth));
 
-    for (std::size_t i = 0; i < len; ++i) {
-        Page* p = find_page(i / kPageCells);
-        if (p == nullptr) {
-            p = materialise(i / kPageCells);
+    for (std::size_t i = 0; i < len; i += kPageCells) {
+        Page* p = materialise(i / kPageCells);
+        const std::size_t end = std::min(len, i + kPageCells);
+        for (std::size_t j = i; j < end; ++j) {
+            p->cells[j - i] = cell(j);
         }
-        p->cells[i % kPageCells] = cell(i);
     }
+}
+
+bool Memory::grow_slow(Value c, Value d) noexcept {
+    const unsigned grown = std::max({n_, c.width() + 1, d.width() + 1});
+    if (grown > static_cast<unsigned>(kMaxWidth)) {
+        return false;
+    }
+    set_n(grown);
+    return true;
 }
 
 Memory::Page* Memory::find_page_slow(std::uint64_t idx) const {
     const auto it = pages_.find(idx);
-    Page* page = it == pages_.end() ? nullptr : it->second.get();
-    cache_[1] = cache_[0];
-    cache_[0] = {idx, page};
+    Page* page = it == pages_.end() ? fill_page(idx) : it->second.get();
+    cache_[idx % kCacheSlots] = {idx, page};
     return page;
 }
 
+std::uint64_t Memory::seek(Cursor& cur, Value addr) const {
+    const std::uint64_t idx = addr.raw() / kPageCells;
+    cur.base = idx * kPageCells;
+    cur.page = find_page(idx);
+    cur.fill = cur.page == fill_page(idx);
+    return addr.raw() - cur.base;
+}
+
 Memory::Page* Memory::materialise(std::uint64_t idx) {
-    auto page = std::make_unique<Page>();
-    // The remainder rule is continuous under +1 within a head, and pages never cross a head
-    // change or the wrap, so the pattern index only needs the page's first address.
-    unsigned r = Value::from_raw(idx * kPageCells).mod6();
-    for (Value& c : page->cells) {
-        c = fill_[r];
-        r = r == 5 ? 0 : r + 1;
-    }
+    auto page = std::make_unique<Page>(*fill_page(idx));
     Page* raw = page.get();
     pages_[idx] = std::move(page);
-    for (CacheEntry& e : cache_) {
-        if (e.idx == idx) {
-            e.page = raw;
+    CacheEntry& e = cache_[idx % kCacheSlots];
+    if (e.idx == idx) {
+        e.page = raw;
+    }
+    for (Cursor& cur : cursors_) {
+        if (cur.base == idx * kPageCells) {
+            cur.page = raw;
+            cur.fill = false;
         }
     }
     return raw;

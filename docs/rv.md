@@ -628,8 +628,9 @@ extracts the field) dominate; loads and stores add the range check (`and`, `bnz`
 `add`.
 
 Instructions per second, measured with `malm run --stats` (release build, one core of a desktop
-machine that was also running other programs, so the times are rough; the VM reaches about 40 M
-steps per second on that machine when it is idle; issue #37 will add proper benchmarks):
+machine that was also running other programs, so the times are rough; the VM reached about 40 M
+steps per second on that machine when it was idle, before the VM work of issue #37, which is about
+2.7 times as fast in emu mode, [benchmarks.md](benchmarks.md)):
 
 | program, guest RAM | guest instructions | VM steps | time | instructions/s |
 |---|---|---|---|---|
@@ -639,7 +640,8 @@ steps per second on that machine when it is idle; issue #37 will add proper benc
 A large guest RAM costs memory rather than speed. Every RAM word is a record in a VM page of its
 own group (ADR 0001, "VM memory"), so 1 MiB of guest RAM touches about 100 000 VM pages, about
 5 GB of host memory; the VM runs about 15% slower than with 64 KiB (measured back to back).
-Smaller pages are VM work (issue #37).
+Smaller VM pages, or fewer bytes per cell, would reduce that; issue #37 made the step loop faster
+but kept 8 bytes per cell ([benchmarks.md](benchmarks.md)).
 
 Program size and startup (the startup code writes the registers, RAM and tables, spec 4):
 

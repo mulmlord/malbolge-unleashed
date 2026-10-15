@@ -320,6 +320,21 @@ TEST_CASE("property: increment is continuous under mod") {
     }
 }
 
+TEST_CASE("property: mod 6 is raw mod 6 for every head") {
+    // Memory's fill pages rely on it (issue #37): the remainder rule's offset vanishes mod 6.
+    std::mt19937_64 rng(66);
+    for (int i = 0; i < kCases; ++i) {
+        const Value v = (i % 2 == 0) ? Value::from_raw(rng() % pow3[40]) : random_value(rng);
+        REQUIRE(v.mod6() == v.raw() % 6);
+    }
+    for (std::uint64_t h = 0; h < 3; ++h) {
+        for (const std::uint64_t k : {std::uint64_t{0}, std::uint64_t{1}, pow3[39] - 1}) {
+            const Value v = Value::from_raw(h * pow3[39] + k);
+            CHECK(v.mod6() == v.raw() % 6);
+        }
+    }
+}
+
 TEST_CASE("property: to_string / parse round trip") {
     std::mt19937_64 rng(555);
     for (int i = 0; i < kCases; ++i) {

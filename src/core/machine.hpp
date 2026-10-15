@@ -22,6 +22,8 @@ class UnleashedMachine {
     const Memory& memory() const noexcept { return mem_; }
     Word read(Word a) const { return mem_.read(a); }
     void write(Word a, Word v) { mem_.write(a, v); }
+    Word read(Word a, Port p) const { return mem_.read(a, p); }
+    void write(Word a, Word v, Port p) { mem_.write(a, v, p); }
 
     // Every Value is valid; nothing to do (see ClassicMachine::normalize).
     static Word normalize(Word w) noexcept { return w; }

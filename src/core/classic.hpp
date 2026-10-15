@@ -11,6 +11,7 @@
 #include <stdexcept>
 #include <vector>
 
+#include "core/memory.hpp"
 #include "core/ops.hpp"
 #include "core/tables.hpp"
 #include "core/value.hpp"
@@ -83,6 +84,9 @@ class ClassicMachine {
     const ClassicMemory& memory() const noexcept { return mem_; }
     Word read(Word a) const noexcept { return mem_.read(a); }
     void write(Word a, Word v) noexcept { mem_.write(a, v); }
+    // Flat memory: the port makes no difference.
+    Word read(Word a, Port) const noexcept { return mem_.read(a); }
+    void write(Word a, Word v, Port) noexcept { mem_.write(a, v); }
 
     // Brings an externally supplied word into range (set_registers).
     static Word normalize(Word w) noexcept { return static_cast<Word>(w % kClassicCells); }

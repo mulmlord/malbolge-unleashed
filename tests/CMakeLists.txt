@@ -46,6 +46,7 @@ endforeach()
 add_subdirectory(corpus)
 add_subdirectory(reference)
 add_subdirectory(rv)
+add_subdirectory(bench)
 
 malm_add_test(NAME cycles_test LABEL fast SOURCES asm/cycles_test.cpp LIBS malm_asm)
 

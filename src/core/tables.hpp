@@ -107,10 +107,19 @@ constexpr bool decode_table_ok() {
 
 static_assert(detail::decode_table_ok(), "decode table differs from spec 3.5");
 
+// kOpOfSum[s] = kOpOfCode[s % 94] for s = C mod 94 + [C] <= 93 + 126: decoding without a modulo.
+inline constexpr std::array<Op, 94 + 127> kOpOfSum = [] {
+    std::array<Op, 94 + 127> t{};
+    for (std::size_t s = 0; s < t.size(); ++s) {
+        t[s] = kOpOfCode[s % 94];
+    }
+    return t;
+}();
+
 // Precondition: c_mod94 < 94, cell in 33..126.
 constexpr Op decode(std::uint32_t c_mod94, std::uint32_t cell) noexcept {
     assert(c_mod94 < 94 && cell >= 33 && cell <= 126);
-    return kOpOfCode[(c_mod94 + cell) % 94];
+    return kOpOfSum[c_mod94 + cell];
 }
 
 // Precondition: cell in 33..126. Returns the code of xlat2[cell - 33].

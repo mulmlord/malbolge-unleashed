@@ -120,6 +120,7 @@ template <class M> class BasicVm {
         a_ = M::normalize(r.a);
         c_ = M::normalize(r.c);
         d_ = M::normalize(r.d);
+        c94_ = M::mod94(c_);
     }
 
     // For tests and tools only: writes one memory cell directly, like set_registers without the
@@ -137,14 +138,34 @@ template <class M> class BasicVm {
     RunResult run(Io& io, StepObserver& obs, std::optional<std::uint64_t> max_steps = {});
 
   private:
+    // The registers and step counter as the step loop works on them: a local copy that the
+    // compiler keeps in machine registers (members could alias the memory cells the loop writes),
+    // stored back to the members when the loop stops.
+    struct Regs {
+        Word a;
+        Word c;
+        Word d;
+        std::uint32_t c94; // M::mod94(c), kept up to date instead of recomputed every step
+        std::uint64_t steps;
+    };
+    Regs load_regs() const noexcept { return {a_, c_, d_, c94_, steps_}; }
+    void store_regs(const Regs& r) noexcept {
+        a_ = r.a;
+        c_ = r.c;
+        d_ = r.d;
+        c94_ = r.c94;
+        steps_ = r.steps;
+    }
+
     // The inner loop: no flush, no result objects. Faults are recorded in fault_. The only
-    // definition of the step order (spec 5).
-    // With no observer (the plain path) the hooks are compiled out and the signature is the
-    // original one; with one, every hook runs before the step executes.
-    template <class... Obs> Status step_inner(Io& io, Obs&... obs);
+    // definition of the step order (spec 5). Always inlined into its loop, which keeps `r` in
+    // registers.
+    // With no observer (the plain path) the hooks are compiled out; with one, every hook runs
+    // before the step executes.
+    template <class... Obs> [[gnu::always_inline]] Status step_inner(Regs& r, Io& io, Obs&... obs);
     template <class... Obs>
     RunResult run_impl(Io& io, std::optional<std::uint64_t> max_steps, Obs&... obs);
-    Status fail(Error e, Word a, Word c, Word d, bool overflow = false) noexcept;
+    Status fail(Error e, const Regs& r, bool overflow = false) noexcept;
     // Flushes after the loop stopped with `s`; returns the final status.
     Status finish(Io& io, Status s);
 
@@ -152,6 +173,7 @@ template <class M> class BasicVm {
     Word a_{};
     Word c_{};
     Word d_{};
+    std::uint32_t c94_ = 0; // M::mod94(c_)
     std::uint64_t steps_ = 0;
     bool halted_ = false;
     bool eof_ = false;
