@@ -87,7 +87,8 @@ instructions from 1, the faulting one included. Reasons:
 `rv/runtime` is what a C program needs to run as a guest: the entry point (`crt0.S`), the linker
 script (`link.ld`), the system call wrappers and a minimal C library (`include/`, `src/`), or
 instead [picolibc](https://github.com/picolibc/picolibc), the full C library (`malm build --libc
-picolibc`, below), which comes with libc++ for C++ (below).
+picolibc`, below), which comes with libc++ for C++ (below). A Rust program needs the same linker
+script and the runtime crate `rust/malm.rs` (below).
 
 ### Toolchain and linking
 
@@ -265,6 +266,69 @@ floating-point `printf`, which libc++'s abort messages call: `-Wl,--defsym=vfpri
 (above) makes it 14 KB. A program that can throw carries libunwind and libc++abi's personality
 routine, about 50 KB more; one that never throws pays nothing for `-fexceptions`.
 
+### Rust
+
+`malm build prog.rs` compiles a Rust crate, given by its root, with rustc for the target
+`riscv32im-unknown-none-elf` (Rust 1.85 or newer with `rustup target add
+riscv32im-unknown-none-elf`, which brings `core`, `alloc` and compiler-builtins precompiled) and
+links it with the runtime crate `malm` (`rust/malm.rs`) and `link.ld`, with rustc's own linker;
+clang and the C libraries are not involved. `malm build` compiles the runtime crate from its source
+built into `malm` (a tenth of a second), then the program with `--extern malm`, `--edition 2024`
+(unless the arguments after `--` name an edition) and `-C opt-level=2`. A program is `#![no_std]`
+and `#![no_main]` and names its `main` for the runtime:
+
+```rust
+#![no_std]
+#![no_main]
+use malm::prelude::*;
+
+malm::entry!(main);
+
+fn main() {
+    println!("Hello, world!");
+}
+```
+
+By hand, as the CMake build in `tests/rv` does it:
+
+```sh
+t="--target riscv32im-unknown-none-elf --edition 2024 -C opt-level=2"
+rustc $t --crate-type rlib --crate-name malm rv/runtime/rust/malm.rs -o libmalm.rlib
+rustc $t --extern malm=libmalm.rlib -C link-arg=-Trv/runtime/link.ld prog.rs -o prog.elf
+```
+
+- **Entry and exit.** `_start` (in `global_asm!`) does what crt0 does, without constructors: clears
+  `.bss`, aligns `sp` and records it for the heap limit, then calls `main` through `entry!`, and
+  `process::exit` with its status. `main` returns what std allows: `()` (status 0),
+  `process::ExitCode` or a `Result` whose `Err(e)` prints `Error: {e:?}` on stderr and is status 1.
+  `process::exit(code)` flushes stdout first, `process::abort()` ends with 134 at once. Linked with
+  `-- -Wl,--defsym=__malm_dump_regs=1`, the exit dumps the registers like C's `_exit`.
+- **I/O** (`malm::io`) has the C runtime's buffering: `stdout()` is line-buffered (1024 bytes) and
+  flushed before a read from stdin, before a write to `stderr()` and by the exit; `stdin()` is
+  unbuffered (`read`, `read_byte`, `bytes`, `read_to_end`, and `read_to_string`, `read_line` and
+  `lines`, which return a `Utf8Error` for input that is not UTF-8). `Stdout` and `Stderr` have
+  `write(&[u8])` and implement `core::fmt::Write`; `print!`, `println!`, `eprint!` and `eprintln!`
+  work as in std. The machine cannot fail a read or write (section 4), so none returns an I/O error.
+- **The heap** is the global allocator: the minimal C library's `malloc` (first-fit,
+  address-ordered free list with merging, 16-byte units) on `brk`, with the same limit
+  (`__stack_size` below the initial `sp`, above); an alignment above 16 costs that many bytes more.
+  `Vec`, `String`, `Box`, `BTreeMap`, `Rc` and the rest of `alloc` work; `malm::prelude` has the
+  macros and the types of std's prelude, `extern crate alloc;` the rest. Running out of memory is
+  a panic (`memory allocation of N bytes failed`), unless the program asks with `try_reserve` and
+  the like.
+- **Panics** abort (the target's `-C panic=abort`, nothing unwinds): the panic handler writes
+  `panicked at prog.rs:5:9:` and the message on stderr, after what stdout has buffered, and ends
+  the program with status 101, as std does.
+- **The rest** of std is missing: files, the clock, threads, the environment and arguments, and
+  `f64::sqrt` and the other math functions (they are std's; compiler-builtins has the arithmetic,
+  and `core` formats and parses floating point). `malm::sys` has the system calls of section 4.
+  A crate built for the target can be added with `-- --extern name=libname.rlib`; `malm build`
+  does not build Cargo projects.
+
+Aot mode works too. **Size.** `examples/rust/hello.rs` is 5.7 KB of code, nearly all of it
+`core::fmt`, which `println!` and the panic handler's message need: every program that can panic
+(an index out of bounds, an `unwrap`) carries it; `cat.rs` is 5.3 KB, `sort.rs` 21 KB.
+
 ## 7. Tests
 
 `tests/rv/`: unit tests for the loader and every instruction class (`rv_test`), the official
@@ -278,7 +342,11 @@ self-check and `examples/c/stats.c` (which needs floating point) also run linked
 missing files and clock). The C++ examples (`examples/cpp`: hello, sort) and
 `tests/rv/programs/cxx_test.cpp`, a self-check of libc++ and libc++abi (static constructors and
 destructors, `new`, virtual calls, containers, `<charconv>`, and its abort), run as `rvref_cxx_*`,
-the self-check also with exceptions and RTTI (`rvref_cxx_eh_*`).
+the self-check also with exceptions and RTTI (`rvref_cxx_eh_*`). The Rust examples
+(`examples/rust`: hello, cat, sort) and `tests/rv/programs/rust_test.rs`, a self-check of the Rust
+runtime (the allocator, `alloc`'s collections, 64- and 128-bit arithmetic, soft floating point and
+its formatting; with input `panic`, `error` or `exit` its panic, an `Err` from `main` and
+`process::exit`), run as `rvref_rust_*`.
 `rv_toolchain_test` compiles C with `malm build`'s toolchain code and the runtime built into
 `malm`, with either C library, and C++, and runs the result on the reference emulator; `rv_test` unpacks
 the picolibc sysroot and hand-made archives (`sysroot_test.cpp`); the `build_c_*` and `build_c_aot_*` tests
@@ -286,7 +354,8 @@ the picolibc sysroot and hand-made archives (`sysroot_test.cpp`); the `build_c_*
 `.malm` and with `--exe`, and run both through real pipes (`cat` is `fast`, the rest `slow`; they
 need `MALM_BUILD_EMU`); `build_c_picolibc_*` do the same with picolibc in emu mode, and stats
 (`fast`); `build_cpp_*` and `build_cpp_aot_*` build the C++ examples, the M5 criterion for C++
-(`build_cpp_sort` is `fast`).
+(`build_cpp_sort` is `fast`); `build_rust_*` and `build_rust_aot_*` build the Rust examples, the M5
+criterion for Rust (`build_rust_cat` is `fast`), and `rv_toolchain_test` also compiles Rust.
 `rv_emu_test` runs rv-emu against the reference emulator one instruction at a time (section 8).
 `rv_aot_test` checks rv-aot's control-flow graph and runs translated hand-assembled programs
 (random ALU code; loads, stores, branches, calls, a jump table and the system calls; every fault
@@ -320,6 +389,9 @@ riscv-tests, that the reference emulator passes (status 0).
 - `rvdiff_program_cxx_*`: the C++ examples hello (`fast`) and sort with 64 KiB, and libc++'s
   self-check with 256 KiB on empty input (exit 42) and `abort` (134), about a minute and a half;
   with exceptions in emu mode only (`--emu-only`), as aot mode does not support them (section 6).
+- `rvdiff_program_rust_*`: the Rust examples hello (`fast`), cat and sort with 64 KiB, and the
+  Rust runtime's self-check with 256 KiB on its four inputs (42, the panic's 101, 1 and 7), about
+  two and a half minutes.
 
 They need `MALM_BUILD_EMU`, so the debug preset leaves them out. The `build_c_*` and
 `build_c_aot_*` tests check the same examples against fixed expected output, built from C by
@@ -332,7 +404,9 @@ status 0 on pass and the failing test number (mod 256, never 0) on fail. Every t
 with `rv/runtime/link.ld`.
 
 The CMake cache variable `MALM_RV_TESTS` controls these toolchain-built tests (the picolibc ones
-also need `MALM_PICOLIBC`): `AUTO` (default)
+also need `MALM_PICOLIBC`, the Rust ones rustc with the riscv32im target, found as
+`MALM_RV_RUSTC` in `PATH` or `~/.cargo/bin`, and `MALM_RUST_TESTS`, which works the same way):
+`AUTO` (default)
 builds them when clang with the riscv32 target and ld.lld are found and otherwise skips them with
 a warning, `ON` makes a missing toolchain a configure error (CI), `OFF` skips them. The
 toolchain is found as `MALM_RV_CC`, `MALM_RV_LD` and `MALM_RV_AR` (`cmake/RvToolchain.cmake`),
@@ -473,8 +547,13 @@ saves is the decoding, the operand `switch`es and `pc` arithmetic, which happen 
 - **Indirect targets**, the entries of the dispatch table: the entry, the return addresses (after a
   `jal` or `jalr` with `rd` not `x0`), every aligned word of the image whose value is a code address
   (jump tables, function pointers, `.init_array`; an instruction word never is one, as its low two
-  bits are 11), and the code addresses that `lui`, `auipc` and `addi` build from constants inside a
-  block (`la a0, f`).
+  bits are 11), and the code addresses that `lui`, `auipc` and `addi` build from constants (`la a0,
+  f`), and the targets of the `jalr`s they reach. For these the constants also flow into the next
+  block where the code falls through: a leader that another indirect target makes (a data word or
+  an integer constant that happens to be a code address) can split a `lui` from its `addi`, or an
+  `auipc` from its `jalr` (a `call`), which then cannot be resolved (below) and goes through the
+  dispatch table. An indirect target too many costs only its table entry. The Rust examples need
+  both: the formatting functions of a panic and the call of `process::exit` were split so.
 - The same constant tracking turns a `jalr` on a constant (`auipc` + `jalr`, a far `call` or
   `tail`) into a direct jump.
 

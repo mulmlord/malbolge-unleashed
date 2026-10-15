@@ -128,37 +128,55 @@ class Recovery {
         }
     }
 
-    // Per block, the registers set by lui, auipc and addi from constants. A constant that is a
-    // code address is an indirect target (`la a0, f`); a jalr on a constant is resolved; a store
-    // to a constant address in the code is self-modifying.
+    // Per block, the registers set by lui, auipc and addi from constants. A jalr on a constant is
+    // resolved; a store to a constant address in the code is self-modifying. A constant that is a
+    // code address is an indirect target (`la a0, f`): for those the constants also flow from one
+    // block into the next where the code falls through, since another leader (a data word or an
+    // integer constant that looks like a code address) can split `lui` from its `addi`, or
+    // `auipc` from its `jalr`, whose target is then an indirect target too. An indirect target
+    // too many costs only a dispatch table entry.
     std::optional<std::string> propagate_constants() {
-        std::array<std::optional<std::uint32_t>, 32> k{};
+        using Regs = std::array<std::optional<std::uint32_t>, 32>;
+        Regs k{};    // this block's
+        Regs flow{}; // along straight-line code, for indirect targets only
         std::optional<std::uint32_t> prev;
+        bool falls_through = false; // into this instruction from the one before
         for (const auto& [pc, in] : cfg_.code) {
+            if (prev != pc - 4 || !falls_through) {
+                flow.fill(std::nullopt);
+            }
             if (cfg_.leaders.contains(pc) || prev != pc - 4) {
                 k.fill(std::nullopt);
             }
             prev = pc;
+            falls_through = in.opcode() != kOpJal && in.opcode() != kOpJalr;
             k[0] = 0;
-            const std::optional<std::uint32_t> base = k[in.rs1()];
-            std::optional<std::uint32_t> value;
-            switch (in.opcode()) {
-            case kOpLui:
-                value = in.imm_u();
-                break;
-            case kOpAuipc:
-                value = pc + in.imm_u();
-                break;
-            case kOpImm:
-                if (in.funct3() == 0 && base) {
-                    value = *base + in.imm_i();
+            flow[0] = 0;
+            // What lui, auipc and addi write, from the registers `r`.
+            const auto value = [&](const Regs& r) -> std::optional<std::uint32_t> {
+                switch (in.opcode()) {
+                case kOpLui:
+                    return in.imm_u();
+                case kOpAuipc:
+                    return pc + in.imm_u();
+                case kOpImm:
+                    if (in.funct3() == 0 && r[in.rs1()]) {
+                        return *r[in.rs1()] + in.imm_i();
+                    }
+                    return std::nullopt;
+                default:
+                    return std::nullopt;
                 }
-                break;
+            };
+            const std::optional<std::uint32_t> base = k[in.rs1()];
+            switch (in.opcode()) {
             case kOpJalr:
                 if (in.funct3() == 0 && base) {
                     const std::uint32_t target = (*base + in.imm_i()) & ~1u;
                     cfg_.resolved[pc] = target;
                     leader(target);
+                } else if (in.funct3() == 0 && flow[in.rs1()]) {
+                    indirect((*flow[in.rs1()] + in.imm_i()) & ~1u);
                 }
                 break;
             case kOpStore:
@@ -174,14 +192,16 @@ class Recovery {
                 break;
             case kOpSystem:
                 k[10] = std::nullopt; // ecall's result
+                flow[10] = std::nullopt;
                 break;
             default:
                 break;
             }
             if (writes_rd(in)) {
-                k[in.rd()] = value;
-                if (value && in.rd() != 0) {
-                    indirect(*value);
+                k[in.rd()] = value(k);
+                flow[in.rd()] = value(flow);
+                if (flow[in.rd()] && in.rd() != 0) {
+                    indirect(*flow[in.rd()]);
                 }
             }
         }

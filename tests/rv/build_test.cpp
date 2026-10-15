@@ -1,6 +1,6 @@
-// malm build (issues #26, #28, #29): the emu-mode image builder and aot mode, an RV32IM ELF into a
-// pure .malm; its options and how it finds the C toolchain (toolchain_test.cpp compiles with the
-// real one).
+// malm build (issues #26, #28, #29, #34): the emu-mode image builder and aot mode, an RV32IM ELF
+// into a pure .malm; its options and how it finds the C and Rust toolchains (toolchain_test.cpp
+// compiles with the real ones).
 
 #include <doctest/doctest.h>
 #include <sys/stat.h>
@@ -156,6 +156,15 @@ TEST_CASE("build: errors") {
              {"build", "-o", out, "--", "a.c"}, // after --, a.c is a compiler argument
              {"build", "-o", out, "a.cpp", elf},
              {"build", "--libc", "minimal", "-o", out, "a.c", "b.cc"}, // C++ needs picolibc
+             {"build", "-o", out, "a.rs", "b.rs"},                     // one crate root
+             {"build", "-o", out, "a.rs", "b.c"},
+             {"build", "-o", out, "a.c", "b.rs"},
+             {"build", "-o", out, "a.rs", elf},
+             {"build", "--rustc"},
+             {"build", "--rustc", "rustc", "-o", out, "a.c"},
+             {"build", "--rustc", "rustc", "-o", out, elf},
+             {"build", "--cc", "clang", "-o", out, "a.rs"},
+             {"build", "--libc", "picolibc", "-o", out, "a.rs"},
          }) {
         const Result r = run(args);
         CHECK(r.code == 2);
@@ -170,7 +179,8 @@ TEST_CASE("build: errors") {
     r = run({"build", "-o", out, text});
     CHECK(r.code == 1);
     CHECK(r.err == "malm build: " + text +
-                       ": neither a C or C++ source (.c, .cpp, .cc, .cxx) nor an ELF executable\n");
+                       ": neither a C, C++ or Rust source (.c, .cpp, .cc, .cxx, .rs) nor an ELF "
+                       "executable\n");
 
     // Before anything is compiled.
     r = run({"build", "--mode", "aot", "-o", out, "a.cpp", "--", "-fexceptions"});
@@ -275,5 +285,53 @@ TEST_CASE("build: finding the C toolchain") {
     CHECK(r.err == "error: unable to create target\nmalm build: " + clang20 +
                        " cannot compile for riscv32-unknown-elf (malm build needs clang with the "
                        "RISC-V target)\n");
+    CHECK(!std::filesystem::exists(out));
+}
+
+TEST_CASE("build: finding the Rust toolchain") {
+    const TempDir dir;
+    const std::string empty = (dir.path / "empty").string();
+    std::filesystem::create_directories(empty);
+    const std::string src = dir.write("main.rs", {});
+    const std::string out = (dir.path / "main.malm").string();
+
+    Result r = build_with({"-o", out, src}, empty);
+    CHECK(r.code == 1);
+    CHECK(r.err == "malm build: no Rust compiler: rustc is not in PATH (install Rust with rustup, "
+                   "or name the compiler with --rustc)\n");
+
+    r = build_with({"--rustc", "/nonexistent/rustc", "-o", out, src}, empty);
+    CHECK(r.code == 1);
+    CHECK(r.err == "malm build: compiler '/nonexistent/rustc' not found or not executable\n");
+
+    r = build_with({"--rustc", "myrustc", "-o", out, src}, empty);
+    CHECK(r.code == 1);
+    CHECK(r.err == "malm build: compiler 'myrustc' is not in PATH\n");
+
+    // A rustc without the target: its library directory has no core.
+    std::filesystem::create_directories(dir.path / "bin");
+    std::filesystem::create_directories(dir.path / "lib");
+    const std::string rustc = dir.script("bin/rustc", "echo '" + (dir.path / "lib").string() + "'");
+    const std::string bin = (dir.path / "bin").string();
+    r = build_with({"-o", out, src}, empty + ":" + bin);
+    CHECK(r.code == 1);
+    CHECK(r.err == "malm build: the Rust target riscv32im-unknown-none-elf is not installed for " +
+                       rustc + " (rustup target add riscv32im-unknown-none-elf)\n");
+
+    // One that does not know the target, and one too old for the runtime.
+    dir.script("bin/rustc", "echo 'error: unknown target' >&2; exit 1");
+    r = build_with({"-o", out, src}, bin);
+    CHECK(r.code == 1);
+    CHECK(r.err == "error: unknown target\nmalm build: " + rustc +
+                       " cannot compile for riscv32im-unknown-none-elf\n");
+
+    dir.write("lib/libcore-0123.rlib", {});
+    dir.script("bin/rustc", "if [ \"$1\" = --print ]; then echo '" + (dir.path / "lib").string() +
+                                "'; else echo 'error: edition 2024 is unstable' >&2; exit 1; fi");
+    r = build_with({"-o", out, src}, bin);
+    CHECK(r.code == 1);
+    CHECK(r.err == "error: edition 2024 is unstable\nmalm build: the Rust runtime does not "
+                   "compile with " +
+                       rustc + " (malm build needs Rust 1.85 or newer)\n");
     CHECK(!std::filesystem::exists(out));
 }

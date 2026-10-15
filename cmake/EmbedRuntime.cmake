@@ -1,12 +1,14 @@
 # cmake -DRUNTIME_DIR=<rv/runtime> -DOUTPUT=<file.cpp> -P EmbedRuntime.cmake
 # Writes a C++ source that defines malm::runtime_files() (src/driver/runtime_files.hpp): the RISC-V
-# runtime's crt0, linker script, headers and libc sources as byte arrays, so that `malm build` needs
-# nothing but the malm binary and a compiler.
+# runtime's crt0, linker script, headers and libc sources, and the Rust runtime crate, as byte
+# arrays, so that `malm build` needs nothing but the malm binary and a compiler.
 file(GLOB headers RELATIVE "${RUNTIME_DIR}" "${RUNTIME_DIR}/include/*.h")
 file(GLOB sources RELATIVE "${RUNTIME_DIR}" "${RUNTIME_DIR}/src/*.c")
+file(GLOB rust RELATIVE "${RUNTIME_DIR}" "${RUNTIME_DIR}/rust/*.rs")
 list(SORT headers)
 list(SORT sources)
-set(files crt0.S link.ld ${headers} ${sources})
+list(SORT rust)
+set(files crt0.S link.ld ${headers} ${sources} ${rust})
 
 set(arrays "")
 set(entries "")

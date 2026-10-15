@@ -50,7 +50,7 @@ struct Cfg {
     std::set<std::uint32_t> leaders;
     // The leaders an indirect jump may reach, the entries of the dispatch table: the entry, the
     // return addresses of jal and jalr, and code addresses found in the image's words or built by
-    // lui, auipc and addi.
+    // lui, auipc and addi along straight-line code.
     std::set<std::uint32_t> indirect;
     // jalr whose target is a constant (its base built by lui, auipc and addi in its block): the
     // instruction's address -> the target.

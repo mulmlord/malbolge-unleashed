@@ -28,6 +28,16 @@ licence texts with it. **If you distribute a program built with `--libc picolibc
 exception waives the conditions of compiler-rt, libc++, libc++abi and libunwind for code embedded
 into a compiled program.
 
+## Linked into guest programs built from Rust (from the user's Rust toolchain, not part of `malm`)
+
+| Component | Licence | Notes |
+|---|---|---|
+| Rust's `core`, `alloc` and `compiler_builtins` | MIT OR Apache-2.0 | precompiled for `riscv32im-unknown-none-elf` by rustup; the parts a program uses are linked into it |
+
+**If you distribute a program built from Rust** (a `.malm` or packed executable), the MIT licence
+(or Apache-2.0's notice conditions, if you choose that one) asks for the Rust project's copyright
+notice with it, as for any Rust binary.
+
 ## Used only for building and testing (not part of any binary we ship)
 
 | Component | Licence | Location |

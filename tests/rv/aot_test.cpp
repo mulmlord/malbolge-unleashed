@@ -307,6 +307,32 @@ TEST_CASE("rv-aot: a constant does not reach across a leader") {
     CHECK(cfg->resolved.empty());
 }
 
+TEST_CASE("rv-aot: a code address split by a leader is still an indirect target") {
+    Asm a;
+    a.la(t0, "f");          // 0x1000: lui; 0x1004: addi, a leader as a data word names it
+    a.put(jalr(ra, t0, 0)); // 0x1008: in the addi's block t0 is unknown: through the table
+    a.sys(93);              // 0x100C
+    a.label("f");           // 0x1014
+    a.put(jalr(0, ra, 0));
+    const auto cfg = malm::aot::recover_cfg(image_of(program(a, {0x1004}), 8192));
+    REQUIRE(cfg.has_value());
+    CHECK(cfg->leaders.contains(0x1004));
+    CHECK(cfg->indirect.contains(a.addr("f")));
+    CHECK(cfg->resolved.empty());
+}
+
+TEST_CASE("rv-aot: a call split from its auipc by a leader goes through the table") {
+    Asm a;
+    a.put(auipc(ra, 0));       // 0x1000
+    a.put(jalr(ra, ra, 0x10)); // 0x1004, a leader as a data word names it: not resolved
+    a.sys(93);                 // 0x1008
+    a.put(jalr(0, ra, 0));     // 0x1010: the call's target, an indirect target
+    const auto cfg = malm::aot::recover_cfg(image_of(program(a, {0x1004}), 8192));
+    REQUIRE(cfg.has_value());
+    CHECK(cfg->resolved.empty());
+    CHECK(cfg->indirect.contains(0x1010));
+}
+
 TEST_CASE("rv-aot: self-modifying code is a build error") {
     {
         Asm a;
