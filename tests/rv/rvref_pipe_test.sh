@@ -1,8 +1,9 @@
 #!/bin/sh
 # Real-pipe tests for `malm rvref` on the clang-built test programs, bare and on the runtime, with
-# the minimal C library or with picolibc (the programs named picolibc_*), and the C++ programs with
-# libc++ (cxx_*), also with exceptions and RTTI (cxx_eh_*).
-# Usage: rvref_pipe_test.sh <malm> <elf-dir> <programs-dir> <case> [minimal|picolibc|cxx|cxx_eh]
+# the minimal C library or with picolibc (the programs named picolibc_*), the C++ programs with
+# libc++ (cxx_*), also with exceptions and RTTI (cxx_eh_*), and the Rust programs (rust_*).
+# Usage: rvref_pipe_test.sh <malm> <elf-dir> <programs-dir> <case>
+#            [minimal|picolibc|cxx|cxx_eh|rust]
 set -u
 malm=$1
 elf=$2
@@ -143,6 +144,39 @@ abort)
         want='out_of_range was thrown in -fno-exceptions mode with message "vector"'
     fi
     test "$(cat "$tmp/out")" = "$want" || exit 1
+    ;;
+checks)
+    # Rust: the runtime's self-check, ending with main's ExitCode 42.
+    status=0
+    "$malm" rvref "$elf/${p}test.elf" < /dev/null > "$tmp/out" || status=$?
+    if [ "$status" != 42 ]; then
+        cat "$tmp/out" >&2
+        exit 1
+    fi
+    grep -Eqx 'rust_test: [0-9]+ checks passed' "$tmp/out" || exit 1
+    test "$(wc -l < "$tmp/out")" = 1 || exit 1
+    ;;
+panic)
+    # Rust: what stdout has buffered, then the panic's location and message, and status 101.
+    status=0
+    echo panic | "$malm" rvref "$elf/${p}test.elf" > "$tmp/out" || status=$?
+    test "$status" = 101 || exit 1
+    sed -n 1p "$tmp/out" | grep -qx 'before the panic' || exit 1
+    sed -n 2p "$tmp/out" | grep -Eq '^panicked at .*rust_test\.rs:[0-9]+:[0-9]+:$' || exit 1
+    test "$(sed -n '3,$p' "$tmp/out")" = \
+        'index out of bounds: the len is 0 but the index is 3' || exit 1
+    ;;
+error)
+    # Rust: main returns an Err: its Debug form on stderr, status 1.
+    status=0
+    echo error | "$malm" rvref "$elf/${p}test.elf" > "$tmp/out" || status=$?
+    test "$status" = 1 && test "$(cat "$tmp/out")" = 'Error: "asked for it"' || exit 1
+    ;;
+exit)
+    # Rust: process::exit writes what stdout has buffered (no newline), then ends with its status.
+    status=0
+    echo exit | "$malm" rvref "$elf/${p}test.elf" > "$tmp/out" || status=$?
+    test "$status" = 7 && test "$(cat "$tmp/out")" = 'buffered until exit' || exit 1
     ;;
 stats)
     # picolibc only: floating point, scanf and sqrt.

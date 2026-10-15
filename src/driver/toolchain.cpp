@@ -159,11 +159,73 @@ bool ends_with_any(std::string_view path, std::initializer_list<std::string_view
     return false;
 }
 
+// The compiler that an option names: a path if it has a '/', else a name searched in PATH.
+core::Result<std::string, std::string> find_named(std::string_view name,
+                                                  std::string_view path_env) {
+    using R = core::Result<std::string, std::string>;
+    if (name.find('/') != std::string_view::npos) {
+        if (!is_executable(fs::path(name))) {
+            return R::err("compiler '" + std::string(name) + "' not found or not executable");
+        }
+        return R::ok(std::string(name));
+    }
+    auto p = search_path(name, path_env);
+    if (!p) {
+        return R::err("compiler '" + std::string(name) + "' is not in PATH");
+    }
+    return R::ok(std::move(*p));
+}
+
+// Writes the runtime's files whose paths `wanted` accepts into `dir`; returns their paths.
+template <typename Pred> std::vector<fs::path> write_runtime(const fs::path& dir, Pred wanted) {
+    std::vector<fs::path> written;
+    for (const RuntimeFile& f : runtime_files()) {
+        if (!wanted(f.path)) {
+            continue;
+        }
+        const fs::path p = dir / f.path;
+        std::error_code ec;
+        fs::create_directories(p.parent_path(), ec);
+        std::ofstream(p, std::ios::binary)
+            .write(f.text.data(), static_cast<std::streamsize>(f.text.size()));
+        written.push_back(p);
+    }
+    return written;
+}
+
+// The user's arguments split into the compiler's and the linker's (`-Wl,a,b`).
+void split_args(std::span<const std::string_view> args, std::vector<std::string>& cc_args,
+                std::vector<std::string>& ld_args) {
+    for (const std::string_view a : args) {
+        if (a.starts_with("-Wl,")) {
+            std::istringstream parts{std::string(a.substr(4))};
+            for (std::string part; std::getline(parts, part, ',');) {
+                ld_args.push_back(part);
+            }
+        } else {
+            cc_args.emplace_back(a);
+        }
+    }
+}
+
+// The linked program.
+core::Result<std::vector<std::uint8_t>, std::string> read_elf(const fs::path& elf) {
+    using R = core::Result<std::vector<std::uint8_t>, std::string>;
+    std::ifstream f(elf, std::ios::binary);
+    if (!f) {
+        return R::err("cannot read the linked program");
+    }
+    return R::ok(std::vector<std::uint8_t>(std::istreambuf_iterator<char>(f),
+                                           std::istreambuf_iterator<char>()));
+}
+
 } // namespace
 
 bool is_c_source(std::string_view path) { return ends_with_any(path, {".c"}); }
 
 bool is_cxx_source(std::string_view path) { return ends_with_any(path, {".cpp", ".cc", ".cxx"}); }
+
+bool is_rust_source(std::string_view path) { return ends_with_any(path, {".rs"}); }
 
 bool wants_exceptions(std::span<const std::string_view> args) {
     bool on = false;
@@ -184,15 +246,10 @@ core::Result<Toolchain, std::string> find_toolchain(std::string_view cc,
                           "the compiler with --cc)");
         }
         tools.cc = std::move(*p);
-    } else if (cc.find('/') != std::string_view::npos) {
-        if (!is_executable(fs::path(cc))) {
-            return R::err("compiler '" + std::string(cc) + "' not found or not executable");
-        }
-        tools.cc = cc;
     } else {
-        auto p = search_path(cc, path_env);
+        auto p = find_named(cc, path_env);
         if (!p) {
-            return R::err("compiler '" + std::string(cc) + "' is not in PATH");
+            return R::err(std::move(p.error()));
         }
         tools.cc = std::move(*p);
     }
@@ -233,29 +290,19 @@ compile_c(const Toolchain& tools, std::span<const std::string_view> sources,
         return R::err(std::string("cannot create a temporary directory: ") + std::strerror(errno));
     }
     const fs::path& dir = tmp.path();
+    const std::vector<fs::path> runtime_paths =
+        write_runtime(dir, [](std::string_view path) { return !path.starts_with("rust/"); });
     std::vector<fs::path> libc_sources;
-    for (const RuntimeFile& f : runtime_files()) {
-        const fs::path p = dir / f.path;
-        std::error_code ec;
-        fs::create_directories(p.parent_path(), ec);
-        std::ofstream(p, std::ios::binary)
-            .write(f.text.data(), static_cast<std::streamsize>(f.text.size()));
-        if (libc == Libc::Minimal && f.path.starts_with("src/")) {
-            libc_sources.push_back(p);
+    if (libc == Libc::Minimal) {
+        for (const fs::path& p : runtime_paths) {
+            if (p.parent_path() == dir / "src") {
+                libc_sources.push_back(p);
+            }
         }
     }
     std::vector<std::string> cc_args;
     std::vector<std::string> ld_args;
-    for (const std::string_view a : args) {
-        if (a.starts_with("-Wl,")) {
-            std::istringstream parts{std::string(a.substr(4))};
-            for (std::string part; std::getline(parts, part, ',');) {
-                ld_args.push_back(part);
-            }
-        } else {
-            cc_args.emplace_back(a);
-        }
-    }
+    split_args(args, cc_args, ld_args);
     const bool exceptions = wants_exceptions(args);
 
     // picolibc: its headers and libraries, and libmalm.a, its system interface; for C++ libc++ and
@@ -375,12 +422,112 @@ compile_c(const Toolchain& tools, std::span<const std::string_view> sources,
     if (!run(argv, dir / "ld.log", err, error)) {
         return R::err(error.empty() ? "linking failed" : error);
     }
-    std::ifstream f(elf, std::ios::binary);
-    if (!f) {
-        return R::err("cannot read the linked program");
+    return read_elf(elf);
+}
+
+core::Result<std::string, std::string> find_rustc(std::string_view rustc,
+                                                  std::string_view path_env) {
+    using R = core::Result<std::string, std::string>;
+    if (!rustc.empty()) {
+        return find_named(rustc, path_env);
     }
-    return R::ok(std::vector<std::uint8_t>(std::istreambuf_iterator<char>(f),
-                                           std::istreambuf_iterator<char>()));
+    auto p = search_path("rustc", path_env);
+    if (!p) {
+        return R::err("no Rust compiler: rustc is not in PATH (install Rust with rustup, or name "
+                      "the compiler with --rustc)");
+    }
+    return R::ok(std::move(*p));
+}
+
+core::Result<std::vector<std::uint8_t>, std::string>
+compile_rust(const std::string& rustc, std::string_view source,
+             std::span<const std::string_view> args, std::ostream& err) {
+    using R = core::Result<std::vector<std::uint8_t>, std::string>;
+    const TempDir tmp;
+    if (!tmp.ok()) {
+        return R::err(std::string("cannot create a temporary directory: ") + std::strerror(errno));
+    }
+    const fs::path& dir = tmp.path();
+    write_runtime(
+        dir, [](std::string_view path) { return path == "link.ld" || path.starts_with("rust/"); });
+    const std::string target(kRustTarget);
+
+    // The target's core library, which rustup installs with the target.
+    std::string error;
+    std::ostringstream libdir;
+    if (!run({rustc, "--print", "target-libdir", "--target", target}, dir / "libdir.log", libdir,
+             error)) {
+        if (!error.empty()) {
+            return R::err(error);
+        }
+        err << libdir.str();
+        return R::err(rustc + " cannot compile for " + target);
+    }
+    std::string path = libdir.str();
+    while (!path.empty() && (path.back() == '\n' || path.back() == '\r')) {
+        path.pop_back();
+    }
+    bool core = false;
+    std::error_code ec;
+    for (fs::directory_iterator it(path, ec), end; !ec && it != end; it.increment(ec)) {
+        const std::string name = it->path().filename().string();
+        core = core || (name.starts_with("libcore-") && name.ends_with(".rlib"));
+    }
+    if (!core) {
+        return R::err("the Rust target " + target + " is not installed for " + rustc +
+                      " (rustup target add " + target + ")");
+    }
+
+    // The runtime crate, its output only if it fails.
+    const std::vector<std::string> flags{"--target", target, "-C", "opt-level=2"};
+    const fs::path rlib = dir / "libmalm.rlib";
+    std::vector<std::string> argv{rustc};
+    argv.insert(argv.end(), flags.begin(), flags.end());
+    argv.insert(argv.end(), {"--edition", "2024", "--crate-type", "rlib", "--crate-name", "malm",
+                             (dir / "rust" / "malm.rs").string(), "-o", rlib.string()});
+    std::ostringstream log;
+    if (!run(argv, dir / "malm.log", log, error)) {
+        if (!error.empty()) {
+            return R::err(error);
+        }
+        err << log.str();
+        return R::err("the Rust runtime does not compile with " + rustc +
+                      " (malm build needs Rust 1.85 or newer)");
+    }
+
+    // The program, compiled and linked by rustc.
+    std::vector<std::string> rustc_args;
+    std::vector<std::string> ld_args;
+    split_args(args, rustc_args, ld_args);
+    bool edition = false;
+    for (const std::string& a : rustc_args) {
+        edition = edition || a == "--edition" || a.starts_with("--edition=");
+    }
+    const fs::path elf = dir / "prog.elf";
+    argv = {rustc};
+    argv.insert(argv.end(), flags.begin(), flags.end());
+    if (!edition) {
+        argv.insert(argv.end(), {"--edition", "2024"});
+    }
+    argv.insert(argv.end(), {"--crate-type", "bin", "--extern", "malm=" + rlib.string(), "-C",
+                             "link-arg=-T" + (dir / "link.ld").string()});
+    for (const std::string& a : ld_args) {
+        argv.insert(argv.end(), {"-C", "link-arg=" + a});
+    }
+    argv.insert(argv.end(), rustc_args.begin(), rustc_args.end());
+    argv.insert(argv.end(), {std::string(source), "-o", elf.string()});
+    std::ostringstream diags;
+    const bool ok = run(argv, dir / "prog.log", diags, error);
+    err << diags.str();
+    if (!ok) {
+        if (!error.empty()) {
+            return R::err(error);
+        }
+        return R::err(diags.str().find("error: linking with") != std::string::npos
+                          ? "linking failed"
+                          : "compilation failed");
+    }
+    return read_elf(elf);
 }
 
 } // namespace malm

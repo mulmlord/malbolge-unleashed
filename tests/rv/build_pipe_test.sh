@@ -1,10 +1,11 @@
 #!/bin/sh
-# `malm build` for C and C++ end to end (issues #28, #29, #32, #33): an example from examples/c or
-# examples/cpp (<case>.c or <case>.cpp) built in emu or aot mode, with the minimal C library or
-# picolibc, into a .malm and, with --exe, a native executable; both run through real pipes and must
-# give the expected stdout and exit status.
-# Usage: build_pipe_test.sh <malm> <cc> <examples-dir> <programs-dir> <case> [emu|aot]
-#            [minimal|picolibc]
+# `malm build` for C, C++ and Rust end to end (issues #28, #29, #32, #33, #34): an example from
+# examples/c, examples/cpp or examples/rust (<case>.c, <case>.cpp or <case>.rs) built in emu or aot
+# mode, with the minimal C library or picolibc, or as Rust, into a .malm and, with --exe, a native
+# executable; both run through real pipes and must give the expected stdout and exit status.
+# Usage: build_pipe_test.sh <malm> <compiler> <examples-dir> <programs-dir> <case> [emu|aot]
+#            [minimal|picolibc|rust]
+#   <compiler>  clang, or rustc for rust
 set -u
 malm=$1
 cc=$2
@@ -19,11 +20,18 @@ src=$examples/$case_.c
 if [ ! -e "$src" ]; then
     src=$examples/$case_.cpp
 fi
+if [ "$libc" = rust ]; then
+    src=$examples/$case_.rs
+fi
 
 # build [compiler args...]: prog.malm and the executable prog. 64K of guest RAM keeps the builds
 # short.
 build() {
-    set -- --mode "$mode" --libc "$libc" --ram 64K --cc "$cc" "$src" -- "$@"
+    if [ "$libc" = rust ]; then
+        set -- --mode "$mode" --ram 64K --rustc "$cc" "$src" -- "$@"
+    else
+        set -- --mode "$mode" --libc "$libc" --ram 64K --cc "$cc" "$src" -- "$@"
+    fi
     "$malm" build -o "$tmp/prog.malm" "$@" || exit 1
     "$malm" build --exe -o "$tmp/prog" "$@" 2> "$tmp/err" || { cat "$tmp/err"; exit 1; }
 }

@@ -1,6 +1,7 @@
-// malm build's C and C++ toolchain (issues #28, #32, #33): compile_c with the real clang and
-// ld.lld and the runtime built into malm, the ELF run on the reference emulator. Fast, also in the
-// debug build: no emulator is compiled.
+// malm build's C, C++ and Rust toolchains (issues #28, #32, #33, #34): compile_c with the real
+// clang and ld.lld and the runtime built into malm, compile_rust with the real rustc and the Rust
+// runtime, the ELF run on the reference emulator. Fast, also in the debug build: no emulator is
+// compiled.
 
 #include <doctest/doctest.h>
 #include <unistd.h>
@@ -247,6 +248,119 @@ int main() {
     CHECK(c.error == "C++ needs picolibc (--libc picolibc)");
 }
 
+namespace {
+
+Compiled compile_rust(std::string_view source, std::vector<std::string_view> args = {}) {
+    std::ostringstream diags;
+    auto elf = malm::compile_rust(MALM_RV_RUSTC, source, args, diags);
+    Compiled c;
+    c.ok = elf.has_value();
+    c.diags = diags.str();
+    if (c.ok) {
+        c.elf = std::move(*elf);
+    } else {
+        c.error = elf.error();
+    }
+    return c;
+}
+
+} // namespace
+
+TEST_CASE("toolchain: Rust") {
+    if (std::string_view(MALM_RV_RUSTC).empty()) {
+        MESSAGE("no rustc with the riscv32im target (MALM_RUST_TESTS)");
+        return;
+    }
+    const Compiled hello = compile_rust(MALM_RUST_EXAMPLES_DIR "/hello.rs");
+    INFO(hello.diags);
+    REQUIRE(hello.ok);
+    CHECK(hello.diags.empty());
+    rvtest::StringIo io;
+    malm::rv::Stop stop = run(hello.elf, io);
+    CHECK(stop.exit_code == 0);
+    CHECK(io.out == "Hello, world!\n");
+
+    const Compiled sort = compile_rust(MALM_RUST_EXAMPLES_DIR "/sort.rs");
+    REQUIRE(sort.ok);
+    io = {};
+    io.in = "pear\napple\n\nfig";
+    stop = run(sort.elf, io);
+    CHECK(stop.exit_code == 0);
+    CHECK(io.out == "\napple\nfig\npear\n");
+
+    const Compiled self = compile_rust(MALM_RV_PROGRAMS_DIR "/rust_test.rs");
+    INFO(self.diags);
+    REQUIRE(self.ok);
+    io = {};
+    stop = run(self.elf, io);
+    INFO(io.out);
+    CHECK(stop.exit_code == 42);
+    CHECK(io.out.starts_with("rust_test: "));
+
+    // Modules next to the crate root, an edition of the program's own, rustc and linker
+    // arguments.
+    const TempDir dir;
+    const std::string main_rs = dir.write("main.rs", R"(#![no_std]
+#![no_main]
+mod twice;
+use malm::prelude::*;
+malm::entry!(main);
+unsafe extern "C" {
+    static answer: u8; // from --defsym
+}
+fn main() -> malm::process::ExitCode {
+    let gen = "2021"; // a reserved keyword in edition 2024
+    println!("{} {} {}", twice::twice(21), gen, LEVEL);
+    malm::process::ExitCode::from(&raw const answer as usize as u8)
+}
+const LEVEL: &str = if cfg!(level = "x") { "x" } else { "?" };
+)");
+    dir.write("twice.rs", "pub fn twice(x: u32) -> u32 { 2 * x }\n");
+    Compiled c = compile_rust(
+        main_rs, {"--edition", "2021", "--cfg", "level=\"x\"", "-Wl,--defsym=answer=42"});
+    INFO(c.diags);
+    REQUIRE(c.ok);
+    io = {};
+    stop = run(c.elf, io);
+    CHECK(io.out == "42 2021 x\n");
+    CHECK(stop.exit_code == 42);
+
+    // Errors: the program's, the linker's; warnings are shown.
+    const std::string bad = dir.write("bad.rs", "#![no_std]\n#![no_main]\nfn f() -> u32 { x }\n");
+    c = compile_rust(bad);
+    CHECK(!c.ok);
+    CHECK(c.error == "compilation failed");
+    CHECK(c.diags.find("bad.rs:3:") != std::string::npos);
+
+    const std::string warn = dir.write("warn.rs", R"(#![no_std]
+#![no_main]
+malm::entry!(main);
+fn main() { let unused = 1; }
+)");
+    c = compile_rust(warn);
+    CHECK(c.ok);
+    CHECK(c.diags.find("unused") != std::string::npos);
+    c = compile_rust(warn, {"-D", "warnings"});
+    CHECK(!c.ok);
+
+    const std::string undef = dir.write("undef.rs", R"(#![no_std]
+#![no_main]
+malm::entry!(main);
+unsafe extern "C" {
+    fn f();
+}
+fn main() { unsafe { f() } }
+)");
+    c = compile_rust(undef);
+    CHECK(!c.ok);
+    CHECK(c.error == "linking failed");
+    CHECK(c.diags.find("undefined symbol: f") != std::string::npos);
+
+    c = compile_rust((dir.path / "missing.rs").string());
+    CHECK(!c.ok);
+    CHECK(c.error == "compilation failed");
+}
+
 TEST_CASE("toolchain: source kinds and exceptions") {
     CHECK(malm::is_c_source("a.c"));
     CHECK(!malm::is_c_source(".c"));
@@ -257,6 +371,9 @@ TEST_CASE("toolchain: source kinds and exceptions") {
     CHECK(!malm::is_cxx_source("a.c"));
     CHECK(!malm::is_cxx_source(".cpp"));
     CHECK(!malm::is_cxx_source("a.hpp"));
+    CHECK(malm::is_rust_source("src/main.rs"));
+    CHECK(!malm::is_rust_source(".rs"));
+    CHECK(!malm::is_rust_source("a.rlib"));
     using Args = std::vector<std::string_view>;
     CHECK(!malm::wants_exceptions(Args{}));
     CHECK(malm::wants_exceptions(Args{"-O1", "-fexceptions"}));

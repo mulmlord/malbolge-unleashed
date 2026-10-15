@@ -23,7 +23,7 @@ namespace {
 
 constexpr std::string_view kUsage =
     "usage: malm build [--mode emu|aot] [--ram <size>] [--cc <compiler>]\n"
-    "                  [--libc minimal|picolibc]\n"
+    "                  [--libc minimal|picolibc] [--rustc <compiler>]\n"
     "                  (-o <out.malm> | --exe -o <out>) (<source>... | <prog.elf>)\n"
     "                  [-- <compiler args>...]\n"
     "  --mode emu       run it in rv-emu, the RV32IM emulator (the default)\n"
@@ -33,10 +33,13 @@ constexpr std::string_view kUsage =
     "  --libc minimal   link C sources with malm's minimal C library (the default for C)\n"
     "  --libc picolibc  link them with picolibc: the full C library, floating point,\n"
     "                   and libc++ (the default and only choice for C++)\n"
+    "  --rustc <compiler>\n"
+    "                   the Rust compiler, rustc with the riscv32im-unknown-none-elf\n"
+    "                   target (default: rustc in PATH)\n"
     "  -o <out.malm>    write the program there (-o - writes to stdout)\n"
     "  --exe -o <out>   write a native executable instead (malm pack)\n"
-    "  <source>...      C (.c) and C++ (.cpp, .cc, .cxx) sources, compiled and linked with\n"
-    "                   malm's runtime (docs/rv.md)\n"
+    "  <source>...      C (.c) and C++ (.cpp, .cc, .cxx) sources, or the root of a Rust\n"
+    "                   crate (.rs), compiled and linked with malm's runtime (docs/rv.md)\n"
     "  <prog.elf>       an RV32IM ELF executable\n"
     "  -- <args>...     the rest goes to the compiler; -Wl,<args> to the linker\n";
 
@@ -45,7 +48,15 @@ int usage_error(std::ostream& err, std::string_view msg) {
     return 2;
 }
 
-bool is_source(std::string_view path) { return is_c_source(path) || is_cxx_source(path); }
+// What `malm build` builds from.
+enum class Input { C, Rust, Elf };
+
+Input input_kind(std::string_view path) {
+    if (is_c_source(path) || is_cxx_source(path)) {
+        return Input::C;
+    }
+    return is_rust_source(path) ? Input::Rust : Input::Elf;
+}
 
 bool is_elf(const std::vector<std::uint8_t>& bytes) {
     return bytes.size() >= 4 && bytes[0] == 0x7f && bytes[1] == 'E' && bytes[2] == 'L' &&
@@ -107,6 +118,7 @@ int build_command_with(std::span<const std::string_view> args, std::ostream& out
     std::span<const std::string_view> cc_args;
     std::string_view output;
     std::optional<std::string_view> cc;
+    std::optional<std::string_view> rustc;
     std::optional<Libc> libc;
     bool exe = false;
     bool aot = false;
@@ -147,6 +159,11 @@ int build_command_with(std::span<const std::string_view> args, std::ostream& out
                 return usage_error(err, "--cc needs a compiler");
             }
             cc = args[++i];
+        } else if (arg == "--rustc") {
+            if (i + 1 >= args.size() || args[i + 1].empty()) {
+                return usage_error(err, "--rustc needs a compiler");
+            }
+            rustc = args[++i];
         } else if (arg == "--libc") {
             const std::string_view name = i + 1 < args.size() ? args[++i] : "";
             if (name != "minimal" && name != "picolibc") {
@@ -170,16 +187,23 @@ int build_command_with(std::span<const std::string_view> args, std::ostream& out
     if (exe && output == "-") {
         return usage_error(err, "--exe cannot write to stdout");
     }
-    const bool c = is_source(inputs.front());
+    const Input kind = input_kind(inputs.front());
+    const bool c = kind == Input::C;
     bool cxx = false;
     for (const std::string_view input : inputs) {
-        if (is_source(input) != c || (!c && inputs.size() > 1)) {
-            return usage_error(err, "give C or C++ sources or one ELF executable");
+        if (input_kind(input) != kind || (!c && inputs.size() > 1)) {
+            return usage_error(err, "give C or C++ sources, one Rust source or one ELF executable");
         }
         cxx = cxx || is_cxx_source(input);
     }
-    if (!c && (cc || libc || !cc_args.empty())) {
-        return usage_error(err, "--cc, --libc and compiler arguments need C or C++ sources");
+    if (!c && (cc || libc)) {
+        return usage_error(err, "--cc and --libc need C or C++ sources");
+    }
+    if (kind != Input::Rust && rustc) {
+        return usage_error(err, "--rustc needs a Rust source");
+    }
+    if (kind == Input::Elf && !cc_args.empty()) {
+        return usage_error(err, "compiler arguments need sources");
     }
     if (cxx && libc == Libc::Minimal) {
         return usage_error(err, "C++ needs --libc picolibc");
@@ -211,19 +235,33 @@ int build_command_with(std::span<const std::string_view> args, std::ostream& out
             return 1;
         }
         bytes = std::move(*elf);
+    } else if (kind == Input::Rust) {
+        const auto found = find_rustc(rustc.value_or(""), path_env);
+        if (!found) {
+            err << "malm build: " << found.error() << '\n';
+            return 1;
+        }
+        auto elf = compile_rust(*found, inputs.front(), cc_args, err);
+        if (!elf) {
+            err << "malm build: " << elf.error() << '\n';
+            return 1;
+        }
+        bytes = std::move(*elf);
     } else {
         if (!read_file(inputs.front(), bytes, err)) {
             return 1;
         }
         if (!is_elf(bytes)) {
             err << "malm build: " << inputs.front()
-                << ": neither a C or C++ source (.c, .cpp, .cc, .cxx) nor an ELF executable\n";
+                << ": neither a C, C++ or Rust source (.c, .cpp, .cc, .cxx, .rs) nor an ELF "
+                   "executable\n";
             return 1;
         }
     }
     const auto image = rv::load_elf(bytes, ram_size);
     if (!image) {
-        err << "malm build: " << (c ? std::string_view("the linked program") : inputs.front())
+        err << "malm build: "
+            << (kind != Input::Elf ? std::string_view("the linked program") : inputs.front())
             << ": " << image.error() << '\n';
         return 1;
     }
@@ -231,7 +269,8 @@ int build_command_with(std::span<const std::string_view> args, std::ostream& out
     if (!malm) {
         err << "malm build: ";
         if (aot && !malm.error().starts_with("internal error")) {
-            err << (c ? std::string_view("the linked program") : inputs.front()) << ": ";
+            err << (kind != Input::Elf ? std::string_view("the linked program") : inputs.front())
+                << ": ";
         }
         err << malm.error() << '\n';
         return 1;

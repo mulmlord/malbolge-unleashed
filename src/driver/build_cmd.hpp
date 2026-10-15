@@ -27,15 +27,16 @@ core::Result<std::vector<std::uint8_t>, std::string> build_emu(const rv::Image& 
 core::Result<std::vector<std::uint8_t>, std::string> build_aot(const rv::Image& image,
                                                                std::uint32_t ram_size);
 
-// `malm build [--mode emu|aot] [--ram <size>] [--cc <compiler>] (-o <out.malm> | --exe -o <out>)
-// (<source>... | <prog.elf>) [-- <compiler args>...]` (docs/cli.md): compiles C and C++ sources
-// with the runtime (toolchain.hpp), or takes an RV32IM ELF, and builds an emu-mode or aot-mode
-// .malm or a native executable of it. `args` excludes the subcommand name.
+// `malm build [--mode emu|aot] [--ram <size>] [--cc <compiler>] [--libc minimal|picolibc]
+// [--rustc <compiler>] (-o <out.malm> | --exe -o <out>) (<source>... | <prog.elf>) [-- <compiler
+// args>...]` (docs/cli.md): compiles C and C++ sources or a Rust crate with the runtime
+// (toolchain.hpp), or takes an RV32IM ELF, and builds an emu-mode or aot-mode .malm or a native
+// executable of it. `args` excludes the subcommand name.
 int build_command(std::span<const std::string_view> args, std::istream& in, std::ostream& out,
                   std::ostream& err);
 
 // As build_command, with the base binary of --exe (as pack_command_with) and the PATH searched for
-// the toolchain given; for tests.
+// the toolchains given; for tests.
 int build_command_with(std::span<const std::string_view> args, std::ostream& out, std::ostream& err,
                        const char* self_exe, std::string_view path_env);
 

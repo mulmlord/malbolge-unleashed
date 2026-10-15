@@ -28,3 +28,21 @@ if(MALM_RV_CC AND MALM_RV_LD)
         endif()
     endif()
 endif()
+
+# Rust (docs/rv.md 6): rustc with the riscv32im-unknown-none-elf target installed (rustup target add
+# riscv32im-unknown-none-elf), for the Rust tests. rustup puts rustc in ~/.cargo/bin, which need not
+# be in PATH. Sets MALM_RV_RUST_OK if the target's core library is there.
+find_program(MALM_RV_RUSTC NAMES rustc HINTS "$ENV{CARGO_HOME}/bin" "$ENV{HOME}/.cargo/bin")
+set(MALM_RV_RUST_OK FALSE)
+if(MALM_RV_RUSTC)
+    execute_process(
+        COMMAND "${MALM_RV_RUSTC}" --print target-libdir --target riscv32im-unknown-none-elf
+        RESULT_VARIABLE rustc_rc OUTPUT_VARIABLE rust_libdir ERROR_QUIET
+        OUTPUT_STRIP_TRAILING_WHITESPACE)
+    if(rustc_rc EQUAL 0)
+        file(GLOB rust_core "${rust_libdir}/libcore-*.rlib")
+        if(rust_core)
+            set(MALM_RV_RUST_OK TRUE)
+        endif()
+    endif()
+endif()
