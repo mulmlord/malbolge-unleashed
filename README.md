@@ -1,8 +1,8 @@
 # malbolge-unleashed
 
 malbolge-unleashed is a Malbolge variant with unbounded `3^n` memory, plus a toolchain around it:
-assembler, high-level assembler, disassembler, a RISC-V front end (so C/C++/Rust/Zig programs can
-target Malbolge) and a packer that turns programs into native executables. Everything ships as one
+assembler, high-level assembler, disassembler, a RISC-V front end (so C/C++/Rust/Zig programs and
+Lua scripts can target Malbolge) and a packer that turns programs into native executables. Everything ships as one
 CLI binary, `malm`. See the [design spec](docs/superpowers/specs/2026-10-01-malbolge-unleashed-design.md)
 and the [Malbolge research notes](docs/research/malbolge-research.md).
 The normative language reference is [docs/spec.md](docs/spec.md).
@@ -16,8 +16,8 @@ The command line (`run`, `asm`, `hla`, `export`, `pack`, `--trace`, `--stats`) i
 - For `malm build` of C and C++ programs and the RISC-V tests: clang with the riscv32 target and
   lld (`ld.lld`); without them those tests are skipped with a configure warning (`MALM_RV_TESTS`,
   [docs/rv.md](docs/rv.md)). With them, and `llvm-ar` or `ar`, the build also cross-compiles
-  picolibc and libc++ into `malm` for `malm build --libc picolibc` and C++ (`MALM_PICOLIBC`;
-  it downloads LLVM's 140 MB source tarball once)
+  picolibc, libc++ and Lua into `malm` for `malm build --libc picolibc`, C++ and Lua scripts
+  (`MALM_PICOLIBC`; it downloads LLVM's 140 MB source tarball once)
 - For `malm build` of Rust programs and the Rust tests: rustc 1.85+ with the
   `riscv32im-unknown-none-elf` target (`rustup target add riscv32im-unknown-none-elf`); without it
   those tests are skipped with a configure warning (`MALM_RUST_TESTS`)
@@ -55,13 +55,14 @@ Binaries land in `build/<preset>/src/driver/malm`. CMake options: `MALM_WERROR`,
 | `src/pack` | native executable packer |
 | `src/rv` | RV32IM ELF loader, the C++ reference emulator (`malm rvref`) and the generator of rv-emu with its instruction semantics (`malm rvemu`, [docs/rv.md](docs/rv.md)) |
 | `rv/emu` | builds `emu.malm`, the RV32IM emulator written in HLA |
-| `rv/runtime` | RISC-V runtime: crt0, linker script, syscalls, minimal libc; picolibc and libc++ build and their system interface; the Rust runtime crate and the Zig runtime ([docs/rv.md](docs/rv.md)) |
+| `rv/runtime` | RISC-V runtime: crt0, linker script, syscalls, minimal libc; picolibc and libc++ build and their system interface; the Rust runtime crate and the Zig runtime; Lua's interpreter ([docs/rv.md](docs/rv.md)) |
 | `examples/asm` | assembly examples: hello world, cat, halting cat, adder, digital root |
 | `examples/hla` | high-level assembly examples: hello world, cat, exit status, reverse (stack) |
 | `examples/c` | C examples for the RISC-V runtime: hello world, cat, wc, fizzbuzz, sort; stats (floating point, picolibc) |
 | `examples/cpp` | C++ examples (libc++): hello world, sort (`std::vector`, `std::sort`) |
 | `examples/rust` | Rust examples (`no_std` with `alloc`): hello world, cat, sort |
 | `examples/zig` | Zig examples: hello world, cat, sort |
+| `examples/lua` | Lua scripts: hello world, cat, sort |
 | `tests/` | doctest suites (labels `fast`, `slow`) |
 | `docs/` | spec, CLI reference, research and design decisions (`docs/adr`) |
 | `prototypes/` | throwaway spike code behind the ADRs; not built or tested |
@@ -119,7 +120,9 @@ with libc++ on picolibc, without exceptions and RTTI unless `-- -fexceptions` (e
 runtime crate (the entry point, a heap on `brk`, stdin and stdout, `println!`, panics):
 `malm build --ram 64K --exe -o cat examples/rust/cat.rs`, then `echo hi | ./cat`. Zig programs
 (Zig 0.17) have a `pub fn main` and import `malm` for stdin, stdout and an allocator:
-`malm build --ram 64K --exe -o cat examples/zig/cat.zig`.
+`malm build --ram 64K --exe -o cat examples/zig/cat.zig`. Lua scripts run in Lua 5.5's
+interpreter, built into `malm` with picolibc, in emu mode only and slowly (a minute for
+`print('hi')`): `malm build --ram 512K --exe -o hello examples/lua/hello.lua`.
 
 ## License
 

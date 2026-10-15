@@ -8,7 +8,8 @@
 #            <input file>...
 #   --status N  the reference emulator must also exit with N
 #   --aot-smc   aot mode must refuse the program as self-modifying code; emu mode is still compared
-#   --emu-only  only emu mode is compared (C++ exceptions, which aot mode does not support)
+#   --emu-only  only emu mode is compared (C++ exceptions, which aot mode does not support;
+#               Lua's interpreter, too large for it)
 set -u
 malm=$1
 elf=$2

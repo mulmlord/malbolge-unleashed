@@ -7,18 +7,20 @@
 namespace malm {
 
 struct RuntimeFile {
-    // Relative to rv/runtime: crt0.S, link.ld, include/*.h, src/*.c, rust/*.rs, zig/*.zig.
+    // Relative to rv/runtime: crt0.S, link.ld, include/*.h, src/*.c, rust/*.rs, zig/*.zig,
+    // lua/script.S.
     std::string_view path;
     std::string_view text;
 };
 
 // Every file of the runtime, in a fixed order: crt0.S, link.ld, the headers, the libc sources, the
-// Rust runtime crate, the Zig runtime.
+// Rust runtime crate, the Zig runtime, the Lua script's wrapper.
 // Generated at build time (cmake/EmbedRuntime.cmake).
 std::vector<RuntimeFile> runtime_files();
 
 // The picolibc runtime (rv/runtime/CMakeLists.txt): a zstd-compressed tar of the sysroot, with
-// picolibc's headers in include/ and lib/libc.a, lib/libmalm.a and lib/libclang_rt.builtins.a.
+// picolibc's headers in include/ and lib/libc.a, lib/libmalm.a and lib/libclang_rt.builtins.a;
+// also libc++ and Lua's lib/liblua.a.
 // Empty if malm was built without it (MALM_PICOLIBC).
 std::string_view picolibc_sysroot();
 

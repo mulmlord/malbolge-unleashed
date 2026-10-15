@@ -1,6 +1,6 @@
-// malm build (issues #26, #28, #29, #34, #35): the emu-mode image builder and aot mode, an RV32IM
+// malm build (issues #26, #28, #29, #34-#36): the emu-mode image builder and aot mode, an RV32IM
 // ELF into a pure .malm; its options and how it finds the C, Rust and Zig toolchains
-// (toolchain_test.cpp compiles with the real ones).
+// (toolchain_test.cpp compiles with the real ones, and builds Lua scripts).
 
 #include <doctest/doctest.h>
 #include <sys/stat.h>
@@ -171,6 +171,11 @@ TEST_CASE("build: errors") {
              {"build", "--zig", "zig", "-o", out, "a.rs"},
              {"build", "--rustc", "rustc", "-o", out, "a.zig"},
              {"build", "--cc", "clang", "-o", out, "a.zig"},
+             {"build", "-o", out, "a.lua", "b.lua"}, // one script
+             {"build", "-o", out, "a.lua", "b.c"},
+             {"build", "-o", out, "a.c", "b.lua"},
+             {"build", "--libc", "picolibc", "-o", out, "a.lua"},
+             {"build", "--rustc", "rustc", "-o", out, "a.lua"},
          }) {
         const Result r = run(args);
         CHECK(r.code == 2);
@@ -185,13 +190,17 @@ TEST_CASE("build: errors") {
     r = run({"build", "-o", out, text});
     CHECK(r.code == 1);
     CHECK(r.err == "malm build: " + text +
-                       ": neither a C, C++, Rust or Zig source (.c, .cpp, .cc, .cxx, .rs, .zig) "
-                       "nor an ELF executable\n");
+                       ": neither a C, C++, Rust or Zig source (.c, .cpp, .cc, .cxx, .rs, .zig), "
+                       "a Lua script (.lua) nor an ELF executable\n");
 
     // Before anything is compiled.
     r = run({"build", "--mode", "aot", "-o", out, "a.cpp", "--", "-fexceptions"});
     CHECK(r.code == 1);
     CHECK(r.err == "malm build: C++ exceptions (-fexceptions) are not supported in aot mode\n");
+    r = run({"build", "--mode", "aot", "-o", out, "a.lua"});
+    CHECK(r.code == 1);
+    CHECK(r.err == "malm build: Lua scripts run in emu mode only (Lua's interpreter is too large "
+                   "for aot mode)\n");
 
     // The data segment ends at 0x210, past 512 bytes of guest RAM.
     r = run({"build", "--ram", "512", "-o", out, elf});

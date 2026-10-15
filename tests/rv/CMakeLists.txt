@@ -2,7 +2,7 @@
 # (issue #26), docs/rv.md. Unit tests need no RISC-V toolchain; the riscv-tests suite and the C test
 # programs are built with clang (riscv32 target) and ld.lld when they are found (MALM_RV_TESTS), the
 # Rust ones with rustc and its riscv32im target (MALM_RUST_TESTS), the Zig ones with zig 0.17
-# (MALM_ZIG_TESTS).
+# (MALM_ZIG_TESTS), the Lua ones with clang, ld.lld and Lua in the picolibc sysroot.
 malm_add_test(NAME rv_test LABEL fast SOURCES elf_test.cpp machine_test.cpp rvref_test.cpp
     build_test.cpp sysroot_test.cpp LIBS malm_rv malm_driver)
 # rv-emu (issue #25): single instructions against the reference emulator. A debug build spends
@@ -209,6 +209,7 @@ target_compile_definitions(rv_toolchain_test PRIVATE MALM_RV_CC="${MALM_RV_CC}"
     MALM_CXX_EXAMPLES_DIR="${PROJECT_SOURCE_DIR}/examples/cpp"
     MALM_RUST_EXAMPLES_DIR="${PROJECT_SOURCE_DIR}/examples/rust"
     MALM_ZIG_EXAMPLES_DIR="${PROJECT_SOURCE_DIR}/examples/zig"
+    MALM_LUA_EXAMPLES_DIR="${PROJECT_SOURCE_DIR}/examples/lua"
     MALM_RV_PROGRAMS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/programs")
 
 # Programs on the runtime: the C examples and the runtime's self-check.
@@ -264,6 +265,36 @@ if(TARGET picolibc_sysroot)
         FLAGS -std=c++20 -Wall -Wextra -Werror LDFLAGS --defsym=__malm_dump_regs=1)
     set(rv_cxx_cases example_hello sort self_check abort)
     set(rv_cxx_eh_cases self_check abort)
+
+    # Lua (issue #36): lua_elf(<name> <script> [LDFLAGS <flags>...]) links a script with Lua's
+    # interpreter as malm build does: script.S includes the script and its chunk name from a
+    # directory of its own.
+    function(lua_elf name script)
+        cmake_parse_arguments(ARG "" "" "LDFLAGS" ${ARGN})
+        set(dir "${rv_elf_dir}/lua/${name}")
+        set(elf "${rv_elf_dir}/${name}.elf")
+        cmake_path(GET script FILENAME file)
+        file(WRITE "${dir}/script.name" "@${file}")
+        add_custom_command(OUTPUT "${elf}"
+            COMMAND "${CMAKE_COMMAND}" -E copy "${script}" "${dir}/script.lua"
+            COMMAND "${MALM_RV_CC}" ${rv_flags} -I "${dir}" -c "${rt_dir}/lua/script.S"
+                -o "${dir}/script.o"
+            COMMAND "${MALM_RV_LD}" -T "${rv_ld_script}" --gc-sections ${ARG_LDFLAGS} "${rt_crt0}"
+                "${dir}/script.o" "${pl_sysroot}/lib/liblua.a" ${pl_libs} -o "${elf}"
+            DEPENDS "${script}" "${rt_dir}/lua/script.S" "${rv_ld_script}" picolibc_sysroot
+                "${rt_crt0}" "${pl_sysroot}/lib/liblua.a" ${pl_libs}
+            COMMENT "Building RISC-V test ${name}"
+            VERBATIM)
+        set(rv_elfs ${rv_elfs} "${elf}" PARENT_SCOPE)
+    endfunction()
+
+    foreach(prog hello cat sort)
+        lua_elf(lua_example_${prog} "${PROJECT_SOURCE_DIR}/examples/lua/${prog}.lua")
+    endforeach()
+    lua_elf(dump_lua_example_hello "${PROJECT_SOURCE_DIR}/examples/lua/hello.lua"
+        LDFLAGS --defsym=__malm_dump_regs=1)
+    lua_elf(lua_test "${CMAKE_CURRENT_SOURCE_DIR}/programs/lua_test.lua")
+    set(rv_lua_cases example_hello example_cat sort checks panic error exit)
 endif()
 
 # Rust (issue #34): the runtime crate, then the examples and the runtime's self-check against it, as
@@ -363,7 +394,7 @@ foreach(case hello cat trace regs example_hello example_cat fizzbuzz wc sort run
             "${rv_elf_dir}" "${PROJECT_SOURCE_DIR}/tests/programs" ${case})
     set_tests_properties(rvref_program_${case} PROPERTIES LABELS fast TIMEOUT 60)
 endforeach()
-foreach(libc picolibc cxx cxx_eh rust zig)
+foreach(libc picolibc cxx cxx_eh rust zig lua)
     foreach(case IN LISTS rv_${libc}_cases)
         add_test(NAME rvref_${libc}_${case}
             COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/rvref_pipe_test.sh" $<TARGET_FILE:malm>
@@ -403,7 +434,8 @@ foreach(spec
 endforeach()
 # C++ (issue #33): the examples and libc++'s self-check (its abort too); with exceptions in emu
 # mode only. Rust and Zig (issues #34, #35): the examples and the runtime's self-check, also its
-# panic, error and exit. The hellos are fast, the rest slow.
+# panic, error and exit. Lua (issue #36): hello in emu mode only, 320 K guest instructions. The
+# hellos but Lua's are fast, the rest slow.
 set(rv_diff_specs "")
 if(TARGET picolibc_sysroot)
     list(APPEND rv_diff_specs
@@ -426,11 +458,14 @@ if(rv_zig_cases)
         "zig_sort|dump_zig_example_sort|64K|${rv_inputs}/sort.in"
         "zig_self_check|dump_zig_test|256K|/dev/null|${rv_inputs}/panic.in|${rv_inputs}/error.in|${rv_inputs}/exit.in")
 endif()
+if(rv_lua_cases)
+    list(APPEND rv_diff_specs "lua_hello|dump_lua_example_hello|512K|--emu-only|/dev/null")
+endif()
 foreach(spec IN LISTS rv_diff_specs)
     string(REPLACE "|" ";" fields "${spec}")
     list(POP_FRONT fields case elf ram)
     set(label slow)
-    if(case MATCHES "_hello$")
+    if(case MATCHES "_hello$" AND NOT case STREQUAL "lua_hello")
         set(label fast)
     endif()
     add_test(NAME rvdiff_program_${case}
@@ -530,6 +565,18 @@ if(rv_zig_cases)
                     "${PROJECT_SOURCE_DIR}/tests/programs" ${case} ${mode} zig)
             set_tests_properties(${name} PROPERTIES LABELS ${label} TIMEOUT 1800)
         endforeach()
+    endforeach()
+endif()
+
+# Lua (issue #36), the M5 criterion for Lua (`print('hi')` in examples/lua/hello.lua): hello, cat
+# and sort in emu mode (aot mode refuses Lua), each about a minute per run, so all slow.
+if(rv_lua_cases)
+    foreach(case hello cat sort)
+        add_test(NAME build_lua_${case}
+            COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/build_pipe_test.sh" $<TARGET_FILE:malm>
+                "${MALM_RV_CC}" "${PROJECT_SOURCE_DIR}/examples/lua"
+                "${PROJECT_SOURCE_DIR}/tests/programs" ${case} emu lua)
+        set_tests_properties(build_lua_${case} PROPERTIES LABELS slow TIMEOUT 3600)
     endforeach()
 endif()
 

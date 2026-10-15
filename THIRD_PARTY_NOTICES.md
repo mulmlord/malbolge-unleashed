@@ -13,20 +13,22 @@ third-party material.
 reproduce Zstandard's copyright notice, conditions and disclaimer in the documentation or other materials provided
 with the distribution, e.g. by shipping `third_party/LICENSE-zstd.txt` alongside them.
 
-## Built into `malm` when it is built with picolibc (`MALM_PICOLIBC`), and linked into guest programs built with `malm build --libc picolibc` or from C++
+## Built into `malm` when it is built with picolibc (`MALM_PICOLIBC`), and linked into guest programs built with `malm build --libc picolibc`, from C++ or from Lua
 
 | Component | Version | Licence | Notes |
 |---|---|---|---|
 | [picolibc](https://github.com/picolibc/picolibc) | 1.8.12 | BSD-style (mostly BSD-2-Clause and BSD-3-Clause, per file) | the C library for RISC-V guests (`rv/runtime/CMakeLists.txt`), fetched at configure time. Full text: [`COPYING.picolibc`](https://github.com/picolibc/picolibc/blob/1.8.12/COPYING.picolibc) in its source |
 | [compiler-rt](https://github.com/llvm/llvm-project/tree/main/compiler-rt) builtins | 20.1.8 | Apache-2.0 WITH LLVM-exception | soft-float and 64-bit integer routines for RISC-V guests, fetched at configure time. Full text: [`third_party/LICENSE-compiler-rt.txt`](third_party/LICENSE-compiler-rt.txt) |
 | [libc++](https://libcxx.llvm.org/), libc++abi, libunwind | 20.1.8 | Apache-2.0 WITH LLVM-exception | the C++ standard library and runtime for RISC-V guests (libunwind only for exceptions), with the parts of LLVM libc that libc++ compiles in (floating-point `from_chars`); fetched at configure time with compiler-rt, the same LLVM release. Same licence text: [`third_party/LICENSE-compiler-rt.txt`](third_party/LICENSE-compiler-rt.txt) |
+| [Lua](https://www.lua.org/) | 5.5.1 | MIT | the Lua interpreter for Lua scripts (`rv/runtime/lua`), fetched at configure time. Licence text: at the end of `lua.h` in its source, and [lua.org/license.html](https://www.lua.org/license.html) |
 
-All of them are in `malm` as a library archive (about 1.9 MB, unpacked by `malm build`), and the
-parts a program uses are linked into it. **If you distribute such a `malm` binary**, ship the two
-licence texts with it. **If you distribute a program built with `--libc picolibc` or from C++** (a
-`.malm` or packed executable), picolibc's licences require its copyright notices with it; the LLVM
-exception waives the conditions of compiler-rt, libc++, libc++abi and libunwind for code embedded
-into a compiled program.
+All of them are in `malm` as a library archive (about 2.0 MB, unpacked by `malm build`), and the
+parts a program uses are linked into it. **If you distribute such a `malm` binary**, ship the
+licence texts with it (the two above, and Lua's). **If you distribute a program built with `--libc
+picolibc` or from C++** (a `.malm` or packed executable), picolibc's licences require its copyright
+notices with it; the LLVM exception waives the conditions of compiler-rt, libc++, libc++abi and
+libunwind for code embedded into a compiled program. **A program built from Lua** carries Lua's
+interpreter too, whose MIT licence asks for Lua's copyright notice with it.
 
 ## Linked into guest programs built from Rust (from the user's Rust toolchain, not part of `malm`)
 
