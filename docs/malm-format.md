@@ -71,14 +71,15 @@ data): the frame's compressed size must equal the payload length.
 
 The writer's default is codec 2, at zstd level 19 with the level's window (2^23 bytes for programs
 of more than 8 MB) and compressed on up to 8 threads. zstd's output is the same for any number of
-threads from 1 on, so a file does not depend on the machine that wrote it. One symbol per byte
-compresses better than the packed bytes: in those, an instruction sequence that recurs at a
-distance that is not a multiple of 8 cells starts at another bit of a byte, and zstd, which matches
-whole bytes, sees different data. At level 19, the files of large programs are 34 to 51% smaller
-than with codec 1 (written at level 9 before issue #39); the measurements are in
-[benchmarks.md](benchmarks.md#issue-39-compression). Codec 1 is still read and can be written
-(`malm export --codec zstd-packed`, level 9) for older readers; codec 0 exists for debugging and
-tests.
+threads from 1 on, so a file does not depend on the machine that wrote it. Where the threads cannot
+start (a thread limit), the writer uses one; without any, it fails rather than write zstd's
+single-threaded frame, which differs. One symbol per byte compresses better than the packed bytes:
+in those, an instruction sequence that recurs at a distance that is not a multiple of 8 cells starts
+at another bit of a byte, and zstd, which matches whole bytes, sees different data. At level 19, the
+files of large programs are 34 to 51% smaller than with codec 1 (written at level 9 before issue
+#39); the measurements are in [benchmarks.md](benchmarks.md#issue-39-compression). Codec 1 is still
+read and can be written (`malm export --codec zstd-packed`, level 9) for older readers; codec 0
+exists for debugging and tests.
 
 ## Validation on read
 
