@@ -1,5 +1,5 @@
-// The .malm container (docs/malm-format.md): normalized, 3-bit packed, optionally zstd-compressed
-// program cells. Pure: it carries program cells only, never data (spec 4).
+// The .malm container (docs/malm-format.md): normalized program cells, 3-bit packed or zstd-
+// compressed. Pure: it carries program cells only, never data (spec 4).
 #pragma once
 
 #include <array>
@@ -19,7 +19,9 @@
 namespace malm::container {
 
 enum class Mode : std::uint8_t { Unleashed = 0, Classic = 1 };
-enum class Codec : std::uint8_t { Packed = 0, Zstd = 1 };
+// Packed: the symbols 3 bits each; ZstdPacked: those bytes in a zstd frame; Zstd: the symbols one
+// per byte in a zstd frame (smaller, issue #39).
+enum class Codec : std::uint8_t { Packed = 0, ZstdPacked = 1, Zstd = 2 };
 
 inline constexpr std::size_t kHeaderSize = 32;
 inline constexpr std::string_view kMagic = "MALM";
@@ -55,11 +57,13 @@ struct Limits {
 std::uint32_t crc32(std::span<const std::uint8_t> data) noexcept;
 
 // Precondition: 2 <= cells.size() <= max_cells(mode) and every cell loadable at its position.
+// Codec::Zstd compresses on up to 8 threads; the bytes do not depend on their number.
 std::vector<std::uint8_t> write_malm(const Program& p, Codec codec = Codec::Zstd);
 
 // Validates everything (docs/malm-format.md); the error is a one-line reason. zstd payloads are
 // decompressed as a stream in 1 MiB chunks and the cells grow only as data is produced, so memory
 // is bounded by the data actually present (and by limits.max_cells), never by the header's claim.
+// Reads every codec.
 core::Result<Program, std::string> read_malm(std::span<const std::uint8_t> bytes,
                                              Limits limits = {});
 

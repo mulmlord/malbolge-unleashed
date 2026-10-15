@@ -80,6 +80,30 @@ TEST_CASE("crc32 matches the IEEE check value") {
     CHECK(crc32({}) == 0u);
 }
 
+TEST_CASE("crc32 matches a bitwise CRC at every length and alignment") {
+    const auto bitwise = [](std::span<const std::uint8_t> data) {
+        std::uint32_t c = 0xFFFFFFFFu;
+        for (const std::uint8_t b : data) {
+            c ^= b;
+            for (int k = 0; k < 8; ++k) {
+                c = (c & 1u) != 0 ? (c >> 1) ^ 0xEDB88320u : c >> 1;
+            }
+        }
+        return c ^ 0xFFFFFFFFu;
+    };
+    std::mt19937_64 rng(3);
+    Bytes data(300);
+    for (auto& b : data) {
+        b = static_cast<std::uint8_t>(rng());
+    }
+    for (std::size_t off = 0; off < 8; ++off) {
+        for (std::size_t len = 0; off + len <= data.size(); len += 1 + len / 16) {
+            const std::span<const std::uint8_t> s(data.data() + off, len);
+            CHECK_MESSAGE(crc32(s) == bitwise(s), "off=" << off << " len=" << len);
+        }
+    }
+}
+
 TEST_CASE("normalization is a bijection at every position") {
     for (std::size_t pos = 0; pos < 94; ++pos) {
         std::array<bool, 8> seen{};
@@ -137,10 +161,11 @@ TEST_CASE("write_malm header layout") {
     Program c = p;
     c.mode = Mode::Classic;
     c.exit_a = true;
-    const Bytes bc = write_malm(c, Codec::Zstd);
+    const Bytes bc = write_malm(c, Codec::ZstdPacked);
     CHECK(bc[6] == 1);
     CHECK(bc[7] == 1);
     CHECK(bc[8] == 1);
+    CHECK(write_malm(c)[8] == 2); // the default codec
 }
 
 TEST_CASE("packing is 3 bits per cell, LSB first") {
@@ -158,7 +183,7 @@ TEST_CASE("packing is 3 bits per cell, LSB first") {
     CHECK(b[kHeaderSize + 2] == ((v >> 16) & 0xff));
 }
 
-TEST_CASE("round trip: random programs of many lengths, both codecs, both modes") {
+TEST_CASE("round trip: random programs of many lengths, every codec, both modes") {
     std::mt19937_64 rng(42);
     std::vector<std::size_t> lengths = {2, 3, 4, 5, 7, 8, 9, 10, 11, 94, 95, 1000, 4097};
     for (int i = 0; i < 20; ++i) {
@@ -167,7 +192,7 @@ TEST_CASE("round trip: random programs of many lengths, both codecs, both modes"
     lengths.push_back(59049);
     for (const std::size_t n : lengths) {
         for (const Mode mode : {Mode::Unleashed, Mode::Classic}) {
-            for (const Codec codec : {Codec::Packed, Codec::Zstd}) {
+            for (const Codec codec : {Codec::Packed, Codec::ZstdPacked, Codec::Zstd}) {
                 Program p = random_program(rng, n, mode);
                 p.exit_a = (rng() & 1) != 0;
                 const Bytes b = write_malm(p, codec);
@@ -217,7 +242,7 @@ TEST_CASE("round trip: every loadable committed program") {
                     continue;
                 }
                 (mode == Mode::Classic ? classic : unleashed)++;
-                for (const Codec codec : {Codec::Packed, Codec::Zstd}) {
+                for (const Codec codec : {Codec::Packed, Codec::ZstdPacked, Codec::Zstd}) {
                     const Bytes b = write_malm({*cells, mode, false}, codec);
                     CHECK_MESSAGE(is_malm(b), e.path());
                     const auto r = read_malm(b);
@@ -268,8 +293,8 @@ TEST_CASE("validation: every error has its own message") {
     }
     SUBCASE("unknown codec") {
         Bytes b = good;
-        b[8] = 2;
-        CHECK(contains(error_of(b), "unknown codec 2"));
+        b[8] = 3;
+        CHECK(contains(error_of(b), "unknown codec 3"));
     }
     SUBCASE("unknown flag bits") {
         for (const int f : {2, 0x80, 0xfe}) {
@@ -348,10 +373,10 @@ TEST_CASE("validation: every error has its own message") {
     }
 }
 
-TEST_CASE("validation: zstd codec") {
+TEST_CASE("validation: codec 1, zstd of the packed bytes") {
     std::mt19937_64 rng(3);
     const Program p = random_program(rng, 5000);
-    const Bytes good = write_malm(p, Codec::Zstd);
+    const Bytes good = write_malm(p, Codec::ZstdPacked);
     REQUIRE(read_malm(good).has_value());
     const std::size_t packed = (3 * 5000 + 7) / 8;
 
@@ -446,6 +471,130 @@ TEST_CASE("validation: zstd codec") {
         put_u64(b, 24, frame.size());
         b.insert(b.end(), frame.begin(), frame.end());
         CHECK(contains(error_of(b), "padding"));
+    }
+}
+
+namespace {
+
+// A codec-2 file of `cells` (header from write_malm, CRC of their packed bytes) whose frame holds
+// `symbols` instead of the cells' own.
+Bytes codec2_with_symbols(const Program& p, const Bytes& symbols, bool content_size = true) {
+    ZSTD_CCtx* cctx = ZSTD_createCCtx();
+    ZSTD_CCtx_setParameter(cctx, ZSTD_c_contentSizeFlag, content_size ? 1 : 0);
+    Bytes frame(ZSTD_compressBound(symbols.size()));
+    const std::size_t n =
+        ZSTD_compress2(cctx, frame.data(), frame.size(), symbols.data(), symbols.size());
+    ZSTD_freeCCtx(cctx);
+    REQUIRE_FALSE(ZSTD_isError(n));
+    frame.resize(n);
+    Bytes b = write_malm(p, Codec::Zstd);
+    b.resize(kHeaderSize);
+    put_u64(b, 24, frame.size());
+    b.insert(b.end(), frame.begin(), frame.end());
+    return b;
+}
+
+Bytes symbols_of(const Program& p) {
+    Bytes s;
+    for (std::size_t i = 0; i < p.cells.size(); ++i) {
+        s.push_back(normalize(i, p.cells[i]));
+    }
+    return s;
+}
+
+} // namespace
+
+TEST_CASE("validation: codec 2, zstd of one symbol per byte") {
+    std::mt19937_64 rng(4);
+    const Program p = random_program(rng, 5000);
+    const Bytes good = write_malm(p, Codec::Zstd);
+    REQUIRE(good[8] == 2);
+    REQUIRE(read_malm(good).has_value());
+    // The CRC is that of the packed bytes, as for the other codecs.
+    const Bytes pk = write_malm(p, Codec::Packed);
+    CHECK(std::equal(good.begin() + 12, good.begin() + 16, pk.begin() + 12));
+    // A frame built here, outside write_malm, reads back too.
+    REQUIRE(read_malm(codec2_with_symbols(p, symbols_of(p))).has_value());
+
+    SUBCASE("corrupted frame fails to decompress or fails the CRC") {
+        Bytes b = good;
+        b[b.size() / 2] ^= 0x55;
+        const std::string e = error_of(b);
+        CHECK((contains(e, "zstd") || contains(e, "CRC mismatch")));
+    }
+    SUBCASE("truncated frame") {
+        Bytes b(good.begin(), good.end() - 3);
+        put_u64(b, 24, b.size() - kHeaderSize);
+        CHECK(contains(error_of(b), "zstd"));
+    }
+    SUBCASE("frame content size differs from the cell count") {
+        Bytes b = good;
+        put_u64(b, 16, 5001);
+        const std::string e = error_of(b);
+        CHECK(contains(e, "content size 5000"));
+        CHECK(contains(e, "expected 5001"));
+    }
+    SUBCASE("frame without a content size") {
+        CHECK(contains(error_of(codec2_with_symbols(p, symbols_of(p), false)), "does not declare"));
+    }
+    SUBCASE("a byte above 7 is not a symbol") {
+        for (const int bad : {8, 0x80, 0xff}) {
+            for (const std::size_t at : {std::size_t{0}, std::size_t{2500}, std::size_t{4999}}) {
+                Bytes s = symbols_of(p);
+                s[at] = static_cast<std::uint8_t>(bad);
+                CHECK_MESSAGE(contains(error_of(codec2_with_symbols(p, s)), "above 7"),
+                              "byte " << bad << " at " << at);
+            }
+        }
+    }
+    SUBCASE("other symbols fail the CRC") {
+        Bytes s = symbols_of(p);
+        s[1234] ^= 1;
+        CHECK(contains(error_of(codec2_with_symbols(p, s)), "CRC mismatch"));
+    }
+    SUBCASE("data after the frame") {
+        Bytes b = good;
+        b.push_back(0);
+        put_u64(b, 24, b.size() - kHeaderSize);
+        CHECK(contains(error_of(b), "after the first frame"));
+    }
+    SUBCASE("a claim beyond the reader cap is rejected before decompressing") {
+        Bytes b = good;
+        put_u64(b, 16, core::kUnleashedMaxCells);
+        CHECK(contains(error_of(b), "above the limit"));
+    }
+}
+
+TEST_CASE("codec 2: the bytes do not depend on the number of zstd workers") {
+    // write_malm uses up to 8 workers, as many as the machine has; zstd's output is the same for
+    // any number from 1 on. A job is 4 windows, at least 512 KiB: with a 2^16 window this input is
+    // 4 jobs, where write_malm's 2^23 window would need 128 MiB for as many.
+    std::mt19937_64 rng(9);
+    Bytes src(std::size_t{2} << 20);
+    for (std::size_t i = 0; i < src.size(); i += 4096) {
+        // Compressible but not trivial: runs of repeated random blocks.
+        const std::size_t len = std::min<std::size_t>(4096, src.size() - i);
+        const std::size_t from = i >= 65536 && rng() % 2 == 0 ? i - 4096 * (1 + rng() % 16) : 0;
+        for (std::size_t k = 0; k < len; ++k) {
+            src[i + k] = from != 0 ? src[from + k] : static_cast<std::uint8_t>(rng() % 8);
+        }
+    }
+    Bytes first;
+    for (const int workers : {1, 3, 8}) {
+        ZSTD_CCtx* cctx = ZSTD_createCCtx();
+        REQUIRE_FALSE(ZSTD_isError(ZSTD_CCtx_setParameter(cctx, ZSTD_c_compressionLevel, 19)));
+        REQUIRE_FALSE(ZSTD_isError(ZSTD_CCtx_setParameter(cctx, ZSTD_c_windowLog, 16)));
+        REQUIRE_FALSE(ZSTD_isError(ZSTD_CCtx_setParameter(cctx, ZSTD_c_nbWorkers, workers)));
+        Bytes z(ZSTD_compressBound(src.size()));
+        const std::size_t n = ZSTD_compress2(cctx, z.data(), z.size(), src.data(), src.size());
+        ZSTD_freeCCtx(cctx);
+        REQUIRE_FALSE(ZSTD_isError(n));
+        z.resize(n);
+        if (first.empty()) {
+            first = z;
+        } else {
+            CHECK_MESSAGE(z == first, workers << " workers");
+        }
     }
 }
 
@@ -621,11 +770,31 @@ static void check_chunk_boundary(const std::uint64_t target, const std::uint64_t
     std::mt19937_64 rng(11 + target + dl);
     const std::size_t n = static_cast<std::size_t>(target * 8 / 3 + dl);
     const Program p = random_program(rng, n);
-    for (const Codec codec : {Codec::Packed, Codec::Zstd}) {
+    for (const Codec codec : {Codec::Packed, Codec::ZstdPacked}) {
         const Bytes b = write_malm(p, codec);
         const auto r = read_malm(b);
         REQUIRE_MESSAGE(r.has_value(), "n=" << n << ": " << r.error());
         CHECK_MESSAGE(r->cells == p.cells, "n=" << n);
+    }
+}
+
+// Codec 2 streams one cell per byte: round trips with the cell count around 1 MiB.
+static void check_symbol_chunk_boundary(const std::size_t n) {
+    std::mt19937_64 rng(13 + n);
+    const Program p = random_program(rng, n);
+    const auto r = read_malm(write_malm(p, Codec::Zstd));
+    REQUIRE_MESSAGE(r.has_value(), "n=" << n << ": " << r.error());
+    CHECK_MESSAGE(r->cells == p.cells, "n=" << n);
+}
+
+TEST_CASE("streaming: codec 2 round trip just past a chunk boundary (1 MiB + 3 cells)") {
+    check_symbol_chunk_boundary((std::size_t{1} << 20) + 3);
+}
+
+TEST_CASE("streaming: codec 2 round trips at chunk boundaries" * doctest::test_suite("slow")) {
+    const std::size_t mib = std::size_t{1} << 20;
+    for (const std::size_t n : {mib - 1, mib, mib + 1, mib + 8, 2 * mib + 5}) {
+        check_symbol_chunk_boundary(n);
     }
 }
 

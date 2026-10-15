@@ -376,7 +376,7 @@ TEST_CASE("export: bad input exits 1") {
 // One case of the export -> run comparison; `file` is relative to the committed programs.
 static void check_export_then_run(const std::string& file, bool classic) {
     const std::string dir = MALM_PROGRAMS_DIR;
-    for (const std::string_view codec : {"packed", "zstd"}) {
+    for (const std::string_view codec : {"packed", "zstd", "zstd-packed"}) {
         std::vector<std::string_view> extra{"--codec", codec};
         if (classic) {
             extra.push_back("--classic");
@@ -486,8 +486,8 @@ TEST_CASE("export --text: round trip is byte-identical after stripping whitespac
         CHECK_MESSAGE(strip_ws(got1) == want, name);
         CHECK(got1 == want + "\n"); // no whitespace but one trailing newline
 
-        // text -> .malm -> text, both codecs
-        for (const std::string_view codec : {"packed", "zstd"}) {
+        // text -> .malm -> text, every codec
+        for (const std::string_view codec : {"packed", "zstd", "zstd-packed"}) {
             const Exported e = export_malm(orig, {"--codec", codec});
             REQUIRE(e.r.code == 0);
             const TempFile t2("");

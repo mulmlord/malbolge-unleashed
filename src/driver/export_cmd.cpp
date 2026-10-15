@@ -18,8 +18,8 @@ namespace malm {
 namespace {
 
 constexpr std::string_view kUsage =
-    "usage: malm export (--text|--malm) [--classic] [--exit-a] [--codec packed|zstd]\n"
-    "                   [--max-cells N] -o <out> [--] <in>\n"
+    "usage: malm export (--text|--malm) [--classic] [--exit-a]\n"
+    "                   [--codec packed|zstd|zstd-packed] [--max-cells N] -o <out> [--] <in>\n"
     "       (-o - writes to stdout; --exit-a and --codec apply to --malm only)\n";
 
 int usage_error(std::ostream& err, std::string_view msg) {
@@ -84,9 +84,12 @@ int export_command(std::span<const std::string_view> args, std::istream&, std::o
             } else if (value == "zstd") {
                 codec = container::Codec::Zstd;
                 have_codec = true;
+            } else if (value == "zstd-packed") {
+                codec = container::Codec::ZstdPacked;
+                have_codec = true;
             } else {
                 return usage_error(err, "unknown codec '" + std::string(value) +
-                                            "' (expected packed or zstd)");
+                                            "' (expected packed, zstd or zstd-packed)");
             }
         } else if ((!options_done && arg.starts_with('-')) || !input.empty()) {
             return usage_error(err, "unexpected argument '" + std::string(arg) + "'");
