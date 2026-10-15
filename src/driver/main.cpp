@@ -4,6 +4,7 @@
 #include <string_view>
 #include <vector>
 
+#include "container/container.hpp"
 #include "driver/cli.hpp"
 #include "driver/packed_run.hpp"
 
@@ -24,6 +25,9 @@ int main(int argc, char** argv) {
         return malm::run_cli(args, std::cin, std::cout, std::cerr);
     } catch (const std::bad_alloc&) {
         std::cerr << "malm: out of memory\n";
+        return 1;
+    } catch (const malm::container::WriteError& e) {
+        std::cerr << "malm: " << e.what() << "\n";
         return 1;
     }
 }

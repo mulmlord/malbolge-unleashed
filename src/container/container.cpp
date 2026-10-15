@@ -6,6 +6,7 @@
 #include <cassert>
 #include <memory>
 #include <new>
+#include <optional>
 #include <thread>
 
 namespace malm::container {
@@ -19,7 +20,7 @@ constexpr int kZstdPackedLevel = 9;
 // for any number of workers from 1 on (tested), so a file does not depend on the machine.
 constexpr unsigned kMaxWorkers = 8;
 
-// Decompression and unpacking work in chunks of this size.
+// Compression, decompression and unpacking work in chunks of this size.
 constexpr std::size_t kChunk = std::size_t{1} << 20;
 
 // Largest zstd window the reader accepts (2^24 = 16 MiB; level 9 writes 2^21). Reader policy:
@@ -100,88 +101,160 @@ struct CCtxDeleter {
     void operator()(ZSTD_CCtx* c) const { ZSTD_freeCCtx(c); }
 };
 
-// One zstd frame of `src` (it declares its content size).
-std::vector<std::uint8_t> zstd_compress(std::span<const std::uint8_t> src, int level,
-                                        unsigned workers) {
-    const std::unique_ptr<ZSTD_CCtx, CCtxDeleter> cctx(ZSTD_createCCtx());
-    if (!cctx) {
-        throw std::bad_alloc();
+// Streams one zstd frame of `size` bytes (it declares its content size) onto the end of `out`.
+class ZstdWriter {
+  public:
+    ZstdWriter(std::vector<std::uint8_t>& out, std::uint64_t size, int level, unsigned workers)
+        : out_(out) {
+        // zstd starts its threads at the first call and reports a failed start as an allocation
+        // error. One worker writes the same bytes as several, so it is the fallback.
+        for (;;) {
+            cctx_.reset(ZSTD_createCCtx());
+            if (!cctx_) {
+                throw std::bad_alloc();
+            }
+            ZSTD_CCtx_setParameter(cctx_.get(), ZSTD_c_compressionLevel, level);
+            ZSTD_CCtx_setPledgedSrcSize(cctx_.get(), size);
+            // The only possible error: this zstd has no threads, and its output would differ.
+            if (ZSTD_isError(ZSTD_CCtx_setParameter(cctx_.get(), ZSTD_c_nbWorkers,
+                                                    static_cast<int>(workers)))) {
+                throw WriteError("zstd was built without multithreading (ZSTD_MULTITHREAD)");
+            }
+            ZSTD_inBuffer none{nullptr, 0, 0};
+            ZSTD_outBuffer nowhere{nullptr, 0, 0};
+            if (!ZSTD_isError(
+                    ZSTD_compressStream2(cctx_.get(), &nowhere, &none, ZSTD_e_continue))) {
+                return;
+            }
+            if (workers == 0) {
+                throw std::bad_alloc();
+            }
+            if (workers == 1) {
+                throw WriteError("cannot start a zstd compression thread (out of threads or "
+                                 "memory)");
+            }
+            workers = 1;
+        }
     }
-    [[maybe_unused]] std::size_t r =
-        ZSTD_CCtx_setParameter(cctx.get(), ZSTD_c_compressionLevel, level);
-    assert(!ZSTD_isError(r));
-    r = ZSTD_CCtx_setParameter(cctx.get(), ZSTD_c_nbWorkers, static_cast<int>(workers));
-    assert(!ZSTD_isError(r));
-    std::vector<std::uint8_t> out(ZSTD_compressBound(src.size()));
-    const std::size_t z =
-        ZSTD_compress2(cctx.get(), out.data(), out.size(), src.data(), src.size());
-    if (ZSTD_isError(z)) {
-        throw std::bad_alloc(); // the bound fits, so only allocation can fail
+
+    // `last` ends the frame. A frame fed in one chunk is the one ZSTD_compress2 writes, as the
+    // last chunk comes with room for all of its output; with workers, the chunks do not change the
+    // bytes either (tested). Single-threaded, more chunks would once the window wraps.
+    void feed(std::span<const std::uint8_t> data, bool last) {
+        ZSTD_inBuffer in{data.data(), data.size(), 0};
+        if (!last) {
+            while (in.pos < in.size) {
+                pump(in, ZSTD_e_continue, ZSTD_CStreamOutSize());
+            }
+            return;
+        }
+        std::size_t room = ZSTD_compressBound(data.size());
+        while (pump(in, ZSTD_e_end, room) != 0) {
+            room = ZSTD_CStreamOutSize();
+        }
     }
-    out.resize(z);
-    return out;
+
+  private:
+    std::size_t pump(ZSTD_inBuffer& in, ZSTD_EndDirective op, std::size_t room) {
+        const std::size_t at = out_.size();
+        out_.resize(at + room);
+        ZSTD_outBuffer o{out_.data() + at, room, 0};
+        const std::size_t r = ZSTD_compressStream2(cctx_.get(), &o, &in, op);
+        out_.resize(at + o.pos);
+        if (ZSTD_isError(r)) {
+            throw std::bad_alloc(); // the threads have started, so only allocation can fail
+        }
+        return r;
+    }
+
+    std::vector<std::uint8_t>& out_;
+    std::unique_ptr<ZSTD_CCtx, CCtxDeleter> cctx_;
+};
+
+void set_le(std::vector<std::uint8_t>& out, std::size_t off, std::uint64_t v, int bytes) {
+    for (int i = 0; i < bytes; ++i) {
+        out[off + static_cast<std::size_t>(i)] = static_cast<std::uint8_t>(v >> (8 * i));
+    }
 }
 
 } // namespace
 
-std::vector<std::uint8_t> write_malm(const Program& p, Codec codec) {
+std::vector<std::uint8_t> write_malm(const Program& p, Codec codec, unsigned zstd_workers) {
     const std::size_t n = p.cells.size();
     assert(n >= 2 && n <= max_cells(p.mode));
 
-    // Pack: cell i occupies bits 3i..3i+2, LSB first. Codec 2 also keeps the symbols, one per byte.
-    std::vector<std::uint8_t> packed;
-    packed.reserve(static_cast<std::size_t>(packed_size(n)));
-    std::vector<std::uint8_t> symbols;
-    if (codec == Codec::Zstd) {
-        symbols.reserve(n);
-    }
-    std::uint32_t acc = 0;
-    int nbits = 0;
-    std::size_t pos_mod94 = 0;
-    for (const std::uint8_t cell : p.cells) {
-        const std::uint8_t s = normalize(pos_mod94, cell);
-        assert(s != kNoSymbol);
-        if (codec == Codec::Zstd) {
-            symbols.push_back(s);
-        }
-        acc |= static_cast<std::uint32_t>(s & 7u) << nbits;
-        nbits += 3;
-        if (nbits >= 8) {
-            packed.push_back(static_cast<std::uint8_t>(acc & 0xFFu));
-            acc >>= 8;
-            nbits -= 8;
-        }
-        pos_mod94 = pos_mod94 == 93 ? 0 : pos_mod94 + 1;
-    }
-    if (nbits > 0) {
-        packed.push_back(static_cast<std::uint8_t>(acc & 0xFFu));
-    }
-    assert(packed.size() == packed_size(n));
-    const std::uint32_t crc = crc32(packed);
-
-    std::vector<std::uint8_t> payload;
-    if (codec == Codec::Zstd) {
-        packed = {}; // only the CRC needed it
-        const unsigned workers = std::clamp(std::thread::hardware_concurrency(), 1u, kMaxWorkers);
-        payload = zstd_compress(symbols, kZstdLevel, workers);
-    } else if (codec == Codec::ZstdPacked) {
-        payload = zstd_compress(packed, kZstdPackedLevel, 0);
-    } else {
-        payload = std::move(packed);
-    }
-
+    // The header, with the CRC and the payload size filled in at the end.
     std::vector<std::uint8_t> out;
-    out.reserve(kHeaderSize + payload.size());
     out.insert(out.end(), kMagic.begin(), kMagic.end());
     put_le(out, kVersion, 2);
     out.push_back(static_cast<std::uint8_t>(p.mode));
     out.push_back(p.exit_a ? kFlagExitA : 0);
     out.push_back(static_cast<std::uint8_t>(codec));
     put_le(out, 0, 3);
-    put_le(out, crc, 4);
+    put_le(out, 0, 4);
     put_le(out, n, 8);
-    put_le(out, payload.size(), 8);
-    out.insert(out.end(), payload.begin(), payload.end());
+    put_le(out, 0, 8);
+    assert(out.size() == kHeaderSize);
+
+    std::optional<ZstdWriter> zstd;
+    if (codec == Codec::Zstd) {
+        const unsigned workers =
+            zstd_workers != 0 ? zstd_workers
+                              : std::clamp(std::thread::hardware_concurrency(), 1u, kMaxWorkers);
+        zstd.emplace(out, n, kZstdLevel, workers);
+    } else if (codec == Codec::ZstdPacked) {
+        zstd.emplace(out, packed_size(n), kZstdPackedLevel, 0);
+    } else {
+        out.reserve(kHeaderSize + static_cast<std::size_t>(packed_size(n)));
+    }
+
+    // A chunk of cells at a time (a multiple of 8, so whole packed bytes): the symbols one per
+    // byte (codec 2) and packed, cell i at bits 3i..3i+2, LSB first. The CRC is that of the packed
+    // bytes. Codec 1 compresses single-threaded, so in one chunk.
+    const std::size_t chunk = codec == Codec::ZstdPacked ? n : kChunk;
+    std::vector<std::uint8_t> symbols;
+    std::vector<std::uint8_t> packed;
+    std::uint32_t crc = 0xFFFFFFFFu;
+    std::size_t pos_mod94 = 0;
+    for (std::size_t from = 0; from < n; from += chunk) {
+        const std::span<const std::uint8_t> cells =
+            std::span(p.cells).subspan(from, std::min(chunk, n - from));
+        const bool last = from + cells.size() == n;
+        symbols.clear();
+        packed.clear();
+        std::uint32_t acc = 0;
+        int nbits = 0;
+        for (const std::uint8_t cell : cells) {
+            const std::uint8_t s = normalize(pos_mod94, cell);
+            assert(s != kNoSymbol);
+            if (codec == Codec::Zstd) {
+                symbols.push_back(s);
+            }
+            acc |= static_cast<std::uint32_t>(s & 7u) << nbits;
+            nbits += 3;
+            if (nbits >= 8) {
+                packed.push_back(static_cast<std::uint8_t>(acc & 0xFFu));
+                acc >>= 8;
+                nbits -= 8;
+            }
+            pos_mod94 = pos_mod94 == 93 ? 0 : pos_mod94 + 1;
+        }
+        if (nbits > 0) {
+            packed.push_back(static_cast<std::uint8_t>(acc & 0xFFu));
+        }
+        crc = crc_update(crc, packed);
+        if (codec == Codec::Zstd) {
+            zstd->feed(symbols, last);
+        } else if (codec == Codec::ZstdPacked) {
+            zstd->feed(packed, last);
+        } else {
+            out.insert(out.end(), packed.begin(), packed.end());
+        }
+    }
+    assert(codec != Codec::Packed || out.size() == kHeaderSize + packed_size(n));
+
+    set_le(out, 12, crc ^ 0xFFFFFFFFu, 4);
+    set_le(out, 24, out.size() - kHeaderSize, 8);
     return out;
 }
 

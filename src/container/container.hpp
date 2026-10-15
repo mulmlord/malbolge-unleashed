@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -56,9 +57,17 @@ struct Limits {
 // CRC-32 (IEEE 802.3, reflected, 0xEDB88320).
 std::uint32_t crc32(std::span<const std::uint8_t> data) noexcept;
 
+// zstd cannot start its compression threads: a thread limit, or memory ran out.
+class WriteError : public std::runtime_error {
+  public:
+    using std::runtime_error::runtime_error;
+};
+
 // Precondition: 2 <= cells.size() <= max_cells(mode) and every cell loadable at its position.
-// Codec::Zstd compresses on up to 8 threads; the bytes do not depend on their number.
-std::vector<std::uint8_t> write_malm(const Program& p, Codec codec = Codec::Zstd);
+// Codec::Zstd compresses on `zstd_workers` threads (0: as many as the machine has, up to 8); the
+// bytes do not depend on their number. Throws std::bad_alloc or WriteError.
+std::vector<std::uint8_t> write_malm(const Program& p, Codec codec = Codec::Zstd,
+                                     unsigned zstd_workers = 0);
 
 // Validates everything (docs/malm-format.md); the error is a one-line reason. zstd payloads are
 // decompressed as a stream in 1 MiB chunks and the cells grow only as data is produced, so memory

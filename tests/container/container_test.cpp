@@ -1,5 +1,7 @@
 #include <doctest/doctest.h>
 #include <sys/resource.h>
+#include <sys/wait.h>
+#include <unistd.h>
 #include <zstd.h>
 
 #include <algorithm>
@@ -565,7 +567,7 @@ TEST_CASE("validation: codec 2, zstd of one symbol per byte") {
     }
 }
 
-TEST_CASE("codec 2: the bytes do not depend on the number of zstd workers") {
+TEST_CASE("zstd: the bytes do not depend on the number of workers, over several jobs") {
     // write_malm uses up to 8 workers, as many as the machine has; zstd's output is the same for
     // any number from 1 on. A job is 4 windows, at least 512 KiB: with a 2^16 window this input is
     // 4 jobs, where write_malm's 2^23 window would need 128 MiB for as many.
@@ -596,6 +598,85 @@ TEST_CASE("codec 2: the bytes do not depend on the number of zstd workers") {
             CHECK_MESSAGE(z == first, workers << " workers");
         }
     }
+}
+
+namespace {
+
+// One ZSTD_compress2 frame of `src`.
+Bytes zstd_one_call(const Bytes& src, int level, int workers) {
+    ZSTD_CCtx* cctx = ZSTD_createCCtx();
+    REQUIRE_FALSE(ZSTD_isError(ZSTD_CCtx_setParameter(cctx, ZSTD_c_compressionLevel, level)));
+    REQUIRE_FALSE(ZSTD_isError(ZSTD_CCtx_setParameter(cctx, ZSTD_c_nbWorkers, workers)));
+    Bytes z(ZSTD_compressBound(src.size()));
+    const std::size_t n = ZSTD_compress2(cctx, z.data(), z.size(), src.data(), src.size());
+    ZSTD_freeCCtx(cctx);
+    REQUIRE_FALSE(ZSTD_isError(n));
+    z.resize(n);
+    return z;
+}
+
+// write_malm streams codec 2 in chunks on `workers` threads; its frame is the one ZSTD_compress2
+// writes over all the symbols at once, whatever the number of workers.
+void check_codec2_frame(std::size_t cells, std::initializer_list<unsigned> workers) {
+    std::mt19937_64 rng(17 + cells);
+    const Program p = random_program(rng, cells);
+    const Bytes want = zstd_one_call(symbols_of(p), 19, 1);
+    for (const unsigned w : workers) {
+        const Bytes b = write_malm(p, Codec::Zstd, w);
+        CHECK_MESSAGE(Bytes(b.begin() + kHeaderSize, b.end()) == want,
+                      cells << " cells, " << w << " workers");
+    }
+}
+
+} // namespace
+
+TEST_CASE("codec 2: write_malm's frame does not depend on the number of workers") {
+    check_codec2_frame(5000, {1, 8}); // single-threaded below 512 KiB
+    check_codec2_frame(600'000, {1, 3, 8});
+}
+
+TEST_CASE("codec 2: the frame over several chunks" * doctest::test_suite("slow")) {
+    check_codec2_frame((std::size_t{5} << 19) + 3, {1, 8});
+}
+
+TEST_CASE("codec 1: the frame is one single-threaded ZSTD_compress2 call") {
+    std::mt19937_64 rng(19);
+    const Program p = random_program(rng, 600'000);
+    const Bytes pk = write_malm(p, Codec::Packed);
+    const Bytes b = write_malm(p, Codec::ZstdPacked);
+    CHECK(Bytes(b.begin() + kHeaderSize, b.end()) ==
+          zstd_one_call(Bytes(pk.begin() + kHeaderSize, pk.end()), 9, 0));
+}
+
+TEST_CASE("codec 2: a thread that cannot start is a WriteError") {
+    // RLIMIT_NPROC counts the user's threads, so a limit of 0 stops every new one; root is exempt.
+    std::mt19937_64 rng(21);
+    const Program p = random_program(rng, 600'000); // above 512 KiB, so zstd uses its workers
+    const pid_t pid = fork();
+    REQUIRE(pid >= 0);
+    if (pid == 0) {
+        int rc = 3;
+        const struct rlimit none{0, 0};
+        if (setrlimit(RLIMIT_NPROC, &none) == 0) {
+            try {
+                (void)write_malm(p, Codec::Zstd, 4);
+                rc = 1;
+            } catch (const WriteError& e) {
+                rc = contains(e.what(), "cannot start a zstd compression thread") ? 0 : 2;
+            } catch (...) {
+                rc = 2;
+            }
+        }
+        _exit(rc);
+    }
+    int status = 0;
+    REQUIRE(waitpid(pid, &status, 0) == pid);
+    REQUIRE(WIFEXITED(status));
+    if (WEXITSTATUS(status) == 1 && geteuid() == 0) {
+        MESSAGE("skipped: root is exempt from RLIMIT_NPROC");
+        return;
+    }
+    CHECK(WEXITSTATUS(status) == 0);
 }
 
 namespace {
@@ -655,13 +736,19 @@ Bytes zstd_single_segment_header(std::uint64_t content) {
     return f;
 }
 
-// A valid codec-1 file of `cells` Nop cells, built by hand as RLE blocks (every packed byte is
-// 0xFF except the padded last one), so the file stays tiny whatever the cell count. With
-// `real_crc` the CRC is computed (needs the packed bytes in memory); otherwise it is left 0.
-Bytes nop_malm(std::uint64_t cells, bool real_crc) {
-    const std::uint64_t total = (cells * 3 + 7) / 8;
+// A valid codec-1 or codec-2 file of `cells` Nop cells, built by hand as RLE blocks (codec 1:
+// every packed byte is 0xFF except the padded last one; codec 2: every symbol is 7), so the file
+// stays small whatever the cell count. With `real_crc` the CRC is computed (needs the packed bytes
+// in memory); otherwise it is left 0.
+Bytes nop_malm(std::uint64_t cells, bool real_crc, Codec codec = Codec::ZstdPacked) {
+    const std::uint64_t packed_total = (cells * 3 + 7) / 8;
     const unsigned used = static_cast<unsigned>((cells * 3) % 8);
-    const std::uint8_t last = static_cast<std::uint8_t>(used == 0 ? 0xFFu : (1u << used) - 1);
+    const std::uint8_t packed_last =
+        static_cast<std::uint8_t>(used == 0 ? 0xFFu : (1u << used) - 1);
+    const bool symbols = codec == Codec::Zstd;
+    const std::uint64_t total = symbols ? cells : packed_total;
+    const std::uint8_t fill = symbols ? 7 : 0xFF;
+    const std::uint8_t last = symbols ? 7 : packed_last;
     Bytes frame = zstd_single_segment_header(total);
     const auto block = [&](std::uint64_t size, std::uint8_t value, bool is_last) {
         const std::uint32_t h =
@@ -673,7 +760,7 @@ Bytes nop_malm(std::uint64_t cells, bool real_crc) {
     };
     for (std::uint64_t left = total - 1; left > 0;) {
         const std::uint64_t n = std::min<std::uint64_t>(left, 131072);
-        block(n, 0xFF, false);
+        block(n, fill, false);
         left -= n;
     }
     block(1, last, true);
@@ -681,10 +768,10 @@ Bytes nop_malm(std::uint64_t cells, bool real_crc) {
     Bytes b(kHeaderSize, 0);
     std::copy(kMagic.begin(), kMagic.end(), b.begin());
     b[4] = 1;
-    b[8] = 1;
+    b[8] = static_cast<std::uint8_t>(codec);
     if (real_crc) {
-        Bytes packed(total, 0xFF);
-        packed.back() = last;
+        Bytes packed(packed_total, 0xFF);
+        packed.back() = packed_last;
         put_u32(b, 12, crc32(packed));
     }
     put_u64(b, 16, cells);
@@ -695,16 +782,17 @@ Bytes nop_malm(std::uint64_t cells, bool real_crc) {
 
 } // namespace
 
-TEST_CASE("reader cap: a tiny valid file claiming 1.6e9 cells is rejected before decompressing") {
-    const Bytes b = nop_malm(1'600'000'000ull, false);
-    CHECK(b.size() < 20000);
-    const std::string e = error_of(b);
-    CHECK(contains(e, "program has 1600000000 cells, above the limit 1073741824"));
-    CHECK(contains(e, "(use --max-cells)"));
+TEST_CASE("reader cap: a small valid file claiming 1.6e9 cells is rejected before decompressing") {
+    for (const Codec codec : {Codec::ZstdPacked, Codec::Zstd}) {
+        const Bytes b = nop_malm(1'600'000'000ull, false, codec);
+        CHECK(b.size() < 64 * 1024);
+        const std::string e = error_of(b);
+        CHECK(contains(e, "program has 1600000000 cells, above the limit 1073741824"));
+        CHECK(contains(e, "(use --max-cells)"));
+    }
 }
 
-TEST_CASE("reader cap: Limits raises and lowers it; classic keeps its format limit") {
-    const Bytes b = nop_malm(5'000'000, true);
+static void check_limits(const Bytes& b) {
     auto r = read_malm(b, Limits{4'999'999});
     REQUIRE_FALSE(r.has_value());
     CHECK(contains(r.error(), "program has 5000000 cells, above the limit 4999999"));
@@ -722,46 +810,59 @@ TEST_CASE("reader cap: Limits raises and lowers it; classic keeps its format lim
     CHECK(contains(read_malm(c, Limits{~std::size_t{0}}).error(), "exceeds the classic limit"));
 }
 
+TEST_CASE("reader cap: Limits raises and lowers it; classic keeps its format limit") {
+    for (const Codec codec : {Codec::ZstdPacked, Codec::Zstd}) {
+        CAPTURE(static_cast<int>(codec));
+        check_limits(nop_malm(5'000'000, true, codec));
+    }
+}
+
 TEST_CASE("garbage frames claiming huge sizes fail cleanly and cheaply") {
-    // Header claims ~6e9 cells (so a 2 GB frame); the cap is raised so the claim reaches zstd.
-    // The frame has a window descriptor (so it passes the header checks) and then only zeros.
+    // The header claims a 2 GB frame (codec 1: ~5.3e9 cells; codec 2: 2e9); the cap is raised so
+    // the claim reaches zstd. The frame has a window descriptor (so it passes the header checks)
+    // and then only zeros.
     const std::uint64_t content = 2'000'000'001ull / 3 * 3;
-    const std::uint64_t cells = content / 3 * 8;
     Bytes frame = {0x28, 0xb5, 0x2f, 0xfd, 0xC0, 0x40};
     for (int i = 0; i < 8; ++i) {
         frame.push_back(static_cast<std::uint8_t>(content >> (8 * i)));
     }
-    for (const bool bad_block : {false, true}) {
-        Bytes f = frame;
-        if (bad_block) {
-            // One last "compressed" block (type 2) of 100 garbage bytes: the frame is well formed
-            // as far as zstd can tell without decoding, but decoding fails in the first block.
-            const std::uint32_t h = (100u << 3) | (2u << 1) | 1u;
-            f.insert(f.end(), {static_cast<std::uint8_t>(h), static_cast<std::uint8_t>(h >> 8),
-                               static_cast<std::uint8_t>(h >> 16)});
-            f.resize(f.size() + 100, 0xA5);
-        } else {
-            f.resize(64 * 1024);
-        }
-        Bytes b(kHeaderSize, 0);
-        std::copy(kMagic.begin(), kMagic.end(), b.begin());
-        b[4] = 1;
-        b[8] = 1;
-        put_u64(b, 16, cells);
-        put_u64(b, 24, f.size());
-        b.insert(b.end(), f.begin(), f.end());
+    for (const Codec codec : {Codec::ZstdPacked, Codec::Zstd}) {
+        const std::uint64_t cells = codec == Codec::Zstd ? content : content / 3 * 8;
+        for (const bool bad_block : {false, true}) {
+            CAPTURE(static_cast<int>(codec));
+            CAPTURE(bad_block);
+            Bytes f = frame;
+            if (bad_block) {
+                // One last "compressed" block (type 2) of 100 garbage bytes: the frame is well
+                // formed as far as zstd can tell without decoding, but decoding fails in the first
+                // block.
+                const std::uint32_t h = (100u << 3) | (2u << 1) | 1u;
+                f.insert(f.end(), {static_cast<std::uint8_t>(h), static_cast<std::uint8_t>(h >> 8),
+                                   static_cast<std::uint8_t>(h >> 16)});
+                f.resize(f.size() + 100, 0xA5);
+            } else {
+                f.resize(64 * 1024);
+            }
+            Bytes b(kHeaderSize, 0);
+            std::copy(kMagic.begin(), kMagic.end(), b.begin());
+            b[4] = 1;
+            b[8] = static_cast<std::uint8_t>(codec);
+            put_u64(b, 16, cells);
+            put_u64(b, 24, f.size());
+            b.insert(b.end(), f.begin(), f.end());
 
-        struct rusage before{};
-        getrusage(RUSAGE_SELF, &before);
-        const auto r = read_malm(b, Limits{~std::size_t{0}});
-        struct rusage after{};
-        getrusage(RUSAGE_SELF, &after);
-        REQUIRE_FALSE(r.has_value());
-        CHECK_MESSAGE(contains(r.error(), "zstd"), r.error());
-        // Peak RSS grows by far less than the claimed 2 GB (ru_maxrss is in KiB).
-        CHECK(after.ru_maxrss - before.ru_maxrss < 64 * 1024);
-        // And with the default cap it is rejected without touching zstd at all.
-        CHECK(contains(error_of(b), "above the limit"));
+            struct rusage before{};
+            getrusage(RUSAGE_SELF, &before);
+            const auto r = read_malm(b, Limits{~std::size_t{0}});
+            struct rusage after{};
+            getrusage(RUSAGE_SELF, &after);
+            REQUIRE_FALSE(r.has_value());
+            CHECK_MESSAGE(contains(r.error(), "zstd"), r.error());
+            // Peak RSS grows by far less than the claimed 2 GB (ru_maxrss is in KiB).
+            CHECK(after.ru_maxrss - before.ru_maxrss < 64 * 1024);
+            // And with the default cap it is rejected without touching zstd at all.
+            CHECK(contains(error_of(b), "above the limit"));
+        }
     }
 }
 
