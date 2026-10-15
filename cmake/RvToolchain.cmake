@@ -46,3 +46,16 @@ if(MALM_RV_RUSTC)
         endif()
     endif()
 endif()
+
+# Zig (docs/rv.md 6): zig 0.17, whose standard library the Zig runtime is written against, for the
+# Zig tests. Sets MALM_RV_ZIG_OK if it is that version.
+find_program(MALM_RV_ZIG NAMES zig)
+set(MALM_RV_ZIG_OK FALSE)
+if(MALM_RV_ZIG)
+    execute_process(COMMAND "${MALM_RV_ZIG}" version
+        RESULT_VARIABLE zig_rc OUTPUT_VARIABLE zig_version ERROR_QUIET
+        OUTPUT_STRIP_TRAILING_WHITESPACE)
+    if(zig_rc EQUAL 0 AND zig_version MATCHES "^0\\.17\\.")
+        set(MALM_RV_ZIG_OK TRUE)
+    endif()
+endif()

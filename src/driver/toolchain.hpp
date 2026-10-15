@@ -1,6 +1,7 @@
 // The RISC-V toolchains behind `malm build` (docs/rv.md 6): for C and C++ clang with the riscv32
 // target compiles the program, ld.lld links it with a runtime built into malm (runtime_files.hpp);
-// for Rust rustc compiles and links it with the runtime crate, also built into malm.
+// for Rust rustc compiles and links it with the runtime crate, for Zig zig with the Zig runtime,
+// both also built into malm.
 #pragma once
 
 #include <cstdint>
@@ -26,10 +27,12 @@ struct Toolchain {
 // missing.
 core::Result<Toolchain, std::string> find_toolchain(std::string_view cc, std::string_view path_env);
 
-// A C source ends in .c, a C++ source in .cpp, .cc or .cxx, a Rust source in .rs.
+// A C source ends in .c, a C++ source in .cpp, .cc or .cxx, a Rust source in .rs, a Zig source
+// in .zig.
 bool is_c_source(std::string_view path);
 bool is_cxx_source(std::string_view path);
 bool is_rust_source(std::string_view path);
+bool is_zig_source(std::string_view path);
 
 // Whether the compiler arguments turn C++ exceptions on: the last of -fexceptions and
 // -fno-exceptions is -fexceptions.
@@ -70,5 +73,27 @@ core::Result<std::string, std::string> find_rustc(std::string_view rustc,
 core::Result<std::vector<std::uint8_t>, std::string>
 compile_rust(const std::string& rustc, std::string_view source,
              std::span<const std::string_view> args, std::ostream& err);
+
+// The Zig target and CPU malm builds for, and the Zig release whose standard library the Zig
+// runtime is written against (major.minor).
+inline constexpr std::string_view kZigTarget = "riscv32-freestanding-none";
+inline constexpr std::string_view kZigCpu = "generic_rv32+m";
+inline constexpr std::string_view kZigVersion = "0.17";
+
+// Finds the Zig compiler as find_rustc finds rustc: `zig` is `--zig`, empty means zig in PATH.
+core::Result<std::string, std::string> find_zig(std::string_view zig, std::string_view path_env);
+
+// Compiles the Zig program whose root is `source` (the files it imports come from there) for
+// kZigTarget and links an RV32IM ELF executable with `zig build-exe`, in a temporary directory.
+// The Zig runtime (rv/runtime/zig) is the root module: start.zig imports `source` as the module
+// `program` and calls its `main`; `program` can import the module `malm` (malm.zig). `args` are
+// the user's arguments (`--` in `malm build`): they come after the defaults (`-O ReleaseSafe`) and
+// before the modules, so they apply to all of them; `-Wl,--defsym=<symbol>=<value>` defines a
+// symbol in the linker script (zig has no other way to pass linker arguments, so any other
+// `-Wl,` is an error). The output, the error and the failures are as compile_c's; it also fails
+// if `zig` is not Zig kZigVersion.
+core::Result<std::vector<std::uint8_t>, std::string>
+compile_zig(const std::string& zig, std::string_view source, std::span<const std::string_view> args,
+            std::ostream& err);
 
 } // namespace malm

@@ -1,6 +1,6 @@
-// malm build (issues #26, #28, #29, #34): the emu-mode image builder and aot mode, an RV32IM ELF
-// into a pure .malm; its options and how it finds the C and Rust toolchains (toolchain_test.cpp
-// compiles with the real ones).
+// malm build (issues #26, #28, #29, #34, #35): the emu-mode image builder and aot mode, an RV32IM
+// ELF into a pure .malm; its options and how it finds the C, Rust and Zig toolchains
+// (toolchain_test.cpp compiles with the real ones).
 
 #include <doctest/doctest.h>
 #include <sys/stat.h>
@@ -165,6 +165,12 @@ TEST_CASE("build: errors") {
              {"build", "--rustc", "rustc", "-o", out, elf},
              {"build", "--cc", "clang", "-o", out, "a.rs"},
              {"build", "--libc", "picolibc", "-o", out, "a.rs"},
+             {"build", "-o", out, "a.zig", "b.zig"}, // one root
+             {"build", "-o", out, "a.zig", "b.rs"},
+             {"build", "--zig"},
+             {"build", "--zig", "zig", "-o", out, "a.rs"},
+             {"build", "--rustc", "rustc", "-o", out, "a.zig"},
+             {"build", "--cc", "clang", "-o", out, "a.zig"},
          }) {
         const Result r = run(args);
         CHECK(r.code == 2);
@@ -179,8 +185,8 @@ TEST_CASE("build: errors") {
     r = run({"build", "-o", out, text});
     CHECK(r.code == 1);
     CHECK(r.err == "malm build: " + text +
-                       ": neither a C, C++ or Rust source (.c, .cpp, .cc, .cxx, .rs) nor an ELF "
-                       "executable\n");
+                       ": neither a C, C++, Rust or Zig source (.c, .cpp, .cc, .cxx, .rs, .zig) "
+                       "nor an ELF executable\n");
 
     // Before anything is compiled.
     r = run({"build", "--mode", "aot", "-o", out, "a.cpp", "--", "-fexceptions"});
@@ -333,5 +339,38 @@ TEST_CASE("build: finding the Rust toolchain") {
     CHECK(r.err == "error: edition 2024 is unstable\nmalm build: the Rust runtime does not "
                    "compile with " +
                        rustc + " (malm build needs Rust 1.85 or newer)\n");
+    CHECK(!std::filesystem::exists(out));
+}
+
+TEST_CASE("build: finding the Zig toolchain") {
+    const TempDir dir;
+    const std::string empty = (dir.path / "empty").string();
+    std::filesystem::create_directories(empty);
+    const std::string src = dir.write("main.zig", {});
+    const std::string out = (dir.path / "main.malm").string();
+
+    Result r = build_with({"-o", out, src}, empty);
+    CHECK(r.code == 1);
+    CHECK(r.err == "malm build: no Zig compiler: zig is not in PATH (install Zig 0.17, or name "
+                   "the compiler with --zig)\n");
+
+    r = build_with({"--zig", "/nonexistent/zig", "-o", out, src}, empty);
+    CHECK(r.code == 1);
+    CHECK(r.err == "malm build: compiler '/nonexistent/zig' not found or not executable\n");
+
+    // Another Zig release, whose standard library the runtime may not compile with.
+    std::filesystem::create_directories(dir.path / "bin");
+    const std::string zig = dir.script("bin/zig", "echo 0.16.0");
+    const std::string bin = (dir.path / "bin").string();
+    r = build_with({"-o", out, src}, empty + ":" + bin);
+    CHECK(r.code == 1);
+    CHECK(r.err == "malm build: " + zig + " is Zig 0.16.0, the Zig runtime needs Zig 0.17\n");
+
+    // Linker arguments are checked before zig compiles anything.
+    dir.script("bin/zig", "if [ \"$1\" = version ]; then echo 0.17.1; else exit 1; fi");
+    r = build_with({"-o", out, src, "--", "-Wl,-Map=x"}, bin);
+    CHECK(r.code == 1);
+    CHECK(r.err == "malm build: unsupported linker argument '-Map=x' for Zig (only "
+                   "--defsym=<symbol>=<value>)\n");
     CHECK(!std::filesystem::exists(out));
 }

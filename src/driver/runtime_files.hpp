@@ -7,13 +7,13 @@
 namespace malm {
 
 struct RuntimeFile {
-    // Relative to rv/runtime: crt0.S, link.ld, include/*.h, src/*.c, rust/*.rs.
+    // Relative to rv/runtime: crt0.S, link.ld, include/*.h, src/*.c, rust/*.rs, zig/*.zig.
     std::string_view path;
     std::string_view text;
 };
 
 // Every file of the runtime, in a fixed order: crt0.S, link.ld, the headers, the libc sources, the
-// Rust runtime crate.
+// Rust runtime crate, the Zig runtime.
 // Generated at build time (cmake/EmbedRuntime.cmake).
 std::vector<RuntimeFile> runtime_files();
 

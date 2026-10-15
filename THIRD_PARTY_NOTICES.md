@@ -38,6 +38,15 @@ into a compiled program.
 (or Apache-2.0's notice conditions, if you choose that one) asks for the Rust project's copyright
 notice with it, as for any Rust binary.
 
+## Linked into guest programs built from Zig (from the user's Zig installation, not part of `malm`)
+
+| Component | Licence | Notes |
+|---|---|---|
+| Zig's standard library and compiler-rt | MIT | compiled with the program by zig; the parts a program uses are linked into it |
+
+**If you distribute a program built from Zig**, the MIT licence asks for Zig's copyright notice
+with it.
+
 ## Used only for building and testing (not part of any binary we ship)
 
 | Component | Licence | Location |

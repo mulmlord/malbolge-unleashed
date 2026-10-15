@@ -1,7 +1,8 @@
 # The RISC-V loader and reference emulator (issue #23), runtime (issue #24) and `malm build`
 # (issue #26), docs/rv.md. Unit tests need no RISC-V toolchain; the riscv-tests suite and the C test
 # programs are built with clang (riscv32 target) and ld.lld when they are found (MALM_RV_TESTS), the
-# Rust ones with rustc and its riscv32im target (MALM_RUST_TESTS).
+# Rust ones with rustc and its riscv32im target (MALM_RUST_TESTS), the Zig ones with zig 0.17
+# (MALM_ZIG_TESTS).
 malm_add_test(NAME rv_test LABEL fast SOURCES elf_test.cpp machine_test.cpp rvref_test.cpp
     build_test.cpp sysroot_test.cpp LIBS malm_rv malm_driver)
 # rv-emu (issue #25): single instructions against the reference emulator. A debug build spends
@@ -176,15 +177,38 @@ if(rust_ok)
     set(rv_rustc "${MALM_RV_RUSTC}")
 endif()
 
+# Zig (issue #35): zig 0.17 (cmake/RvToolchain.cmake).
+set(MALM_ZIG_TESTS AUTO CACHE STRING
+    "Build and run the Zig test programs: AUTO (if zig 0.17 is found), ON, OFF")
+set_property(CACHE MALM_ZIG_TESTS PROPERTY STRINGS AUTO ON OFF)
+set(zig_ok FALSE)
+if(NOT MALM_ZIG_TESTS STREQUAL "OFF")
+    if(MALM_RV_ZIG_OK)
+        set(zig_ok TRUE)
+    else()
+        set(msg "Zig tests need zig 0.17 (found: MALM_RV_ZIG=${MALM_RV_ZIG})")
+        if(MALM_ZIG_TESTS STREQUAL "ON")
+            message(FATAL_ERROR "${msg}")
+        endif()
+        message(WARNING "${msg}; skipping them (set MALM_ZIG_TESTS=OFF to silence this)")
+    endif()
+endif()
+set(rv_zig "")
+if(zig_ok)
+    set(rv_zig "${MALM_RV_ZIG}")
+endif()
+
 # malm build's C toolchain (issue #28): the runtime built into malm, compiled with this clang; and
-# its Rust toolchain (issue #34) with this rustc, if any.
+# its Rust and Zig toolchains (issues #34, #35) with this rustc and zig, if any.
 malm_add_test(NAME rv_toolchain_test LABEL fast SOURCES toolchain_test.cpp
     LIBS malm_rv malm_driver TIMEOUT 300)
 target_compile_definitions(rv_toolchain_test PRIVATE MALM_RV_CC="${MALM_RV_CC}"
     MALM_RV_RUSTC="${rv_rustc}"
+    MALM_RV_ZIG="${rv_zig}"
     MALM_EXAMPLES_DIR="${PROJECT_SOURCE_DIR}/examples/c"
     MALM_CXX_EXAMPLES_DIR="${PROJECT_SOURCE_DIR}/examples/cpp"
     MALM_RUST_EXAMPLES_DIR="${PROJECT_SOURCE_DIR}/examples/rust"
+    MALM_ZIG_EXAMPLES_DIR="${PROJECT_SOURCE_DIR}/examples/zig"
     MALM_RV_PROGRAMS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/programs")
 
 # Programs on the runtime: the C examples and the runtime's self-check.
@@ -283,6 +307,49 @@ if(rust_ok)
     set(rv_rust_cases example_hello example_cat sort checks panic error exit)
 endif()
 
+# Zig (issue #35): the examples and the runtime's self-check, as malm build compiles them (start.zig
+# the root module, the program and malm.zig the others). zig has no --defsym: a linker script that
+# includes the runtime's defines the symbols (an 8K heap reserve: sort's code is 36 KB, more would
+# leave it no heap in 64K).
+set(rv_zig_cases "")
+if(zig_ok)
+    set(zig_rt "${rt_dir}/zig")
+    set(zig_dump_ld "${rv_elf_dir}/zig/dump.ld")
+    file(WRITE "${zig_dump_ld}" "INCLUDE \"${rv_ld_script}\"\n__malm_dump_regs = 1;\n")
+    file(WRITE "${rv_elf_dir}/zig/dump_heap.ld"
+        "INCLUDE \"${rv_ld_script}\"\n__malm_dump_regs = 1;\n__stack_size = 8192;\n")
+
+    # zig_elf(<name> <source> [SCRIPT <linker script>]): compile and link one Zig test ELF.
+    function(zig_elf name src)
+        cmake_parse_arguments(ARG "" "SCRIPT" "" ${ARGN})
+        if(NOT ARG_SCRIPT)
+            set(ARG_SCRIPT "${rv_ld_script}")
+        endif()
+        set(elf "${rv_elf_dir}/${name}.elf")
+        add_custom_command(OUTPUT "${elf}"
+            COMMAND "${MALM_RV_ZIG}" build-exe -target riscv32-freestanding-none
+                -mcpu=generic_rv32+m -O ReleaseSafe --cache-dir "${rv_elf_dir}/zig/cache"
+                --name ${name} -T "${ARG_SCRIPT}" "-femit-bin=${elf}"
+                --dep malm --dep program "-Mroot=${zig_rt}/start.zig"
+                --dep malm "-Mprogram=${src}" "-Mmalm=${zig_rt}/malm.zig"
+            DEPENDS "${src}" "${zig_rt}/start.zig" "${zig_rt}/malm.zig" "${rv_ld_script}"
+                "${ARG_SCRIPT}"
+            COMMENT "Building RISC-V test ${name}"
+            VERBATIM)
+        set(rv_elfs ${rv_elfs} "${elf}" PARENT_SCOPE)
+    endfunction()
+
+    foreach(prog hello cat sort)
+        zig_elf(zig_example_${prog} "${PROJECT_SOURCE_DIR}/examples/zig/${prog}.zig")
+        zig_elf(dump_zig_example_${prog} "${PROJECT_SOURCE_DIR}/examples/zig/${prog}.zig"
+            SCRIPT "${rv_elf_dir}/zig/dump_heap.ld")
+    endforeach()
+    zig_elf(zig_test "${CMAKE_CURRENT_SOURCE_DIR}/programs/zig_test.zig")
+    zig_elf(dump_zig_test "${CMAKE_CURRENT_SOURCE_DIR}/programs/zig_test.zig"
+        SCRIPT "${zig_dump_ld}")
+    set(rv_zig_cases example_hello example_cat sort checks panic error exit)
+endif()
+
 add_custom_target(rv_test_elfs ALL DEPENDS ${rv_elfs})
 
 foreach(name IN LISTS rv_suite_tests)
@@ -296,7 +363,7 @@ foreach(case hello cat trace regs example_hello example_cat fizzbuzz wc sort run
             "${rv_elf_dir}" "${PROJECT_SOURCE_DIR}/tests/programs" ${case})
     set_tests_properties(rvref_program_${case} PROPERTIES LABELS fast TIMEOUT 60)
 endforeach()
-foreach(libc picolibc cxx cxx_eh rust)
+foreach(libc picolibc cxx cxx_eh rust zig)
     foreach(case IN LISTS rv_${libc}_cases)
         add_test(NAME rvref_${libc}_${case}
             COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/rvref_pipe_test.sh" $<TARGET_FILE:malm>
@@ -335,8 +402,8 @@ foreach(spec
     set_tests_properties(rvdiff_program_${case} PROPERTIES LABELS ${label} TIMEOUT 7200)
 endforeach()
 # C++ (issue #33): the examples and libc++'s self-check (its abort too); with exceptions in emu
-# mode only. Rust (issue #34): the examples and the runtime's self-check, also its panic, error and
-# exit. The hellos are fast, the rest slow.
+# mode only. Rust and Zig (issues #34, #35): the examples and the runtime's self-check, also its
+# panic, error and exit. The hellos are fast, the rest slow.
 set(rv_diff_specs "")
 if(TARGET picolibc_sysroot)
     list(APPEND rv_diff_specs
@@ -350,7 +417,14 @@ if(rv_rust_cases)
         "rust_hello|dump_rust_example_hello|64K|/dev/null"
         "rust_cat|dump_rust_example_cat|64K|${rv_inputs}/hi.in|${PROJECT_SOURCE_DIR}/tests/programs/cat5_input.bin|/dev/null"
         "rust_sort|dump_rust_example_sort|64K|${rv_inputs}/sort.in"
-        "rust_self_check|dump_rust_test|256K|/dev/null|${rv_inputs}/rust_panic.in|${rv_inputs}/rust_error.in|${rv_inputs}/rust_exit.in")
+        "rust_self_check|dump_rust_test|256K|/dev/null|${rv_inputs}/panic.in|${rv_inputs}/error.in|${rv_inputs}/exit.in")
+endif()
+if(rv_zig_cases)
+    list(APPEND rv_diff_specs
+        "zig_hello|dump_zig_example_hello|64K|/dev/null"
+        "zig_cat|dump_zig_example_cat|64K|${rv_inputs}/hi.in|${PROJECT_SOURCE_DIR}/tests/programs/cat5_input.bin|/dev/null"
+        "zig_sort|dump_zig_example_sort|64K|${rv_inputs}/sort.in"
+        "zig_self_check|dump_zig_test|256K|/dev/null|${rv_inputs}/panic.in|${rv_inputs}/error.in|${rv_inputs}/exit.in")
 endif()
 foreach(spec IN LISTS rv_diff_specs)
     string(REPLACE "|" ";" fields "${spec}")
@@ -433,6 +507,27 @@ if(rv_rust_cases)
                 COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/build_pipe_test.sh" $<TARGET_FILE:malm>
                     "${MALM_RV_RUSTC}" "${PROJECT_SOURCE_DIR}/examples/rust"
                     "${PROJECT_SOURCE_DIR}/tests/programs" ${case} ${mode} rust)
+            set_tests_properties(${name} PROPERTIES LABELS ${label} TIMEOUT 1800)
+        endforeach()
+    endforeach()
+endif()
+# Zig (issue #35), the M5 criterion for Zig: hello and cat, and sort, in emu and aot mode; cat in
+# emu mode is fast.
+if(rv_zig_cases)
+    foreach(case hello cat sort)
+        foreach(mode emu aot)
+            set(label slow)
+            if(case STREQUAL "cat" AND mode STREQUAL "emu")
+                set(label fast)
+            endif()
+            set(name build_zig_${case})
+            if(mode STREQUAL "aot")
+                set(name build_zig_aot_${case})
+            endif()
+            add_test(NAME ${name}
+                COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/build_pipe_test.sh" $<TARGET_FILE:malm>
+                    "${MALM_RV_ZIG}" "${PROJECT_SOURCE_DIR}/examples/zig"
+                    "${PROJECT_SOURCE_DIR}/tests/programs" ${case} ${mode} zig)
             set_tests_properties(${name} PROPERTIES LABELS ${label} TIMEOUT 1800)
         endforeach()
     endforeach()

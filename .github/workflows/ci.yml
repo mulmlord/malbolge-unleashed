@@ -31,6 +31,13 @@ jobs:
       # The runner's rustup and stable Rust, with the target of malm build's Rust programs.
       - name: Install the Rust target
         run: rustup target add riscv32im-unknown-none-elf && rustc --version
+      # Zig 0.17, pinned: the Zig runtime is written against its standard library.
+      - name: Install Zig
+        run: |
+          curl -sSfL https://ziglang.org/download/0.17.0/zig-x86_64-linux-0.17.0.tar.xz -o "$RUNNER_TEMP/zig.tar.xz"
+          echo "1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026  $RUNNER_TEMP/zig.tar.xz" | sha256sum -c
+          mkdir -p "$HOME/zig" && tar -xJf "$RUNNER_TEMP/zig.tar.xz" -C "$HOME/zig" --strip-components=1
+          echo "$HOME/zig" >> "$GITHUB_PATH"
       # One compiler cache per job; every run saves its own entry and restores the newest one.
       - uses: actions/cache@v6
         with:
@@ -40,13 +47,13 @@ jobs:
       - name: Reset ccache statistics
         run: ccache --zero-stats
       - name: Configure
-        run: cmake --preset debug -DMALM_RV_TESTS=ON -DMALM_PICOLIBC=ON -DMALM_RUST_TESTS=ON
+        run: cmake --preset debug -DMALM_RV_TESTS=ON -DMALM_PICOLIBC=ON -DMALM_RUST_TESTS=ON -DMALM_ZIG_TESTS=ON
       - name: Build
         run: cmake --build --preset debug
       - name: Test
         run: ctest --preset debug -L fast --no-tests=error
       - name: Configure (release)
-        run: cmake --preset release -DMALM_RV_TESTS=ON -DMALM_PICOLIBC=ON -DMALM_RUST_TESTS=ON
+        run: cmake --preset release -DMALM_RV_TESTS=ON -DMALM_PICOLIBC=ON -DMALM_RUST_TESTS=ON -DMALM_ZIG_TESTS=ON
       - name: Build (release)
         run: cmake --build --preset release
       - name: Test (release)

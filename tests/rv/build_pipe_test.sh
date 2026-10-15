@@ -1,11 +1,12 @@
 #!/bin/sh
-# `malm build` for C, C++ and Rust end to end (issues #28, #29, #32, #33, #34): an example from
-# examples/c, examples/cpp or examples/rust (<case>.c, <case>.cpp or <case>.rs) built in emu or aot
-# mode, with the minimal C library or picolibc, or as Rust, into a .malm and, with --exe, a native
-# executable; both run through real pipes and must give the expected stdout and exit status.
+# `malm build` for C, C++, Rust and Zig end to end (issues #28, #29, #32-#35): an example from
+# examples/c, examples/cpp, examples/rust or examples/zig (<case>.c, .cpp, .rs or .zig) built in
+# emu or aot mode, with the minimal C library or picolibc, or as Rust or Zig, into a .malm and, with
+# --exe, a native executable; both run through real pipes and must give the expected stdout and
+# exit status.
 # Usage: build_pipe_test.sh <malm> <compiler> <examples-dir> <programs-dir> <case> [emu|aot]
-#            [minimal|picolibc|rust]
-#   <compiler>  clang, or rustc for rust
+#            [minimal|picolibc|rust|zig]
+#   <compiler>  clang, or rustc for rust, zig for zig
 set -u
 malm=$1
 cc=$2
@@ -20,15 +21,18 @@ src=$examples/$case_.c
 if [ ! -e "$src" ]; then
     src=$examples/$case_.cpp
 fi
-if [ "$libc" = rust ]; then
-    src=$examples/$case_.rs
-fi
+case "$libc" in
+rust) src=$examples/$case_.rs ;;
+zig) src=$examples/$case_.zig ;;
+esac
 
 # build [compiler args...]: prog.malm and the executable prog. 64K of guest RAM keeps the builds
 # short.
 build() {
     if [ "$libc" = rust ]; then
         set -- --mode "$mode" --ram 64K --rustc "$cc" "$src" -- "$@"
+    elif [ "$libc" = zig ]; then
+        set -- --mode "$mode" --ram 64K --zig "$cc" "$src" -- "$@"
     else
         set -- --mode "$mode" --libc "$libc" --ram 64K --cc "$cc" "$src" -- "$@"
     fi
@@ -84,8 +88,12 @@ fizzbuzz)
     ;;
 sort)
     # The heap stays __stack_size (default 64K) below the stack, which would leave sort no heap in
-    # 64K of guest RAM.
-    build -Wl,--defsym=__stack_size=16384
+    # 64K of guest RAM; Zig's (ReleaseSafe) code is 36 KB, which leaves room only for 8K.
+    if [ "$libc" = zig ]; then
+        build -Wl,--defsym=__stack_size=8192
+    else
+        build -Wl,--defsym=__stack_size=16384
+    fi
     printf 'pear\nApple\n\napple\n\303\244\npear\nfig' > "$tmp/in"
     LC_ALL=C sort < "$tmp/in" > "$tmp/want"
     check "$tmp/in" "$tmp/want" 0

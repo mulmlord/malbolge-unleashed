@@ -1,7 +1,7 @@
-// malm build's C, C++ and Rust toolchains (issues #28, #32, #33, #34): compile_c with the real
-// clang and ld.lld and the runtime built into malm, compile_rust with the real rustc and the Rust
-// runtime, the ELF run on the reference emulator. Fast, also in the debug build: no emulator is
-// compiled.
+// malm build's C, C++, Rust and Zig toolchains (issues #28, #32-#35): compile_c with the real
+// clang and ld.lld and the runtime built into malm, compile_rust and compile_zig with the real
+// rustc and zig and their runtimes, the ELF run on the reference emulator. Fast, also in the debug
+// build: no emulator is compiled.
 
 #include <doctest/doctest.h>
 #include <unistd.h>
@@ -361,6 +361,102 @@ fn main() { unsafe { f() } }
     CHECK(c.error == "compilation failed");
 }
 
+namespace {
+
+Compiled compile_zig(std::string_view source, std::vector<std::string_view> args = {}) {
+    std::ostringstream diags;
+    auto elf = malm::compile_zig(MALM_RV_ZIG, source, args, diags);
+    Compiled c;
+    c.ok = elf.has_value();
+    c.diags = diags.str();
+    if (c.ok) {
+        c.elf = std::move(*elf);
+    } else {
+        c.error = elf.error();
+    }
+    return c;
+}
+
+} // namespace
+
+TEST_CASE("toolchain: Zig") {
+    if (std::string_view(MALM_RV_ZIG).empty()) {
+        MESSAGE("no zig 0.17 (MALM_ZIG_TESTS)");
+        return;
+    }
+    const Compiled hello = compile_zig(MALM_ZIG_EXAMPLES_DIR "/hello.zig");
+    INFO(hello.diags);
+    REQUIRE(hello.ok);
+    CHECK(hello.diags.empty());
+    rvtest::StringIo io;
+    malm::rv::Stop stop = run(hello.elf, io);
+    CHECK(stop.exit_code == 0);
+    CHECK(io.out == "Hello, world!\n");
+
+    const Compiled sort = compile_zig(MALM_ZIG_EXAMPLES_DIR "/sort.zig");
+    REQUIRE(sort.ok);
+    io = {};
+    io.in = "pear\napple\n\nfig";
+    stop = run(sort.elf, io);
+    CHECK(stop.exit_code == 0);
+    CHECK(io.out == "\napple\nfig\npear\n");
+
+    const Compiled self = compile_zig(MALM_RV_PROGRAMS_DIR "/zig_test.zig");
+    INFO(self.diags);
+    REQUIRE(self.ok);
+    io = {};
+    stop = run(self.elf, io);
+    INFO(io.out);
+    CHECK(stop.exit_code == 42);
+    CHECK(io.out.starts_with("zig_test: "));
+
+    // Files imported next to the root, zig arguments for every module, symbols from --defsym.
+    const TempDir dir;
+    const std::string main_zig = dir.write("main.zig", R"(const malm = @import("malm");
+const twice = @import("twice.zig");
+extern const answer: u8;
+pub fn main() u8 {
+    malm.print("{d} {s}\n", .{ twice.twice(21), @tagName(@import("builtin").mode) });
+    return @intCast(@intFromPtr(&answer));
+}
+)");
+    dir.write("twice.zig", "pub fn twice(x: u32) u32 {\n    return 2 * x;\n}\n");
+    Compiled c = compile_zig(main_zig, {"-O", "ReleaseSmall", "-Wl,--defsym=answer=42"});
+    INFO(c.diags);
+    REQUIRE(c.ok);
+    io = {};
+    stop = run(c.elf, io);
+    CHECK(io.out == "42 small\n"); // builtin.mode, as -O ReleaseSmall set it
+    CHECK(stop.exit_code == 42);
+
+    // Errors: the program's, the linker's, linker arguments zig cannot pass.
+    const std::string bad = dir.write("bad.zig", "pub fn main() void {\n    x();\n}\n");
+    c = compile_zig(bad);
+    CHECK(!c.ok);
+    CHECK(c.error == "compilation failed");
+    CHECK(c.diags.find("bad.zig:2:") != std::string::npos);
+
+    const std::string undef = dir.write("undef.zig", R"(extern fn f() void;
+pub fn main() void {
+    f();
+}
+)");
+    c = compile_zig(undef);
+    CHECK(!c.ok);
+    CHECK(c.error == "linking failed");
+    CHECK(c.diags.find("undefined symbol: f") != std::string::npos);
+
+    for (const std::string_view arg : {"-Wl,--gc-sections", "-Wl,--defsym=x", "-Wl,--defsym==1"}) {
+        c = compile_zig(main_zig, {arg});
+        CHECK(!c.ok);
+        CHECK(c.error.starts_with("unsupported linker argument '"));
+    }
+
+    c = compile_zig((dir.path / "missing.zig").string());
+    CHECK(!c.ok);
+    CHECK(c.error == "compilation failed");
+}
+
 TEST_CASE("toolchain: source kinds and exceptions") {
     CHECK(malm::is_c_source("a.c"));
     CHECK(!malm::is_c_source(".c"));
@@ -374,6 +470,9 @@ TEST_CASE("toolchain: source kinds and exceptions") {
     CHECK(malm::is_rust_source("src/main.rs"));
     CHECK(!malm::is_rust_source(".rs"));
     CHECK(!malm::is_rust_source("a.rlib"));
+    CHECK(malm::is_zig_source("src/main.zig"));
+    CHECK(!malm::is_zig_source(".zig"));
+    CHECK(!malm::is_zig_source("build.zig.zon"));
     using Args = std::vector<std::string_view>;
     CHECK(!malm::wants_exceptions(Args{}));
     CHECK(malm::wants_exceptions(Args{"-O1", "-fexceptions"}));
